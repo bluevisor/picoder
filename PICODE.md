@@ -62,12 +62,14 @@ brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
 rustup target add arm-unknown-linux-musleabihf
 
 ./build.sh           # build target/arm-unknown-linux-musleabihf/release/picode
-./build.sh deploy    # build + install to ALL Pis (Pi Zero + Pi 5) at ~/.local/bin/picode
-PI=user@host ./build.sh deploy   # install to a single host instead
+./build.sh deploy    # build + install to every host in PICODE_HOSTS at ~/.local/bin/picode
+PICODE_HOSTS="pi@a pi@b" ./build.sh deploy   # custom deploy targets
+PI=user@host ./build.sh deploy               # install to a single host instead
 ```
 
-`deploy` installs to every host in the `PIS` array in `build.sh` (the same
-static ARMv6 binary runs on both the Pi Zero W and the Pi 5).
+`deploy` installs to every host listed in the `PICODE_HOSTS` env var
+(space-separated `user@host`; defaults to the Pi Zero + Pi 5). `PI=user@host`
+overrides to a single host. The same static ARMv6 binary runs on both.
 
 `build.sh` sets the `ring` cross-compile env vars (`CC_/AR_/TARGET_CC`) and the
 linker comes from `.cargo/config.toml`. Output is a ~2.5MB fully static binary.

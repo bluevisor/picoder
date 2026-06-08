@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
 # picode build tool. Usage:
 #   ./build.sh           cross-compile for the Pi Zero W (ARMv6, static musl)
-#   ./build.sh deploy    build + install + sync source to ALL Pis (see PIS below)
+#   ./build.sh deploy    build + install + sync source to every host in PICODE_HOSTS
 #   ./build.sh pull      copy a Pi's ~/picode source back to the Mac (recover
 #                        on-device self-edits before rebuilding)
 #
-# By default `deploy` installs to every host in PIS (Pi Zero 216 + Pi 5 128).
-# Override with PI=user@host to target a single device, e.g.:
+# Deploy targets are configurable — no IPs are hardcoded in the logic:
+#   PICODE_HOSTS   space-separated list of user@host (default below)
+#   PI=user@host   target a single host (overrides PICODE_HOSTS, used by pull too)
+# Examples:
+#   PICODE_HOSTS="pi@10.1.2.3 pi@10.1.2.4" ./build.sh deploy
 #   PI=bluevisor@10.0.0.128 ./build.sh deploy
+# You can also export PICODE_HOSTS in your shell profile to set it permanently.
 set -eo pipefail
 
 TARGET=arm-unknown-linux-musleabihf
-# Default deploy targets (the same static ARMv6 binary runs on both). A single
-# PI=... override collapses this to one host for both deploy and pull.
-PIS=(bluevisor@10.0.0.216 bluevisor@10.0.0.128)
+CROSS=arm-unknown-linux-musleabihf
+CMD="${1:-build}"
+
+# Default deploy targets (the same static ARMv6 binary runs on both). Override
+# with PICODE_HOSTS, or PI=... for a single host.
+DEFAULT_HOSTS="bluevisor@10.0.0.216 bluevisor@10.0.0.128"
+read -r -a PIS <<<"${PICODE_HOSTS:-$DEFAULT_HOSTS}"
 if [[ -n "${PI:-}" ]]; then
   PIS=("$PI")
 fi
-# pull is inherently single-host: use PI if given, else the Pi 5 (primary dev box).
-PULL_PI="${PI:-bluevisor@10.0.0.128}"
-CROSS=arm-unknown-linux-musleabihf
-CMD="${1:-build}"
+if [[ ${#PIS[@]} -eq 0 ]]; then
+  echo "!! no deploy hosts — set PICODE_HOSTS or PI" >&2
+  exit 1
+fi
+# pull is inherently single-host: use PI if given, else the last configured host.
+PULL_PI="${PI:-${PIS[${#PIS[@]}-1]}}"
 
 cd "$(dirname "$0")"
 

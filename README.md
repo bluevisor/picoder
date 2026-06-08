@@ -39,13 +39,17 @@ brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
 rustup target add arm-unknown-linux-musleabihf
 
 ./build.sh                        # build only
-./build.sh deploy                 # build + install to all Pis in build.sh's PIS array
+./build.sh deploy                 # build + install to every host in PICODE_HOSTS
+PICODE_HOSTS="pi@host-a pi@host-b" ./build.sh deploy   # custom targets
 PI=user@host ./build.sh deploy    # build + install to a single host
 ./build.sh pull                   # pull on-device self-edits back to the Mac
 ```
 
-The same static ARMv6 binary runs on both the Pi Zero W and the Pi 5. Output
-lands at `~/.local/bin/picode` on each target.
+Deploy targets are configurable via the `PICODE_HOSTS` env var (space-separated
+`user@host` list) or `PI=user@host` for a single host — set `PICODE_HOSTS` in
+your shell profile to make it permanent. The same static ARMv6 binary runs on
+both the Pi Zero W and the Pi 5; output lands at `~/.local/bin/picode` on each
+target.
 
 ## Configuration
 
