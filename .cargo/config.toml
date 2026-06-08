@@ -1,0 +1,8 @@
+[target.arm-unknown-linux-musleabihf]
+linker = "arm-unknown-linux-musleabihf-gcc"
+
+# Raspberry Pi 5 (Cortex-A76) native build. Tunes codegen to the Pi 5's CPU and
+# favors speed over size (the Pi 5 has GBs of RAM, unlike the Zero W). Only
+# applies to the aarch64 target, so the ARMv6 cross-build above is unaffected.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=cortex-a76", "-C", "opt-level=3"]
