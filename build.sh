@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 # picode build tool. Usage:
 #   ./build.sh           cross-compile for the Pi Zero W (ARMv6, static musl)
-#   ./build.sh deploy    build + install on the Pi + sync source to ~/picode
-#   ./build.sh pull      copy the Pi's ~/picode source back to the Mac (recover
+#   ./build.sh deploy    build + install + sync source to ALL Pis (see PIS below)
+#   ./build.sh pull      copy a Pi's ~/picode source back to the Mac (recover
 #                        on-device self-edits before rebuilding)
+#
+# By default `deploy` installs to every host in PIS (Pi Zero 216 + Pi 5 128).
+# Override with PI=user@host to target a single device, e.g.:
+#   PI=bluevisor@10.0.0.128 ./build.sh deploy
 set -eo pipefail
 
 TARGET=arm-unknown-linux-musleabihf
-PI="${PI:-bluevisor@10.0.0.216}"
+# Default deploy targets (the same static ARMv6 binary runs on both). A single
+# PI=... override collapses this to one host for both deploy and pull.
+PIS=(bluevisor@10.0.0.216 bluevisor@10.0.0.128)
+if [[ -n "${PI:-}" ]]; then
+  PIS=("$PI")
+fi
+# pull is inherently single-host: use PI if given, else the Pi 5 (primary dev box).
+PULL_PI="${PI:-bluevisor@10.0.0.128}"
 CROSS=arm-unknown-linux-musleabihf
 CMD="${1:-build}"
 
@@ -17,8 +28,8 @@ cd "$(dirname "$0")"
 if [[ "$CMD" == "pull" ]]; then
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
-  echo ">> pulling $PI:~/picode -> $TMP ..."
-  ssh "$PI" 'cd ~/picode && tar czf - --exclude target --exclude ".git" .' \
+  echo ">> pulling $PULL_PI:~/picode -> $TMP ..."
+  ssh "$PULL_PI" 'cd ~/picode && tar czf - --exclude target --exclude ".git" .' \
     | tar xzf - -C "$TMP"
 
   # Program source we own; build.sh is handled separately (see below) to avoid
@@ -72,23 +83,25 @@ ls -lh "$BIN"
 file "$BIN"
 
 if [[ "$CMD" == "deploy" ]]; then
-  echo ">> deploying to $PI..."
-  scp -q "$BIN" "$PI:/tmp/picode.new"
-  ssh "$PI" '
-    set -e
-    mkdir -p ~/.local/bin
-    if [ -f ~/.local/bin/picode ] && ! [ -f ~/.local/bin/picode-py ]; then
-      cp ~/.local/bin/picode ~/.local/bin/picode-py
-      echo "   backed up Python picode -> picode-py"
-    fi
-    mv /tmp/picode.new ~/.local/bin/picode
-    chmod +x ~/.local/bin/picode
-    echo "   installed: $(~/.local/bin/picode --version)"
-  '
-  # Keep a self-editable source copy on the Pi in sync (~/picode).
-  echo ">> syncing source to $PI:~/picode..."
-  COPYFILE_DISABLE=1 tar czf - --exclude target --exclude .git \
-    Cargo.toml Cargo.lock .cargo build.sh PICODE.md src \
-    | ssh "$PI" 'mkdir -p ~/picode && tar xzf - -C ~/picode && find ~/picode -name "._*" -delete'
-  echo "   synced source"
+  for P in "${PIS[@]}"; do
+    echo ">> deploying to $P..."
+    scp -q "$BIN" "$P:/tmp/picode.new"
+    ssh "$P" '
+      set -e
+      mkdir -p ~/.local/bin
+      if [ -f ~/.local/bin/picode ] && ! [ -f ~/.local/bin/picode-py ]; then
+        cp ~/.local/bin/picode ~/.local/bin/picode-py
+        echo "   backed up Python picode -> picode-py"
+      fi
+      mv /tmp/picode.new ~/.local/bin/picode
+      chmod +x ~/.local/bin/picode
+      echo "   installed: $(~/.local/bin/picode --version)"
+    '
+    # Keep a self-editable source copy on the Pi in sync (~/picode).
+    echo ">> syncing source to $P:~/picode..."
+    COPYFILE_DISABLE=1 tar czf - --exclude target --exclude .git \
+      Cargo.toml Cargo.lock .cargo build.sh PICODE.md src \
+      | ssh "$P" 'mkdir -p ~/picode && tar xzf - -C ~/picode && find ~/picode -name "._*" -delete'
+    echo "   synced source"
+  done
 fi
