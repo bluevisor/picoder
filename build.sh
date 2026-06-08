@@ -14,12 +14,11 @@
 # You can also export PICODE_HOSTS in your shell profile to set it permanently.
 set -eo pipefail
 
-TARGET=arm-unknown-linux-musleabihf
-CROSS=arm-unknown-linux-musleabihf
 CMD="${1:-build}"
 
-# Default deploy targets (the same static ARMv6 binary runs on both). Override
-# with PICODE_HOSTS, or PI=... for a single host.
+# Default deploy targets. Each host gets the binary matching its architecture
+# (Pi Zero W = ARMv6, Pi 5 = aarch64). Override with PICODE_HOSTS, or PI=... for
+# a single host.
 DEFAULT_HOSTS="bluevisor@10.0.0.216 bluevisor@10.0.0.128"
 read -r -a PIS <<<"${PICODE_HOSTS:-$DEFAULT_HOSTS}"
 if [[ -n "${PI:-}" ]]; then
@@ -81,37 +80,77 @@ if [[ "$CMD" == "pull" ]]; then
 fi
 
 # ----------------------------------------------------------- build/deploy ----
-export CC_arm_unknown_linux_musleabihf=${CROSS}-gcc
-export AR_arm_unknown_linux_musleabihf=${CROSS}-ar
-export TARGET_CC=${CROSS}-gcc
+# Two targets: ARMv6 static musl for the Pi Zero W, and aarch64 static musl for
+# the Pi 5 (a 64-bit box — running the 32-bit ARMv6 binary under compat is
+# fragile and can segfault, so it gets a native build).
+TARGET_ARMV6=arm-unknown-linux-musleabihf
+TARGET_ARM64=aarch64-unknown-linux-musl
 
-echo ">> building $TARGET (release)..."
-cargo build --release --target "$TARGET"
+# Map a remote `uname -m` to the Rust target triple we deploy there.
+target_for_arch() {
+  case "$1" in
+    aarch64|arm64)      echo "$TARGET_ARM64" ;;
+    armv6l|armv7l|arm)  echo "$TARGET_ARMV6" ;;
+    *)                  echo "" ;;
+  esac
+}
 
-BIN="target/$TARGET/release/picode"
-ls -lh "$BIN"
-file "$BIN"
+# Build one target (idempotent — cargo no-ops if already up to date).
+build_target() {
+  local t="$1"
+  echo ">> building $t (release)..."
+  case "$t" in
+    "$TARGET_ARMV6")
+      CC_arm_unknown_linux_musleabihf=${TARGET_ARMV6}-gcc \
+      AR_arm_unknown_linux_musleabihf=${TARGET_ARMV6}-ar \
+      TARGET_CC=${TARGET_ARMV6}-gcc \
+        cargo build --release --target "$t" ;;
+    "$TARGET_ARM64")
+      CC_aarch64_unknown_linux_musl=${TARGET_ARM64}-gcc \
+      AR_aarch64_unknown_linux_musl=${TARGET_ARM64}-ar \
+      TARGET_CC=${TARGET_ARM64}-gcc \
+        cargo build --release --target "$t" ;;
+    *) echo "!! unknown target $t" >&2; return 1 ;;
+  esac
+}
 
-if [[ "$CMD" == "deploy" ]]; then
-  for P in "${PIS[@]}"; do
-    echo ">> deploying to $P..."
-    scp -q "$BIN" "$P:/tmp/picode.new"
-    ssh "$P" '
-      set -e
-      mkdir -p ~/.local/bin
-      if [ -f ~/.local/bin/picode ] && ! [ -f ~/.local/bin/picode-py ]; then
-        cp ~/.local/bin/picode ~/.local/bin/picode-py
-        echo "   backed up Python picode -> picode-py"
-      fi
-      mv /tmp/picode.new ~/.local/bin/picode
-      chmod +x ~/.local/bin/picode
-      echo "   installed: $(~/.local/bin/picode --version)"
-    '
-    # Keep a self-editable source copy on the Pi in sync (~/picode).
-    echo ">> syncing source to $P:~/picode..."
-    COPYFILE_DISABLE=1 tar czf - --exclude target --exclude .git \
-      Cargo.toml Cargo.lock .cargo build.sh PICODE.md src \
-      | ssh "$P" 'mkdir -p ~/picode && tar xzf - -C ~/picode && find ~/picode -name "._*" -delete'
-    echo "   synced source"
+if [[ "$CMD" != "deploy" ]]; then
+  # Plain build: produce both binaries.
+  build_target "$TARGET_ARMV6"
+  build_target "$TARGET_ARM64"
+  for t in "$TARGET_ARMV6" "$TARGET_ARM64"; do
+    file "target/$t/release/picode"
   done
+  exit 0
 fi
+
+# deploy: pick the right binary per host by querying its architecture.
+for P in "${PIS[@]}"; do
+  arch="$(ssh "$P" 'uname -m' | tr -d '\r')"
+  t="$(target_for_arch "$arch")"
+  if [[ -z "$t" ]]; then
+    echo "!! $P: unsupported arch '$arch' — skipping" >&2
+    continue
+  fi
+  build_target "$t"
+  BIN="target/$t/release/picode"
+  echo ">> deploying to $P ($arch -> $t)..."
+  scp -q "$BIN" "$P:/tmp/picode.new"
+  ssh "$P" '
+    set -e
+    mkdir -p ~/.local/bin
+    if [ -f ~/.local/bin/picode ] && ! [ -f ~/.local/bin/picode-py ]; then
+      cp ~/.local/bin/picode ~/.local/bin/picode-py
+      echo "   backed up Python picode -> picode-py"
+    fi
+    mv /tmp/picode.new ~/.local/bin/picode
+    chmod +x ~/.local/bin/picode
+    echo "   installed: $(~/.local/bin/picode --version)"
+  '
+  # Keep a self-editable source copy on the Pi in sync (~/picode).
+  echo ">> syncing source to $P:~/picode..."
+  COPYFILE_DISABLE=1 tar czf - --exclude target --exclude .git \
+    Cargo.toml Cargo.lock .cargo build.sh PICODE.md src \
+    | ssh "$P" 'mkdir -p ~/picode && tar xzf - -C ~/picode && find ~/picode -name "._*" -delete'
+  echo "   synced source"
+done

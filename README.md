@@ -30,16 +30,19 @@ dependencies.
 
 ## Install / build
 
-picode is cross-compiled from macOS to a static musl ARMv6 binary (the Pi can't
-compile Rust itself).
+picode is cross-compiled from macOS to static musl binaries (the Pi can't
+compile Rust itself). Two targets are produced: **ARMv6** for the Pi Zero W and
+**aarch64** for the Pi 5 — `deploy` picks the matching one per host.
 
 ```sh
 # one-time toolchain setup
 brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
+brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
 rustup target add arm-unknown-linux-musleabihf
+rustup target add aarch64-unknown-linux-musl
 
-./build.sh                        # build only
-./build.sh deploy                 # build + install to every host in PICODE_HOSTS
+./build.sh                        # build both targets
+./build.sh deploy                 # build + install the right binary to every host in PICODE_HOSTS
 PICODE_HOSTS="pi@host-a pi@host-b" ./build.sh deploy   # custom targets
 PI=user@host ./build.sh deploy    # build + install to a single host
 ./build.sh pull                   # pull on-device self-edits back to the Mac
@@ -47,9 +50,8 @@ PI=user@host ./build.sh deploy    # build + install to a single host
 
 Deploy targets are configurable via the `PICODE_HOSTS` env var (space-separated
 `user@host` list) or `PI=user@host` for a single host — set `PICODE_HOSTS` in
-your shell profile to make it permanent. The same static ARMv6 binary runs on
-both the Pi Zero W and the Pi 5; output lands at `~/.local/bin/picode` on each
-target.
+your shell profile to make it permanent. `deploy` queries each host's `uname -m`
+and installs the matching ~2.5 MB static binary to `~/.local/bin/picode`.
 
 ## Configuration
 

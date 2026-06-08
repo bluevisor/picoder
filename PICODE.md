@@ -54,25 +54,31 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 
 ## Building (must be done on the Mac — the Pi can't compile this)
 
-Cross-compiled from macOS to a static musl ARMv6 binary:
+Cross-compiled from macOS to **two** static musl targets: ARMv6 for the Pi
+Zero W, and aarch64 for the Pi 5 (a 64-bit box — running the 32-bit ARMv6 build
+under compat is fragile and can segfault, so it gets a native binary).
 
 ```
 # one-time toolchain setup:
 brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
+brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
 rustup target add arm-unknown-linux-musleabihf
+rustup target add aarch64-unknown-linux-musl
 
-./build.sh           # build target/arm-unknown-linux-musleabihf/release/picode
-./build.sh deploy    # build + install to every host in PICODE_HOSTS at ~/.local/bin/picode
+./build.sh           # build both targets under target/<triple>/release/picode
+./build.sh deploy    # build + install the right binary per host in PICODE_HOSTS
 PICODE_HOSTS="pi@a pi@b" ./build.sh deploy   # custom deploy targets
 PI=user@host ./build.sh deploy               # install to a single host instead
 ```
 
-`deploy` installs to every host listed in the `PICODE_HOSTS` env var
-(space-separated `user@host`; defaults to the Pi Zero + Pi 5). `PI=user@host`
-overrides to a single host. The same static ARMv6 binary runs on both.
+`deploy` queries each host's `uname -m` and installs the matching binary
+(`armv6l` → ARMv6, `aarch64` → aarch64) to `~/.local/bin/picode`. Hosts come
+from the `PICODE_HOSTS` env var (space-separated `user@host`; defaults to the
+Pi Zero + Pi 5), or `PI=user@host` for a single host.
 
-`build.sh` sets the `ring` cross-compile env vars (`CC_/AR_/TARGET_CC`) and the
-linker comes from `.cargo/config.toml`. Output is a ~2.5MB fully static binary.
+`build.sh` sets the `ring` cross-compile env vars (`CC_/AR_/TARGET_CC`) per
+target and the linkers come from `.cargo/config.toml`. Each output is a ~2.5MB
+fully static binary.
 
 > If you edit the source on the Pi, copy it back to the Mac before rebuilding,
 > or those edits won't be in the next build. The Mac copy is canonical.
