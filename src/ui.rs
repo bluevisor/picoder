@@ -309,6 +309,9 @@ enum Mode {
     Idle,
     Busy,
     Approval(String),
+    /// Interactive theme picker (`/theme` with no argument). `cursor` is the
+    /// highlighted theme index; `prev` is the theme to restore if cancelled.
+    ThemeSelect { cursor: usize, prev: String },
 }
 
 /// Everything the UI needs from config, captured before the worker consumes it.
@@ -593,6 +596,7 @@ impl App {
                 alt_key.modifiers |= KeyModifiers::ALT;
                 match &self.mode {
                     Mode::Approval(_) => self.on_key_approval(alt_key, h),
+                    Mode::ThemeSelect { .. } => self.on_key_themeselect(alt_key, h),
                     Mode::Busy => self.on_key_busy(alt_key, h),
                     Mode::Idle => self.on_key_idle(alt_key, h),
                 }
@@ -604,6 +608,7 @@ impl App {
         }
         match &self.mode {
             Mode::Approval(_) => self.on_key_approval(key, h),
+            Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
             Mode::Busy => self.on_key_busy(key, h),
             Mode::Idle => self.on_key_idle(key, h),
         }
@@ -614,6 +619,11 @@ impl App {
         match &self.mode {
             Mode::Approval(_) => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
+            }
+            Mode::ThemeSelect { prev, .. } => {
+                // Cancel the picker, restoring the theme we started with.
+                self.palette = palette_by_name(&prev.clone());
+                self.mode = Mode::Idle;
             }
             Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
             Mode::Idle => {
@@ -652,6 +662,47 @@ impl App {
             }
             let _ = h.appr_tx.send(r);
             self.mode = Mode::Busy;
+        }
+    }
+
+    /// Live-preview the theme at `idx` (applies the palette so the whole UI
+    /// updates) while keeping the picker open.
+    fn preview_theme(&mut self, idx: usize, prev: String) {
+        self.palette = palette_by_name(THEMES[idx]);
+        self.mode = Mode::ThemeSelect { cursor: idx, prev };
+    }
+
+    /// Commit the theme at `idx`: persist it and close the picker.
+    fn commit_theme(&mut self, idx: usize) {
+        let name = THEMES[idx];
+        self.palette = palette_by_name(name);
+        crate::config::Config::persist_theme(name);
+        self.push(Kind::Notice, format!("theme set to {name}"));
+        self.mode = Mode::Idle;
+    }
+
+    fn on_key_themeselect(&mut self, key: KeyEvent, _h: &Handles) {
+        let (cursor, prev) = match &self.mode {
+            Mode::ThemeSelect { cursor, prev } => (*cursor, prev.clone()),
+            _ => return,
+        };
+        let n = THEMES.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.preview_theme((cursor + n - 1) % n, prev),
+            KeyCode::Down | KeyCode::Char('j') => self.preview_theme((cursor + 1) % n, prev),
+            // Number keys select instantly, mirroring the (y)/(n)/(a) hotkeys.
+            KeyCode::Char(d) if d.is_ascii_digit() => {
+                let i = d.to_digit(10).unwrap_or(0) as usize;
+                if (1..=n).contains(&i) {
+                    self.commit_theme(i - 1);
+                }
+            }
+            KeyCode::Enter => self.commit_theme(cursor),
+            KeyCode::Esc => {
+                self.palette = palette_by_name(&prev);
+                self.mode = Mode::Idle;
+            }
+            _ => {}
         }
     }
 
@@ -950,12 +1001,15 @@ impl App {
             }
             "theme" => {
                 if arg.is_empty() {
-                    self.push(Kind::Notice, "themes:".to_string());
-                    for (i, t) in THEMES.iter().enumerate() {
-                        let cur = if *t == self.palette.name { "  (current)" } else { "" };
-                        self.push(Kind::Notice, format!("  {}) {t}{cur}", i + 1));
-                    }
-                    self.push(Kind::Notice, "select with /theme <number|name>".to_string());
+                    // Open the interactive picker, highlighting the current theme.
+                    let cur = THEMES
+                        .iter()
+                        .position(|t| *t == self.palette.name)
+                        .unwrap_or(0);
+                    self.mode = Mode::ThemeSelect {
+                        cursor: cur,
+                        prev: self.palette.name.to_string(),
+                    };
                 } else {
                     let name = match arg.parse::<usize>() {
                         Ok(n) if n >= 1 && n <= THEMES.len() => THEMES[n - 1],
@@ -986,7 +1040,7 @@ impl App {
             "  /auto          toggle bypass-permissions (or Shift+Tab to cycle modes)",
             "  /reset         clear conversation context",
             "  /memory        show persistent memory",
-            "  /theme [n]     list themes, or switch (default, apple2, msdos)",
+            "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos)",
             "  /init          summarize this project into PICODE.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
@@ -1120,12 +1174,18 @@ impl App {
     }
 
     fn composer_rows(&self, width: u16) -> u16 {
-        if !matches!(self.mode, Mode::Idle) {
-            return 1;
+        match &self.mode {
+            Mode::Busy => 1,
+            // Description line + the (y)/(n)/(a) line below it.
+            Mode::Approval(_) => 2,
+            // Header line + one line per theme.
+            Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
+            Mode::Idle => {
+                let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
+                let rows = self.char_len() / w + 1;
+                rows.clamp(1, 5) as u16
+            }
         }
-        let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
-        let rows = self.char_len() / w + 1;
-        rows.clamp(1, 5) as u16
     }
 
     fn render_rule(&self, f: &mut Frame, area: Rect) {
@@ -1189,10 +1249,13 @@ impl App {
                 f.render_widget(Paragraph::new(line), area);
             }
             Mode::Approval(desc) => {
-                let line = Line::from(vec![
+                // Keep the y/n/a hotkeys at the start of their own line so a long
+                // description can't push them off the right edge of the screen.
+                let desc_line = Line::from(vec![
                     Span::styled("approve ", Style::default().fg(Color::Yellow)),
                     Span::styled(desc.clone(), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw("   "),
+                ]);
+                let opts_line = Line::from(vec![
                     Span::styled("(y)", Style::default().fg(Color::Green)),
                     Span::raw("es  "),
                     Span::styled("(n)", Style::default().fg(Color::Red)),
@@ -1200,7 +1263,34 @@ impl App {
                     Span::styled("(a)", Style::default().fg(self.palette.accent)),
                     Span::raw("lways"),
                 ]);
-                f.render_widget(Paragraph::new(line), area);
+                f.render_widget(Paragraph::new(vec![desc_line, opts_line]), area);
+            }
+            Mode::ThemeSelect { cursor, .. } => {
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(vec![
+                    Span::styled("select theme ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        "(up/down to preview, Enter to keep, Esc to cancel)",
+                        Style::default().fg(self.dim_text()),
+                    ),
+                ]));
+                let marker = if self.ascii { ">" } else { "▸" };
+                for (i, t) in THEMES.iter().enumerate() {
+                    let sel = i == *cursor;
+                    let lead = if sel { marker } else { " " };
+                    let style = if sel {
+                        Style::default()
+                            .fg(self.palette.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.dim_text())
+                    };
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("{lead} ({}) {t}", i + 1),
+                        style,
+                    )]));
+                }
+                f.render_widget(Paragraph::new(lines), area);
             }
         }
     }
