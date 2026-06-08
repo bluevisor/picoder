@@ -1256,11 +1256,11 @@ impl App {
                     Span::styled(desc.clone(), Style::default().add_modifier(Modifier::BOLD)),
                 ]);
                 let opts_line = Line::from(vec![
-                    Span::styled("(y)", Style::default().fg(Color::Green)),
+                    Span::styled("(Y)", Style::default().fg(Color::Green)),
                     Span::raw("es  "),
-                    Span::styled("(n)", Style::default().fg(Color::Red)),
+                    Span::styled("(N)", Style::default().fg(Color::Red)),
                     Span::raw("o  "),
-                    Span::styled("(a)", Style::default().fg(self.palette.accent)),
+                    Span::styled("(A)", Style::default().fg(self.palette.accent)),
                     Span::raw("lways"),
                 ]);
                 f.render_widget(Paragraph::new(vec![desc_line, opts_line]), area);
