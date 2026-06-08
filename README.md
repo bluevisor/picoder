@@ -1,0 +1,94 @@
+# picode
+
+A tiny full-screen **agentic coding CLI** written in Rust, small enough to run
+on a **Raspberry Pi Zero W** (ARMv6, single core, ~512 MB RAM) — and equally at
+home on a Pi 5 or your laptop. It talks to any OpenAI-compatible chat API
+(default: DeepSeek) and drives a Codex / Claude-Code-style tool loop inside a
+[ratatui](https://ratatui.rs) terminal UI.
+
+The whole thing is one ~2.5 MB statically linked binary with no runtime
+dependencies.
+
+## Features
+
+- **Agentic tool loop** — `bash` (with timeout), `read` / `write` / `edit` /
+  `list`, `grep` (regex), `glob`, and `remember` / `recall` memory.
+- **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
+  live token streaming, and colored unified diffs previewed before every
+  write/edit.
+- **Permission modes** (`Shift+Tab`) — *ask* / *bypass* / *plan* (read-only).
+- **Context files** — auto-loads `PICODE.md` / `AGENTS.md` / `CLAUDE.md` /
+  `GEMINI.md` from the working directory.
+- **Sessions** — persisted per working directory; resume with `picode --continue`.
+- **Composer niceties** — `@file` attach, Tab autocomplete (commands + paths),
+  history, word-skip and word-delete, code-block highlighting.
+- **Status bar** — model · session tokens + $ cost · context-window bar ·
+  account balance.
+- **Themes** (`/theme`) — `default`, `apple2` (green phosphor), `msdos`.
+- **Tuned for the Pi framebuffer console** — ASCII fallback and clear-on-exit
+  under `TERM=linux`, plus a launch banner with live MEM / Wi-Fi / IP.
+
+## Install / build
+
+picode is cross-compiled from macOS to a static musl ARMv6 binary (the Pi can't
+compile Rust itself).
+
+```sh
+# one-time toolchain setup
+brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
+rustup target add arm-unknown-linux-musleabihf
+
+./build.sh                        # build only
+./build.sh deploy                 # build + install to all Pis in build.sh's PIS array
+PI=user@host ./build.sh deploy    # build + install to a single host
+./build.sh pull                   # pull on-device self-edits back to the Mac
+```
+
+The same static ARMv6 binary runs on both the Pi Zero W and the Pi 5. Output
+lands at `~/.local/bin/picode` on each target.
+
+## Configuration
+
+On first run, picode walks you through provider, model, and API key. State lives
+in `~/.config/picode/`:
+
+```
+config.json   provider / model / key
+memory.md     remember/recall store
+history       composer history
+sessions/     per-directory session transcripts
+```
+
+## Keyboard
+
+| Key | Action |
+| --- | --- |
+| `Enter` | send |
+| `Shift+Tab` | cycle permission mode |
+| `↑` / `↓` | history |
+| `Alt`/`Ctrl`/`Cmd + ←/→` | word / line motion |
+| `Option`/`Alt + Backspace` | delete word backward |
+| `Option`/`Alt + Delete` | delete word forward |
+| `Tab` | autocomplete commands / paths |
+| `PgUp` / `PgDn` | scroll transcript |
+| `Esc` | interrupt turn / clear line |
+| `Ctrl+C` | quit |
+
+picode enables the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
+when the terminal supports it, so modified keys are reported unambiguously.
+Without it, some terminals (e.g. Warp in full-screen mode) flatten
+`Option+Backspace` to a plain Backspace.
+
+## Architecture
+
+A long-lived **worker thread** owns the message history and runs the blocking
+HTTP + tool loop. The **UI thread** renders with ratatui and exchanges user
+input / approvals over mpsc channels; the worker streams back tokens, tool
+events, diffs, and approval requests. This keeps the UI responsive and lets
+`Esc` interrupt a turn mid-flight.
+
+See [`PICODE.md`](PICODE.md) for the per-file source map and deeper notes.
+
+## License
+
+MIT
