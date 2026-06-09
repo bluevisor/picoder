@@ -178,7 +178,7 @@ const GLYPHS_A: Glyphs = Glyphs {
     rounded: false,
 };
 
-/// Choose a glyph set. ASCII for the Linux console / dumb terminals, or when
+/// Choose a glyph set. ASCII for dumb terminals, or when
 /// forced via PICODE_ASCII=1; Unicode otherwise (or forced via PICODE_UNICODE=1).
 pub fn detect_ascii() -> bool {
     if std::env::var("PICODE_UNICODE").is_ok() {
@@ -188,9 +188,17 @@ pub fn detect_ascii() -> bool {
         return true;
     }
     match std::env::var("TERM").as_deref() {
-        Ok("linux") | Ok("dumb") | Ok("vt100") | Ok("") | Err(_) => true,
+        Ok("dumb") | Ok("vt100") | Ok("") | Err(_) => true,
         _ => false,
     }
+}
+
+/// True when the terminal likely has only 16 colors (Linux console without truecolor).
+pub fn is_16color_terminal() -> bool {
+    // COLORTERM=truecolor or COLORTERM=24bit means true color support.
+    matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor") | Ok("24bit"))
+        == false
+        && matches!(std::env::var("TERM").as_deref(), Ok("linux") | Ok("dumb") | Ok("vt100"))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -218,26 +226,26 @@ const SLASH_COMMANDS: &[&str] = &[
 
 /// Heavy block-letter "PICODE" for capable terminals.
 const ART_UNICODE: [&str; 6] = [
-    "██████╗ ██╗ ██████╗ ██████╗ ██████╗ ███████╗",
-    "██╔══██╗██║██╔════╝██╔═══██╗██╔══██╗██╔════╝",
-    "██████╔╝██║██║     ██║   ██║██║  ██║█████╗  ",
-    "██╔═══╝ ██║██║     ██║   ██║██║  ██║██╔══╝  ",
-    "██║     ██║╚██████╗╚██████╔╝██████╔╝███████╗",
-    "╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+    "██████░ ██░ ██████░ ██████░ ██████░ ███████░",
+    "██░░░██░██░██░░░░░░██░░░░██░██░░░██░██░░░░░░",
+    "██████░░██░██░     ██░   ██░██░  ██░█████░  ",
+    "██░░░░░ ██░██░     ██░   ██░██░  ██░██░░░░  ",
+    "██░     ██░░██████░░██████░░██████░░███████░",
+    "░░░     ░░░ ░░░░░░░ ░░░░░░░ ░░░░░░░ ░░░░░░░░",
 ];
 
-/// 5x4 ASCII glyphs (P I C O D E), assembled at runtime to guarantee alignment.
-const ART_GLYPHS: [[&str; 5]; 6] = [
-    ["####", "#  #", "####", "#   ", "#   "], // P
-    ["####", " ## ", " ## ", " ## ", "####"], // I
-    ["####", "#   ", "#   ", "#   ", "####"], // C
-    ["####", "#  #", "#  #", "#  #", "####"], // O
-    ["### ", "#  #", "#  #", "#  #", "### "], // D
-    ["####", "#   ", "### ", "#   ", "####"], // E
+/// 6x4 ASCII glyphs (P I C O D E), assembled at runtime to guarantee alignment.
+const ART_GLYPHS: [[&str; 6]; 6] = [
+    ["####", "#  #", "####", "#   ", "#   ", "#   "], // P
+    ["####", " ## ", " ## ", " ## ", "####", "####"], // I
+    ["####", "#   ", "#   ", "#   ", "####", "####"], // C
+    ["####", "#  #", "#  #", "#  #", "####", "####"], // O
+    ["### ", "#  #", "#  #", "#  #", "### ", "### "], // D
+    ["####", "#   ", "### ", "#   ", "####", "####"], // E
 ];
 
 fn ascii_art() -> Vec<String> {
-    (0..5)
+    (0..6)
         .map(|r| ART_GLYPHS.iter().map(|g| g[r]).collect::<Vec<_>>().join(" "))
         .collect()
 }
@@ -280,7 +288,7 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
     let art = banner_art(w, ascii);
     let artw = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let pad = " ".repeat(w.saturating_sub(artw) / 2);
-    let rainbow = if ascii { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
+    let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
     let reset = "\x1b[0m";
     let acc = ansi_fg(p.accent);
 
@@ -1128,7 +1136,7 @@ impl App {
         let art = banner_art(w, self.ascii);
         let artw = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
         let pad = " ".repeat(w.saturating_sub(artw) / 2);
-        let rainbow = if self.ascii { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
+        let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
 
         self.push_dim(format!("{mark} PICODE v1.0"));
         self.push_dim(String::new());
