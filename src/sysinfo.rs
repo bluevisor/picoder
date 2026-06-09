@@ -115,8 +115,10 @@ pub fn hardware_line(ascii: bool) -> String {
 }
 
 /// One-line hardware description for the agent's system prompt, e.g.
-/// `aarch64, 4 cores, ~7910MB RAM (Debian/Linux)`. Lets one binary describe
-/// itself honestly on anything from a Pi Zero W to a Pi 5.
+/// `NVIDIA Jetson Nano 2GB Developer Kit, aarch64, 4 cores, ~1965MB RAM
+/// (Ubuntu 18.04.6 LTS)`. Lets one binary describe itself honestly on anything
+/// from a Pi Zero W to a Jetson Nano — board name and OS are read at runtime
+/// rather than hardcoded, so the agent knows what hardware/distro it's on.
 pub fn host_descriptor() -> String {
     let arch = std::env::consts::ARCH;
     let cores = cpu_cores();
@@ -124,7 +126,24 @@ pub fn host_descriptor() -> String {
     let mem = mem_total_mb()
         .map(|t| format!(", ~{t}MB RAM"))
         .unwrap_or_default();
-    format!("{arch}, {cores} {core_word}{mem} (Debian/Linux)")
+    let board = board_model().map(|b| format!("{b}, ")).unwrap_or_default();
+    format!("{board}{arch}, {cores} {core_word}{mem} ({})", os_name())
+}
+
+/// Distro/OS pretty name from /etc/os-release (e.g. "Ubuntu 18.04.6 LTS"),
+/// falling back to "Linux" where it isn't present (e.g. the dev Mac).
+pub fn os_name() -> String {
+    if let Ok(s) = std::fs::read_to_string("/etc/os-release") {
+        for line in s.lines() {
+            if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+                let v = v.trim().trim_matches('"');
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+    }
+    "Linux".to_string()
 }
 
 fn mem_used_total() -> Option<(u64, u64)> {

@@ -18,19 +18,22 @@ use config::Config;
 use std::io::{IsTerminal, Write};
 
 /// System prompt, built at runtime so picode honestly describes whatever host
-/// it's on (Pi Zero W → Pi 5). On low-memory hosts it adds a "keep it light"
-/// caution; on capable hosts (≥2GB) it allows builds and compiles.
+/// it's on (Pi Zero W → Jetson Nano). A host is treated as build-capable when
+/// it has ≥4 cores or ≥2GB RAM (so the quad-core Jetson Nano, which can compile
+/// its own Rust, isn't told to avoid compiles); smaller hosts get a "keep it
+/// light" caution instead.
 fn system_prompt() -> String {
     let host = sysinfo::host_descriptor();
-    let resource_rule = if sysinfo::mem_total_mb().unwrap_or(512) < 2048 {
+    let capable = sysinfo::cpu_cores() >= 4 || sysinfo::mem_total_mb().unwrap_or(512) >= 2048;
+    let resource_rule = if !capable {
         "- Use bash for git, builds, tests. Keep commands fast and memory-light — this machine is \
 tiny. Avoid heavy installs/compiles unless asked."
     } else {
         "- Use bash for git, builds, tests. This machine is reasonably capable (multi-core, GBs of \
-RAM), so builds and compiles are fine when useful."
+RAM + swap), so builds and compiles are fine when useful."
     };
     format!(
-        "You are picode, a terminal coding agent running ON a Raspberry Pi ({host}). You help with \
+        "You are picode, a terminal coding agent running ON {host}. You help with \
 software tasks using tools.
 
 Rules:
