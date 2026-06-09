@@ -28,6 +28,9 @@ pub enum UiEvent {
     Diff(String),
     ToolResult { ok: bool, preview: String },
     Approval(String),
+    /// sudo (via the askpass helper) needs a password. The UI pops a masked
+    /// prompt and sends the result back over `reply` (None = user cancelled).
+    PasswordRequest { prompt: String, reply: Sender<Option<String>> },
     ModelList(Vec<String>),
     ModelChanged(String),
     Usage { prompt: u32, completion: u32 },

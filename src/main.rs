@@ -6,6 +6,7 @@
 
 mod agent;
 mod api;
+mod askpass;
 mod config;
 mod diff;
 mod sysinfo;
@@ -66,6 +67,14 @@ auto-loads PICODE.md / AGENTS.md / CLAUDE.md from the working directory";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Internal: invoked by sudo as the SUDO_ASKPASS helper. Talks to the running
+    // picode over the given socket and prints the password; never starts the TUI.
+    if let Some(pos) = args.iter().position(|a| a == "--askpass") {
+        let sock = args.get(pos + 1).cloned().unwrap_or_default();
+        let prompt = args.get(pos + 2).cloned().unwrap_or_else(|| "[sudo] password:".into());
+        std::process::exit(askpass::run_helper(&sock, &prompt));
+    }
 
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{HELP}");
@@ -268,6 +277,8 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     let perm_start = if auto { agent::PERM_AUTO } else { agent::PERM_ASK };
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
+    // Wire up sudo askpass before the worker exists (it mutates process env).
+    askpass::setup(ui_tx.clone());
     let h = agent::spawn(cfg, messages, perm_start, Some(config::session_path()), ui_tx);
 
     let mut terminal = match ui::setup_terminal() {

@@ -312,6 +312,9 @@ enum Mode {
     /// Interactive theme picker (`/theme` with no argument). `cursor` is the
     /// highlighted theme index; `prev` is the theme to restore if cancelled.
     ThemeSelect { cursor: usize, prev: String },
+    /// Masked sudo password entry, requested by the askpass helper. `prompt` is
+    /// the text sudo asked with (e.g. "[sudo] password for user:").
+    Password { prompt: String },
 }
 
 /// Everything the UI needs from config, captured before the worker consumes it.
@@ -335,6 +338,10 @@ pub struct App {
     hist_idx: usize,
     pending: String,
     mode: Mode,
+    /// Buffer + reply channel for an in-flight masked sudo password prompt. Held
+    /// in memory only; never pushed to the transcript, history, or session.
+    pw_input: String,
+    pw_reply: Option<std::sync::mpsc::Sender<Option<String>>>,
     follow: bool,
     scroll: usize,
     max_top: usize,
@@ -377,6 +384,8 @@ impl App {
             hist_idx,
             pending: String::new(),
             mode: Mode::Idle,
+            pw_input: String::new(),
+            pw_reply: None,
             follow: true,
             scroll: 0,
             max_top: 0,
@@ -503,6 +512,12 @@ impl App {
                 self.flush_live();
                 self.mode = Mode::Approval(desc);
             }
+            UiEvent::PasswordRequest { prompt, reply } => {
+                self.flush_live();
+                self.pw_input.clear();
+                self.pw_reply = Some(reply);
+                self.mode = Mode::Password { prompt };
+            }
             UiEvent::ModelList(ids) => {
                 self.flush_live();
                 self.last_models = ids.clone();
@@ -574,6 +589,12 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent, h: &Handles) {
+        // Masked sudo password entry captures every key (so a stray Ctrl+P, Tab,
+        // etc. never leaks out or triggers a shortcut) — handle it first.
+        if matches!(self.mode, Mode::Password { .. }) {
+            self.on_key_password(key);
+            return;
+        }
         // Cycle permission mode in any state. Shift+Tab is the primary binding:
         // it arrives as BackTab on ANSI terminals, or Tab+SHIFT under the Kitty
         // keyboard protocol. But the Linux framebuffer console (TERM=linux)
@@ -605,6 +626,7 @@ impl App {
                     Mode::Approval(_) => self.on_key_approval(alt_key, h),
                     Mode::ThemeSelect { .. } => self.on_key_themeselect(alt_key, h),
                     Mode::Busy => self.on_key_busy(alt_key, h),
+                    Mode::Password { .. } => {}
                     Mode::Idle => self.on_key_idle(alt_key, h),
                 }
                 return;
@@ -617,6 +639,8 @@ impl App {
             Mode::Approval(_) => self.on_key_approval(key, h),
             Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
             Mode::Busy => self.on_key_busy(key, h),
+            // Password is intercepted at the top of on_key; unreachable here.
+            Mode::Password { .. } => {}
             Mode::Idle => self.on_key_idle(key, h),
         }
     }
@@ -633,11 +657,48 @@ impl App {
                 self.mode = Mode::Idle;
             }
             Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
+            // Password Esc is handled directly in on_key_password; never reaches here.
+            Mode::Password { .. } => {}
             Mode::Idle => {
                 self.input.clear();
                 self.cursor = 0;
             }
         }
+    }
+
+    /// Masked sudo password entry. Keystrokes go into `pw_input` (never shown);
+    /// Enter sends it to the askpass helper, Esc/Ctrl+C cancel. Either way we
+    /// return to the busy view, since the bash command is still running.
+    fn on_key_password(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Enter => {
+                let pw = std::mem::take(&mut self.pw_input);
+                if let Some(tx) = self.pw_reply.take() {
+                    let _ = tx.send(Some(pw));
+                }
+                self.mode = Mode::Busy;
+            }
+            KeyCode::Esc => self.cancel_password(),
+            KeyCode::Char('c') if ctrl => self.cancel_password(),
+            KeyCode::Char('u') if ctrl => self.pw_input.clear(),
+            KeyCode::Backspace => {
+                self.pw_input.pop();
+            }
+            KeyCode::Char(c) if !ctrl && !alt => self.pw_input.push(c),
+            _ => {}
+        }
+    }
+
+    /// Abort the password prompt: tell the helper there's no password (so sudo
+    /// fails cleanly) and drop the buffer.
+    fn cancel_password(&mut self) {
+        self.pw_input.clear();
+        if let Some(tx) = self.pw_reply.take() {
+            let _ = tx.send(None);
+        }
+        self.mode = Mode::Busy;
     }
 
     fn cycle_perm(&self) {
@@ -1187,6 +1248,8 @@ impl App {
             Mode::Approval(_) => 2,
             // Header line + one line per theme.
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
+            // Prompt line + masked-input line.
+            Mode::Password { .. } => 2,
             Mode::Idle => {
                 let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
                 let rows = self.char_len() / w + 1;
@@ -1298,6 +1361,23 @@ impl App {
                     )]));
                 }
                 f.render_widget(Paragraph::new(lines), area);
+            }
+            Mode::Password { prompt } => {
+                let label = if prompt.is_empty() { "[sudo] password:" } else { prompt.as_str() };
+                let mask = if self.ascii { '*' } else { '•' };
+                let dots: String = std::iter::repeat(mask).take(self.pw_input.chars().count()).collect();
+                let prompt_line = Line::from(vec![Span::styled(
+                    label.to_string(),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )]);
+                let input_line = Line::from(vec![
+                    Span::styled(dots, Style::default().fg(self.palette.accent)),
+                    Span::styled(
+                        "  (Enter to submit · Esc to cancel · hidden, not stored)",
+                        Style::default().fg(self.dim_text()),
+                    ),
+                ]);
+                f.render_widget(Paragraph::new(vec![prompt_line, input_line]), area);
             }
         }
     }
