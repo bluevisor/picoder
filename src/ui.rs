@@ -574,11 +574,18 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent, h: &Handles) {
-        // Shift+Tab cycles permission mode in any state. Under the Kitty
-        // keyboard protocol it arrives as Tab+SHIFT rather than BackTab.
-        if key.code == KeyCode::BackTab
-            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
-        {
+        // Cycle permission mode in any state. Shift+Tab is the primary binding:
+        // it arrives as BackTab on ANSI terminals, or Tab+SHIFT under the Kitty
+        // keyboard protocol. But the Linux framebuffer console (TERM=linux)
+        // reports Shift+Tab as a bare Tab — its default keymap has no shift
+        // binding for the Tab key, so the two are byte-identical and no app can
+        // tell them apart. Ctrl+P is a console-safe alias that works there (and
+        // everywhere else), since Ctrl-letter chords always come through.
+        let shift_tab = key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+        let ctrl_p = matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+        if shift_tab || ctrl_p {
             self.cycle_perm();
             return;
         }
@@ -1037,7 +1044,7 @@ impl App {
         let lines = [
             "commands:",
             "  /model [id|n]  list models, or set by id/number",
-            "  /auto          toggle bypass-permissions (or Shift+Tab to cycle modes)",
+            "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
             "  /reset         clear conversation context",
             "  /memory        show persistent memory",
             "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos)",
@@ -1046,7 +1053,7 @@ impl App {
             "  /help          show this help",
             "  /exit          quit picode",
             "input: @path attaches a file | Tab autocompletes commands & paths",
-            "keys: Enter send | Shift+Tab permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-C quit",
+            "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-C quit",
         ];
         for l in lines {
             self.push(Kind::Notice, l.to_string());
@@ -1399,7 +1406,7 @@ impl App {
         let spans = vec![
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::styled(text, Style::default().fg(color)),
-            Span::styled("  (shift+tab to cycle)", Style::default().fg(self.dim_text())),
+            Span::styled("  (shift+tab/ctrl+p to cycle)", Style::default().fg(self.dim_text())),
             Span::styled(format!("   {}", self.cwd), Style::default().fg(self.dim_text())),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
