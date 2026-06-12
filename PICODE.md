@@ -34,8 +34,13 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 
 ## Features
 
-- Tools: bash (timeout), read/write/edit/list, grep (regex), glob, remember/recall.
+- Tools: bash (timeout), read/write/edit/list, grep (regex), glob, remember/recall,
+  web_fetch (URL → readable text, HTML stripped).
 - Streaming with a Claude-style composer (`›`, reverse-block cursor, placeholder).
+- Context compaction: `/compact` summarizes older turns (keeping the system
+  prefix and latest exchange); auto-triggers at 80% of the context window.
+- Queued input: the composer stays live while the agent works — Enter queues
+  messages that send in order as turns finish (Esc interrupts and restores them).
 - Status bar: model · session tokens + $ cost · context-window bar · account balance.
 - Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
 - Auto-loads `PICODE.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
@@ -50,7 +55,7 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Launch banner: Apple-rainbow PICODE block art + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `default`, `apple2` (green phosphor, `] ▒`),
   `msdos` (gray, `C:\>`); persisted in config. Theme sets colors, prompt, cursor.
-- Slash commands: `/model /auto /reset /memory /theme /init /clear /help /exit`.
+- Slash commands: `/model /auto /reset /compact /memory /theme /init /clear /help /exit`.
 
 ## Building (must be done on the Mac — the Pi can't compile this)
 

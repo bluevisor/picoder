@@ -12,10 +12,15 @@ dependencies.
 ## Features
 
 - **Agentic tool loop** — `bash` (with timeout), `read` / `write` / `edit` /
-  `list`, `grep` (regex), `glob`, and `remember` / `recall` memory.
+  `list`, `grep` (regex), `glob`, `web_fetch` (URL → readable text), and
+  `remember` / `recall` memory.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
   live token streaming, and colored unified diffs previewed before every
   write/edit.
+- **Context compaction** — `/compact` summarizes older turns to free the
+  window; triggers automatically at 80% full.
+- **Queued input** — keep typing while the agent works; Enter queues messages
+  that send as turns finish.
 - **Permission modes** (`Shift+Tab`) — *ask* / *bypass* / *plan* (read-only).
 - **Context files** — auto-loads `PICODE.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md` from the working directory.

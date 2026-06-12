@@ -266,6 +266,92 @@ pub fn glob_search(pattern: &str) -> String {
     }
 }
 
+// ----------------------------------------------------------- web_fetch ------
+
+/// Fetch a URL and return readable text. HTML is stripped to text; anything
+/// else (JSON, plain text, …) comes back as-is. Body capped at 2MB.
+pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return "ERROR: url must start with http:// or https://".into();
+    }
+    let resp = http
+        .get(url)
+        .timeout(Duration::from_secs(30))
+        .set("Accept", "text/html, application/json, text/plain, */*")
+        .call();
+    let resp = match resp {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            return format!("ERROR: HTTP {code}: {}", truncate(&body, 500));
+        }
+        Err(e) => return format!("ERROR: {e}"),
+    };
+    let html = resp
+        .content_type()
+        .to_ascii_lowercase()
+        .contains("text/html");
+    let mut body = String::new();
+    if let Err(e) = resp.into_reader().take(2_000_000).read_to_string(&mut body) {
+        return format!("ERROR: read failed (binary content?): {e}");
+    }
+    let text = if html { html_to_text(&body) } else { body };
+    let text = text.trim();
+    if text.is_empty() {
+        "(empty response)".into()
+    } else {
+        truncate(text, MAX_TOOL_OUTPUT)
+    }
+}
+
+/// Best-effort HTML → text: drop script/style/head, turn block-level closes
+/// into newlines, strip the remaining tags, decode common entities.
+fn html_to_text(html: &str) -> String {
+    let strip_block = |s: &str, tag: &str| -> String {
+        let re = regex::RegexBuilder::new(&format!(r"<{tag}\b.*?</{tag}>"))
+            .case_insensitive(true)
+            .dot_matches_new_line(true)
+            .build()
+            .unwrap();
+        re.replace_all(s, " ").into_owned()
+    };
+    let mut s = html.to_string();
+    for tag in ["script", "style", "head", "noscript", "svg"] {
+        s = strip_block(&s, tag);
+    }
+    let breaks = regex::RegexBuilder::new(r"</(p|div|li|tr|h[1-6]|blockquote|pre)>|<br\s*/?>")
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+    let s = breaks.replace_all(&s, "\n");
+    let tags = regex::Regex::new(r"<[^>]*>").unwrap();
+    let s = tags.replace_all(&s, " ");
+    let s = s
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+    // Collapse runs of spaces and blank lines left behind by stripped markup.
+    let mut out = String::new();
+    let mut blank_run = 0;
+    for line in s.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
 // ------------------------------------------------------------- memory -------
 
 pub fn remember(note: &str) -> String {
@@ -312,5 +398,39 @@ pub fn load_memory() -> Result<Option<String>> {
     match std::fs::read_to_string(memory_path()) {
         Ok(c) if !c.trim().is_empty() => Ok(Some(c.trim().to_string())),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_to_text_strips_markup() {
+        let html = "<html><head><title>T</title><style>x{color:red}</style></head>\
+                    <body><script>var a=1;</script><h1>Hello</h1>\
+                    <p>World &amp; friends</p><ul><li>one</li><li>two</li></ul></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World & friends"));
+        assert!(text.contains("one"));
+        assert!(!text.contains("var a"));
+        assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn web_fetch_rejects_non_http() {
+        let http = crate::api::agent_http();
+        assert!(web_fetch(&http, "file:///etc/passwd").starts_with("ERROR"));
+        assert!(web_fetch(&http, "ftp://x").starts_with("ERROR"));
+    }
+
+    #[test]
+    #[ignore] // hits the network; run with `cargo test -- --ignored`
+    fn web_fetch_real_page() {
+        let http = crate::api::agent_http();
+        let text = web_fetch(&http, "https://example.com");
+        assert!(text.contains("Example Domain"), "got: {text}");
+        assert!(!text.contains('<'));
     }
 }

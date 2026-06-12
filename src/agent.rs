@@ -34,6 +34,9 @@ pub enum UiEvent {
     ModelList(Vec<String>),
     ModelChanged(String),
     Usage { prompt: u32, completion: u32 },
+    /// Re-estimate of the next prompt's size (after compaction) so the UI's
+    /// context bar drops immediately, without touching session totals.
+    Context(u32),
     Balance(String),
     Notice(String),
     Error(String),
@@ -44,6 +47,7 @@ pub enum UiEvent {
 pub enum WorkerCmd {
     User(String),
     Reset,
+    Compact,
     SetModel(String),
     ListModels,
     Quit,
@@ -78,6 +82,8 @@ struct Worker {
     ui: Sender<UiEvent>,
     appr_rx: Receiver<ApprovalResponse>,
     session: Option<PathBuf>,
+    /// Prompt tokens of the last completion, for the auto-compaction trigger.
+    last_prompt: u32,
 }
 
 pub fn spawn(
@@ -105,6 +111,7 @@ pub fn spawn(
             ui,
             appr_rx,
             session,
+            last_prompt: 0,
         };
         w.refresh_balance(); // initial account balance for the status line
         while let Ok(cmd) = cmd_rx.recv() {
@@ -112,8 +119,15 @@ pub fn spawn(
                 WorkerCmd::Quit => break,
                 WorkerCmd::Reset => {
                     w.messages.truncate(w.system_len);
+                    w.last_prompt = 0;
                     w.save_session();
                     let _ = w.ui.send(UiEvent::Notice("context cleared.".into()));
+                    let _ = w.ui.send(UiEvent::Context(0));
+                }
+                WorkerCmd::Compact => {
+                    w.cancel.store(false, Ordering::Relaxed);
+                    w.compact();
+                    let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::SetModel(m) => {
                     w.cfg.model = m.clone();
@@ -134,6 +148,7 @@ pub fn spawn(
                 }
                 WorkerCmd::User(text) => {
                     w.cancel.store(false, Ordering::Relaxed);
+                    w.maybe_auto_compact();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         w.run_turn(text);
                     }));
@@ -174,6 +189,86 @@ impl Worker {
         }
     }
 
+    /// Auto-compact when the last prompt crossed 80% of the context window.
+    fn maybe_auto_compact(&mut self) {
+        let limit = self.cfg.context_window.max(1);
+        if self.last_prompt as f64 >= 0.8 * limit as f64 {
+            let pct = (self.last_prompt as f64 / limit as f64 * 100.0).round() as u32;
+            let _ = self
+                .ui
+                .send(UiEvent::Notice(format!("context {pct}% full — compacting automatically…")));
+            self.compact();
+        }
+    }
+
+    /// Replace older turns with a model-written summary. Keeps the system
+    /// prefix (prompt, memory, project context) and the most recent user
+    /// exchange verbatim; everything in between is summarized with a plain
+    /// (tool-less) completion.
+    fn compact(&mut self) {
+        let n = self.messages.len();
+        if n <= self.system_len + 2 {
+            let _ = self.ui.send(UiEvent::Notice("nothing to compact yet.".into()));
+            return;
+        }
+        // Keep the latest exchange (from the last user message on) verbatim —
+        // unless it IS the whole conversation, then summarize everything.
+        let tail_start = self.messages[self.system_len..]
+            .iter()
+            .rposition(|m| m.role == "user")
+            .map(|i| i + self.system_len)
+            .filter(|&i| i > self.system_len)
+            .unwrap_or(n);
+        let rendered = render_for_summary(&self.messages[self.system_len..tail_start]);
+        if rendered.trim().is_empty() {
+            let _ = self.ui.send(UiEvent::Notice("nothing to compact yet.".into()));
+            return;
+        }
+        let _ = self.ui.send(UiEvent::Notice("compacting context…".into()));
+        let req = vec![
+            Message::system(
+                "You compress coding-agent conversations. Write a dense summary that lets the \
+                 agent continue seamlessly. Preserve: the user's goals and constraints, decisions \
+                 made, files/paths touched and how, key file contents or APIs discovered, command \
+                 results that matter, and any unresolved problems or next steps. Use terse \
+                 bullet points. No preamble.",
+            ),
+            Message::user(format!("Summarize this conversation so far:\n\n{rendered}")),
+        ];
+        match api::chat_plain(&self.http, &self.cfg, &req, &self.cancel) {
+            Ok(summary) if !summary.trim().is_empty() => {
+                let mut new = self.messages[..self.system_len].to_vec();
+                new.push(Message::user(format!(
+                    "[Earlier conversation was compacted. Summary:]\n{}",
+                    summary.trim()
+                )));
+                new.push(Message {
+                    role: "assistant".into(),
+                    content: "Understood — continuing from that summary.".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+                new.extend_from_slice(&self.messages[tail_start..]);
+                self.messages = new;
+                self.save_session();
+                // Rough size estimate so the UI's ctx bar drops right away.
+                let est = estimate_tokens(&self.messages);
+                self.last_prompt = est;
+                let _ = self.ui.send(UiEvent::Context(est));
+                let _ = self.ui.send(UiEvent::Notice(format!(
+                    "context compacted: {n} → {} messages.",
+                    self.messages.len()
+                )));
+            }
+            Ok(_) => {
+                let _ = self.ui.send(UiEvent::Error("compaction failed: empty summary.".into()));
+            }
+            Err(e) => {
+                let _ = self.ui.send(UiEvent::Error(format!("compaction failed: {e}")));
+            }
+        }
+    }
+
     fn run_turn(&mut self, text: String) {
         self.messages.push(Message::user(text));
         for _ in 0..MAX_STEPS {
@@ -208,6 +303,7 @@ impl Worker {
                 }
             };
             if let Some(u) = usage {
+                self.last_prompt = u.prompt_tokens;
                 let _ = self.ui.send(UiEvent::Usage {
                     prompt: u.prompt_tokens,
                     completion: u.total_tokens.saturating_sub(u.prompt_tokens),
@@ -256,7 +352,7 @@ impl Worker {
             .as_ref()
             .ok()
             .and_then(|a| {
-                ["command", "path", "pattern", "note", "query"]
+                ["command", "path", "pattern", "note", "query", "url"]
                     .iter()
                     .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
             })
@@ -328,6 +424,11 @@ impl Worker {
             "recall" => {
                 let q = args.get("query").and_then(|v| v.as_str());
                 let r = tools::recall(q);
+                self.result_event(&r);
+                r
+            }
+            "web_fetch" => {
+                let r = tools::web_fetch(&self.http, s("url"));
                 self.result_event(&r);
                 r
             }
@@ -405,6 +506,51 @@ impl Worker {
             _ => false,
         }
     }
+}
+
+/// Render messages as role-tagged plain text for the summarizer. Tool results
+/// are clipped hard — the summary only needs their gist, and this keeps the
+/// compaction request itself small.
+fn render_for_summary(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        match m.role.as_str() {
+            "tool" => {
+                out.push_str(&format!("[tool result] {}\n", api::truncate(&m.content, 500)));
+            }
+            role => {
+                if !m.content.trim().is_empty() {
+                    out.push_str(&format!("[{role}] {}\n", api::truncate(&m.content, 4000)));
+                }
+                if let Some(calls) = &m.tool_calls {
+                    for c in calls {
+                        out.push_str(&format!(
+                            "[tool call] {}({})\n",
+                            c.function.name,
+                            api::truncate(&c.function.arguments, 300)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Belt and braces: the request must fit in the context window itself.
+    api::truncate(&out, 300_000)
+}
+
+/// Crude size estimate (~4 chars/token) for the post-compaction context bar.
+fn estimate_tokens(messages: &[Message]) -> u32 {
+    let chars: usize = messages
+        .iter()
+        .map(|m| {
+            m.content.len()
+                + m.tool_calls
+                    .as_ref()
+                    .map(|cs| cs.iter().map(|c| c.function.arguments.len() + 20).sum())
+                    .unwrap_or(0)
+        })
+        .sum();
+    (chars / 4) as u32
 }
 
 fn preview(s: &str, maxlines: usize) -> String {

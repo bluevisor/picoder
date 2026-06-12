@@ -131,6 +131,11 @@ pub fn tools_spec() -> serde_json::Value {
             "type":"object",
             "properties":{"query":{"type":"string"}}
         })),
+        tool("web_fetch","Fetch a URL over HTTP(S) and return its content as readable text (HTML is stripped to text). Use for documentation, APIs, and reference pages.", serde_json::json!({
+            "type":"object",
+            "properties":{"url":{"type":"string","description":"http:// or https:// URL"}},
+            "required":["url"]
+        })),
     ])
 }
 
@@ -182,25 +187,29 @@ struct DeltaFn {
 }
 
 /// One streaming completion. Calls `on_content`/`on_reasoning` as deltas arrive.
-/// Returns (assistant_text, tool_calls).
+/// Returns (assistant_text, tool_calls). `with_tools = false` omits the tool
+/// schema (used for internal calls like context compaction).
 fn chat_stream(
     http: &ureq::Agent,
     cfg: &Config,
     messages: &[Message],
+    with_tools: bool,
     cancel: &AtomicBool,
     mut on_content: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
 ) -> Result<(String, Vec<AccumCall>, Option<Usage>)> {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": messages,
-        "tools": tools_spec(),
-        "tool_choice": "auto",
         "temperature": 0.2,
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+    if with_tools {
+        body["tools"] = tools_spec();
+        body["tool_choice"] = serde_json::json!("auto");
+    }
     let resp = http
         .post(&url)
         .set("Authorization", &format!("Bearer {}", cfg.api_key))
@@ -301,7 +310,7 @@ pub fn chat_resilient(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        match chat_stream(http, cfg, messages, cancel, &mut on_content, &mut on_reasoning) {
+        match chat_stream(http, cfg, messages, true, cancel, &mut on_content, &mut on_reasoning) {
             Err(e) => {
                 if attempt == tries {
                     return Err(e);
@@ -322,6 +331,32 @@ pub fn chat_resilient(
         }
     }
     last.ok_or_else(|| anyhow!("no response"))
+}
+
+/// A plain (no tools) completion, with one retry on transient errors. Used for
+/// internal calls like summarizing the conversation during compaction.
+pub fn chat_plain(
+    http: &ureq::Agent,
+    cfg: &Config,
+    messages: &[Message],
+    cancel: &AtomicBool,
+) -> Result<String> {
+    let mut last_err = anyhow!("no response");
+    for _ in 0..2 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow!("cancelled"));
+        }
+        match chat_stream(http, cfg, messages, false, cancel, |_| {}, |_| {}) {
+            Ok((content, _, _)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(anyhow!("cancelled"));
+                }
+                return Ok(content);
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// DeepSeek account balance (best-effort; returns None for other providers).

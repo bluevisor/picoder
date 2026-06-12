@@ -221,7 +221,8 @@ enum Kind {
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/model", "/auto", "/reset", "/memory", "/theme", "/init", "/clear", "/help", "/exit",
+    "/model", "/auto", "/reset", "/compact", "/memory", "/theme", "/init", "/clear", "/help",
+    "/exit",
 ];
 
 /// Heavy block-letter "PICODE" for capable terminals.
@@ -345,6 +346,8 @@ pub struct App {
     history: Vec<String>,
     hist_idx: usize,
     pending: String,
+    /// Messages typed while the agent was busy, sent in order as turns finish.
+    queued: Vec<String>,
     mode: Mode,
     /// Buffer + reply channel for an in-flight masked sudo password prompt. Held
     /// in memory only; never pushed to the transcript, history, or session.
@@ -391,6 +394,7 @@ impl App {
             history,
             hist_idx,
             pending: String::new(),
+            queued: Vec::new(),
             mode: Mode::Idle,
             pw_input: String::new(),
             pw_reply: None,
@@ -472,7 +476,7 @@ impl App {
         self.live_reasoning.clear();
     }
 
-    pub fn handle_event(&mut self, ev: UiEvent) {
+    pub fn handle_event(&mut self, ev: UiEvent, h: &Handles) {
         match ev {
             UiEvent::Token(t) => {
                 self.live.push_str(&t);
@@ -544,6 +548,9 @@ impl App {
                 self.sess_prompt += prompt as u64;
                 self.sess_completion += completion as u64;
             }
+            UiEvent::Context(tokens) => {
+                self.last_prompt_tokens = tokens;
+            }
             UiEvent::Balance(b) => {
                 self.balance = Some(b);
             }
@@ -558,6 +565,13 @@ impl App {
             UiEvent::TurnDone => {
                 self.flush_live();
                 self.mode = Mode::Idle;
+                // Send the next queued message, if any. Local slash commands
+                // resolve immediately (no TurnDone), so keep draining until
+                // something goes to the worker or the queue empties.
+                while !self.queued.is_empty() && matches!(self.mode, Mode::Idle) {
+                    let text = self.queued.remove(0);
+                    self.dispatch(text, h);
+                }
             }
         }
     }
@@ -567,7 +581,7 @@ impl App {
     }
 
     pub fn on_paste(&mut self, s: String) {
-        if let Mode::Idle = self.mode {
+        if matches!(self.mode, Mode::Idle | Mode::Busy) {
             for c in s.chars() {
                 if c == '\n' || c == '\r' {
                     self.insert_char(' ');
@@ -782,24 +796,42 @@ impl App {
         }
     }
 
+    /// Busy: the composer stays live so the next message can be typed and
+    /// queued with Enter; Esc/Ctrl+C still interrupt the running turn.
     fn on_key_busy(&mut self, key: KeyEvent, h: &Handles) {
         match key.code {
-            KeyCode::Esc => h.shared.cancel.store(true, Ordering::Relaxed),
+            KeyCode::Enter => self.queue_input(),
+            KeyCode::Esc => self.interrupt(h),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                h.shared.cancel.store(true, Ordering::Relaxed)
+                self.interrupt(h)
             }
             KeyCode::PageUp => self.scroll_up(),
             KeyCode::PageDown => self.scroll_down(),
-            _ => {}
+            _ => {
+                self.on_key_edit(key);
+            }
+        }
+    }
+
+    /// Cancel the running turn. Queued messages won't be auto-sent into a turn
+    /// the user just killed — put them back in the composer instead.
+    fn interrupt(&mut self, h: &Handles) {
+        h.shared.cancel.store(true, Ordering::Relaxed);
+        if !self.queued.is_empty() {
+            let mut restored = std::mem::take(&mut self.queued).join(" ");
+            if !self.input.is_empty() {
+                restored.push(' ');
+                restored.push_str(&self.input);
+            }
+            self.input = restored;
+            self.cursor = self.char_len();
         }
     }
 
     fn on_key_idle(&mut self, key: KeyEvent, h: &Handles) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Enter => self.submit(h),
-            KeyCode::Tab => self.complete(),
             KeyCode::Char('c') if ctrl => {
                 if self.input.is_empty() {
                     self.should_quit = true;
@@ -813,6 +845,25 @@ impl App {
                     self.should_quit = true;
                 }
             }
+            KeyCode::Char('l') if ctrl => self.follow = true,
+            KeyCode::PageUp => self.scroll_up(),
+            KeyCode::PageDown => self.scroll_down(),
+            KeyCode::Esc => {
+                // Wait briefly: terminals often encode Alt+key as ESC prefix.
+                self.esc_deadline = Some(Instant::now() + Duration::from_millis(50));
+            }
+            _ => {
+                self.on_key_edit(key);
+            }
+        }
+    }
+
+    /// Composer editing keys shared by Idle and Busy (queueing) modes.
+    fn on_key_edit(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Tab => self.complete(),
             KeyCode::Char('u') if ctrl => {
                 let byte = self.byte_at(self.cursor);
                 self.input.replace_range(0..byte, "");
@@ -825,11 +876,10 @@ impl App {
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.char_len(),
             KeyCode::Char('w') if ctrl => self.delete_word(),
-            KeyCode::Char('l') if ctrl => self.follow = true,
             // macOS Option-as-Meta sends ESC b / ESC f for word motion.
             KeyCode::Char('b') if alt => self.cursor = self.prev_word(),
             KeyCode::Char('f') if alt => self.cursor = self.next_word(),
-            KeyCode::Char(c) => self.insert_char(c),
+            KeyCode::Char(c) if !ctrl => self.insert_char(c),
             KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Backspace => {
                 if self.cursor > 0 {
@@ -864,12 +914,6 @@ impl App {
             KeyCode::End => self.cursor = self.char_len(),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
-            KeyCode::PageUp => self.scroll_up(),
-            KeyCode::PageDown => self.scroll_down(),
-            KeyCode::Esc => {
-                // Wait briefly: terminals often encode Alt+key as ESC prefix.
-                self.esc_deadline = Some(Instant::now() + Duration::from_millis(50));
-            }
             _ => {}
         }
     }
@@ -1016,14 +1060,32 @@ impl App {
     }
 
     fn submit(&mut self, h: &Handles) {
+        let Some(text) = self.take_input() else { return };
+        self.dispatch(text, h);
+    }
+
+    /// While the agent is busy, Enter queues the composer text to send after
+    /// the current turn finishes.
+    fn queue_input(&mut self) {
+        let Some(text) = self.take_input() else { return };
+        self.queued.push(text);
+    }
+
+    /// Pull the trimmed composer text (recording it in history), or None if empty.
+    fn take_input(&mut self) -> Option<String> {
         let text = self.input.trim().to_string();
         self.input.clear();
         self.cursor = 0;
         if text.is_empty() {
-            return;
+            return None;
         }
         self.history.push(text.clone());
         self.hist_idx = self.history.len();
+        Some(text)
+    }
+
+    /// Run a slash command or send a user message to the worker.
+    fn dispatch(&mut self, text: String, h: &Handles) {
         if let Some(cmd) = text.strip_prefix('/') {
             self.run_command(cmd.trim(), h);
             return;
@@ -1056,6 +1118,10 @@ impl App {
             }
             "reset" => {
                 let _ = h.cmd_tx.send(WorkerCmd::Reset);
+            }
+            "compact" => {
+                let _ = h.cmd_tx.send(WorkerCmd::Compact);
+                self.mode = Mode::Busy;
             }
             "memory" => {
                 let mem = std::fs::read_to_string(memory_path()).unwrap_or_default();
@@ -1115,6 +1181,7 @@ impl App {
             "  /model [id|n]  list models, or set by id/number",
             "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
             "  /reset         clear conversation context",
+            "  /compact       summarize older turns to free context (auto at 80%)",
             "  /memory        show persistent memory",
             "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos)",
             "  /init          summarize this project into PICODE.md",
@@ -1122,6 +1189,7 @@ impl App {
             "  /help          show this help",
             "  /exit          quit picode",
             "input: @path attaches a file | Tab autocompletes commands & paths",
+            "       typing while the agent works queues the message; Enter queues it",
             "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-C quit",
         ];
         for l in lines {
@@ -1249,20 +1317,24 @@ impl App {
         self.prompt_str().chars().count()
     }
 
+    /// Rows the composer text needs at this width (same in Idle and Busy).
+    fn input_rows(&self, width: u16) -> u16 {
+        let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
+        let rows = self.char_len() / w + 1;
+        rows.clamp(1, 5) as u16
+    }
+
     fn composer_rows(&self, width: u16) -> u16 {
         match &self.mode {
-            Mode::Busy => 1,
+            // Spinner line + queued messages + the live composer.
+            Mode::Busy => 1 + self.queued.len() as u16 + self.input_rows(width),
             // Description line + the (y)/(n)/(a) line below it.
             Mode::Approval(_) => 2,
             // Header line + one line per theme.
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
             // Prompt line + masked-input line.
             Mode::Password { .. } => 2,
-            Mode::Idle => {
-                let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
-                let rows = self.char_len() / w + 1;
-                rows.clamp(1, 5) as u16
-            }
+            Mode::Idle => self.input_rows(width),
         }
     }
 
@@ -1319,12 +1391,29 @@ impl App {
         match &self.mode {
             Mode::Idle => self.render_composer(f, area),
             Mode::Busy => {
-                let line = Line::from(vec![
+                let mut lines = vec![Line::from(vec![
                     Span::styled(format!("{} ", self.spin_frame()), Style::default().fg(self.palette.accent)),
                     Span::styled("working... ", Style::default().fg(self.dim_text())),
-                    Span::styled("(Esc to interrupt)", Style::default().fg(self.dim_text())),
-                ]);
-                f.render_widget(Paragraph::new(line), area);
+                    Span::styled("(Esc to interrupt · Enter queues)", Style::default().fg(self.dim_text())),
+                ])];
+                let mark = if self.ascii { "->" } else { "↳" };
+                for q in &self.queued {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {mark} queued: {q}"),
+                        Style::default().fg(self.dim_text()),
+                    )));
+                }
+                let head_h = (lines.len() as u16).min(area.height);
+                f.render_widget(Paragraph::new(lines), Rect { height: head_h, ..area });
+                // Live composer below, so the next message can be typed now.
+                if area.height > head_h {
+                    let comp = Rect {
+                        y: area.y + head_h,
+                        height: area.height - head_h,
+                        ..area
+                    };
+                    self.render_composer(f, comp);
+                }
             }
             Mode::Approval(desc) => {
                 // Keep the y/n/a hotkeys at the start of their own line so a long
@@ -1428,10 +1517,12 @@ impl App {
                 spans.push(Span::raw(row.iter().collect::<String>()));
             }
             if empty && r == 0 {
-                spans.push(Span::styled(
-                    "  describe a task · @file to attach · /help",
-                    Style::default().fg(self.dim_text()),
-                ));
+                let hint = if matches!(self.mode, Mode::Busy) {
+                    "  type to queue the next message"
+                } else {
+                    "  describe a task · @file to attach · /help"
+                };
+                spans.push(Span::styled(hint, Style::default().fg(self.dim_text())));
             }
             lines.push(Line::from(spans));
         }
@@ -1743,7 +1834,7 @@ pub fn run<B: ratatui::backend::Backend>(
     loop {
         let mut dirty = false;
         while let Ok(ev) = ui_rx.try_recv() {
-            app.handle_event(ev);
+            app.handle_event(ev, h);
             dirty = true;
         }
         if app.should_quit() {
