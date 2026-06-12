@@ -193,7 +193,17 @@ impl Config {
 
     pub fn load() -> Config {
         let mut cfg = Self::load_disk();
-        for var in ["DEEPSEEK_API_KEY", "PICODE_API_KEY"] {
+        // Provider-specific env vars (highest priority) + generic fallback.
+        for var in [
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GROQ_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GOOGLE_API_KEY",
+            "GEMINI_API_KEY",
+            "PICODE_API_KEY",
+        ] {
             if let Ok(k) = std::env::var(var) {
                 if !k.is_empty() {
                     cfg.api_key = k;
