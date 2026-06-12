@@ -223,7 +223,7 @@ enum Kind {
 
 /// Slash commands with the one-line description shown in the `/` palette.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/model", "list models, or switch by id/number"),
+    ("/model", "pick a model from the provider's list"),
     ("/config", "settings: provider, model, key, thinking, …"),
     ("/compact", "summarize older turns to free context"),
     ("/reset", "clear conversation context"),
@@ -402,6 +402,60 @@ enum Mode {
     /// The `/config` panel. `edit` holds the text buffer while a free-text
     /// row (base url, model, api key, context window) is being edited.
     Settings { cursor: usize, edit: Option<String> },
+    /// A generic selection list (state lives in `App::picker`): cursor +
+    /// type-to-filter, used by `/model` for the fetched model list.
+    Select,
+}
+
+/// What committing a `Select` picker entry does.
+#[derive(Clone, Copy)]
+enum PickAction {
+    /// Switch model to the chosen id.
+    Model,
+}
+
+/// State for `Mode::Select`: a filterable, scrollable list of choices.
+struct Picker {
+    title: String,
+    items: Vec<String>,
+    /// Item highlighted as the current value (shown with a marker).
+    current: Option<usize>,
+    filter: String,
+    /// Cursor within the *filtered* view.
+    cursor: usize,
+    scroll: usize,
+    action: PickAction,
+}
+
+/// Visible rows of a Select picker before it scrolls.
+const PICKER_VISIBLE: usize = 8;
+
+impl Picker {
+    /// Indices of items matching the filter (case-insensitive substring).
+    fn filtered(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let f = self.filter.to_lowercase();
+        (0..self.items.len())
+            .filter(|&i| self.items[i].to_lowercase().contains(&f))
+            .collect()
+    }
+
+    /// Keep the cursor inside the filtered list and the scroll window.
+    fn clamp(&mut self, filtered_len: usize) {
+        if filtered_len == 0 {
+            self.cursor = 0;
+            self.scroll = 0;
+            return;
+        }
+        self.cursor = self.cursor.min(filtered_len - 1);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + PICKER_VISIBLE {
+            self.scroll = self.cursor + 1 - PICKER_VISIBLE;
+        }
+    }
 }
 
 /// Everything the UI needs from config, captured before the worker consumes it.
@@ -430,6 +484,8 @@ pub struct App {
     queued: Vec<String>,
     /// Highlighted row of the `/` command palette (clamped at use).
     suggest_idx: usize,
+    /// State for Mode::Select (the /model list, etc.).
+    picker: Option<Picker>,
     mode: Mode,
     /// Buffer + reply channel for an in-flight masked sudo password prompt. Held
     /// in memory only; never pushed to the transcript, history, or session.
@@ -482,6 +538,7 @@ impl App {
             pending: String::new(),
             queued: Vec::new(),
             suggest_idx: 0,
+            picker: None,
             mode: Mode::Idle,
             pw_input: String::new(),
             pw_reply: None,
@@ -629,12 +686,25 @@ impl App {
             UiEvent::ModelList(ids) => {
                 self.flush_live();
                 self.last_models = ids.clone();
-                self.push(Kind::Notice, format!("available models ({}):", self.model_info));
-                for (i, id) in ids.iter().enumerate() {
-                    let cur = if id == self.model_short() { "  <- current" } else { "" };
-                    self.push(Kind::Notice, format!("  {:>2}) {id}{cur}", i + 1));
+                if ids.is_empty() {
+                    self.push(Kind::Notice, "provider returned no models.".to_string());
+                    return;
                 }
-                self.push(Kind::Notice, "set with: /model <id>  or  /model <number>".to_string());
+                // Open an interactive picker instead of printing the list.
+                let current = ids.iter().position(|id| id == self.model_short());
+                let mut p = Picker {
+                    title: format!("select model ({})", ids.len()),
+                    items: ids,
+                    current,
+                    filter: String::new(),
+                    cursor: current.unwrap_or(0),
+                    scroll: 0,
+                    action: PickAction::Model,
+                };
+                let n = p.filtered().len();
+                p.clamp(n);
+                self.picker = Some(p);
+                self.mode = Mode::Select;
             }
             UiEvent::ModelChanged(m) => {
                 self.settings.model = m.clone();
@@ -661,7 +731,11 @@ impl App {
             }
             UiEvent::TurnDone => {
                 self.flush_live();
-                self.mode = Mode::Idle;
+                // Don't clobber an interactive mode a preceding event opened
+                // in this same turn (e.g. ModelList → Select picker).
+                if matches!(self.mode, Mode::Busy) {
+                    self.mode = Mode::Idle;
+                }
                 // Send the next queued message, if any. Local slash commands
                 // resolve immediately (no TurnDone), so keep draining until
                 // something goes to the worker or the queue empties.
@@ -780,6 +854,7 @@ impl App {
                     Mode::Approval(_) => self.on_key_approval(alt_key, h),
                     Mode::ThemeSelect { .. } => self.on_key_themeselect(alt_key, h),
                     Mode::Settings { .. } => self.on_key_settings(alt_key, h),
+                    Mode::Select => self.on_key_select(alt_key, h),
                     Mode::Busy => self.on_key_busy(alt_key, h),
                     Mode::Password { .. } | Mode::Question { .. } => {}
                     Mode::Idle => self.on_key_idle(alt_key, h),
@@ -794,6 +869,7 @@ impl App {
             Mode::Approval(_) => self.on_key_approval(key, h),
             Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
             Mode::Settings { .. } => self.on_key_settings(key, h),
+            Mode::Select => self.on_key_select(key, h),
             Mode::Busy => self.on_key_busy(key, h),
             // Password/Question are intercepted at the top of on_key.
             Mode::Password { .. } | Mode::Question { .. } => {}
@@ -814,6 +890,10 @@ impl App {
             }
             Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
             Mode::Settings { .. } => self.mode = Mode::Idle,
+            Mode::Select => {
+                self.picker = None;
+                self.mode = Mode::Idle;
+            }
             // Password/Question Esc is handled in their own key handlers.
             Mode::Password { .. } | Mode::Question { .. } => {}
             Mode::Idle => {
@@ -1073,6 +1153,80 @@ impl App {
                 }
                 _ => self.push(Kind::ErrorK, "context window must be a positive integer".to_string()),
             },
+            _ => {}
+        }
+    }
+
+    /// Generic selection list (Mode::Select). Up/Down move, typing filters,
+    /// Enter commits the highlighted item, Esc cancels.
+    fn on_key_select(&mut self, key: KeyEvent, h: &Handles) {
+        let Some(p) = &mut self.picker else {
+            self.mode = Mode::Idle;
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let filtered = p.filtered();
+        match key.code {
+            KeyCode::Esc => {
+                self.picker = None;
+                self.mode = Mode::Idle;
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.picker = None;
+                self.mode = Mode::Idle;
+            }
+            KeyCode::Enter => {
+                let chosen = filtered.get(p.cursor).map(|&i| p.items[i].clone());
+                let action = p.action;
+                self.picker = None;
+                self.mode = Mode::Idle;
+                if let Some(id) = chosen {
+                    match action {
+                        // SetModel persists and echoes ModelChanged + a notice.
+                        PickAction::Model => {
+                            let _ = h.cmd_tx.send(WorkerCmd::SetModel(id));
+                        }
+                    }
+                }
+            }
+            KeyCode::Up => {
+                let n = filtered.len();
+                if n > 0 {
+                    p.cursor = (p.cursor + n - 1) % n;
+                    p.clamp(n);
+                }
+            }
+            KeyCode::Down => {
+                let n = filtered.len();
+                if n > 0 {
+                    p.cursor = (p.cursor + 1) % n;
+                    p.clamp(n);
+                }
+            }
+            KeyCode::PageUp => {
+                p.cursor = p.cursor.saturating_sub(PICKER_VISIBLE);
+                p.clamp(filtered.len());
+            }
+            KeyCode::PageDown => {
+                p.cursor += PICKER_VISIBLE;
+                p.clamp(filtered.len());
+            }
+            KeyCode::Char('u') if ctrl => {
+                p.filter.clear();
+                p.cursor = 0;
+                p.scroll = 0;
+            }
+            KeyCode::Backspace => {
+                p.filter.pop();
+                p.cursor = 0;
+                p.scroll = 0;
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                p.filter.push(caps_char(&key, c));
+                p.cursor = 0;
+                p.scroll = 0;
+            }
             _ => {}
         }
     }
@@ -1529,7 +1683,7 @@ impl App {
     fn show_help(&mut self) {
         let lines = [
             "commands:",
-            "  /model [id|n]  list models, or set by id/number",
+            "  /model [id|n]  open the model picker, or set directly by id/number",
             "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
             "  /reset         clear conversation context",
             "  /compact       summarize older turns to free context (auto at 80%)",
@@ -1713,6 +1867,11 @@ impl App {
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
             // Header line + one line per setting.
             Mode::Settings { .. } => SETTING_LABELS.len() as u16 + 1,
+            // Header line + the visible window of choices (≥1 for "no matches").
+            Mode::Select => {
+                let n = self.picker.as_ref().map(|p| p.filtered().len()).unwrap_or(0);
+                n.clamp(1, PICKER_VISIBLE) as u16 + 1
+            }
             // Prompt line + masked-input line.
             Mode::Password { .. } => 2,
             // Wrapped question + answer line.
@@ -1842,6 +2001,57 @@ impl App {
                         format!("{lead} ({}) {t}", i + 1),
                         style,
                     )]));
+                }
+                f.render_widget(Paragraph::new(lines), area);
+            }
+            Mode::Select => {
+                let Some(p) = &self.picker else { return };
+                let filtered = p.filtered();
+                let marker = if self.ascii { ">" } else { "▸" };
+                let mut lines: Vec<Line> = Vec::new();
+                let mut header = vec![
+                    Span::styled(format!("{} ", p.title), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        "(type to filter · Enter select · Esc cancel)",
+                        Style::default().fg(self.dim_text()),
+                    ),
+                ];
+                if !p.filter.is_empty() {
+                    header.push(Span::styled(
+                        format!("  filter: {}", p.filter),
+                        Style::default().fg(self.palette.accent),
+                    ));
+                }
+                lines.push(Line::from(header));
+                if filtered.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  (no matches — Backspace to widen)",
+                        Style::default().fg(self.dim_text()),
+                    )));
+                }
+                let end = (p.scroll + PICKER_VISIBLE).min(filtered.len());
+                for (row, &item_idx) in filtered[p.scroll..end].iter().enumerate() {
+                    let i = p.scroll + row;
+                    let sel = i == p.cursor;
+                    let lead = if sel { marker } else { " " };
+                    let cur = if Some(item_idx) == p.current { "  (current)" } else { "" };
+                    let style = if sel {
+                        Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.dim_text())
+                    };
+                    // Scroll hints on the window edges.
+                    let more = if row == 0 && p.scroll > 0 {
+                        if self.ascii { "  ^ more".to_string() } else { "  ↑ more".to_string() }
+                    } else if i == end - 1 && end < filtered.len() {
+                        format!("  +{} more", filtered.len() - end)
+                    } else {
+                        String::new()
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{lead} {}{cur}{more}", p.items[item_idx]),
+                        style,
+                    )));
                 }
                 f.render_widget(Paragraph::new(lines), area);
             }
