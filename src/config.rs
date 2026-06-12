@@ -345,17 +345,19 @@ fn set_private(_path: &std::path::Path) {}
 pub fn run_setup() -> Result<Config> {
     let mut cfg = Config::load();
     println!("\x1b[1mpicode setup\x1b[0m");
-    println!("Provider:  1) DeepSeek (default)   2) OpenAI   3) Groq   4) Custom");
+    println!("Provider:");
+    println!("  1) DeepSeek (default)   2) OpenAI      3) Anthropic");
+    println!("  4) Groq                 5) OpenRouter   6) Google");
+    println!("  7) Custom");
     let choice = prompt("> [1] ")?;
     let choice = if choice.is_empty() { "1".into() } else { choice };
     let (prov, base, model): (String, String, String) = match choice.as_str() {
-        "2" => ("openai".into(), "https://api.openai.com/v1".into(), "gpt-4o-mini".into()),
-        "3" => (
-            "groq".into(),
-            "https://api.groq.com/openai/v1".into(),
-            "llama-3.3-70b-versatile".into(),
-        ),
-        "4" => {
+        "2" => ("openai".into(),    "https://api.openai.com/v1".into(),                     "gpt-4o-mini".into()),
+        "3" => ("anthropic".into(), "https://api.anthropic.com/v1".into(),                  "claude-sonnet-4-20250514".into()),
+        "4" => ("groq".into(),      "https://api.groq.com/openai/v1".into(),                "llama-3.3-70b-versatile".into()),
+        "5" => ("openrouter".into(),"https://openrouter.ai/api/v1".into(),                  "openai/gpt-4o-mini".into()),
+        "6" => ("google".into(),    "https://generativelanguage.googleapis.com/v1beta/openai".into(), "gemini-2.5-flash".into()),
+        "7" => {
             let p = nonempty(prompt("provider name: ")?, "custom");
             let b = prompt("base_url (OpenAI-compatible): ")?;
             let m = prompt("model: ")?;
@@ -363,7 +365,7 @@ pub fn run_setup() -> Result<Config> {
         }
         _ => ("deepseek".into(), "https://api.deepseek.com".into(), "deepseek-v4-pro".into()),
     };
-    let model = if choice == "4" {
+    let model = if choice == "7" {
         model
     } else {
         let m = prompt(&format!("model [{model}]: "))?;
