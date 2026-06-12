@@ -910,17 +910,24 @@ impl App {
     }
 
     /// Cancel the running turn. Queued messages won't be auto-sent into a turn
-    /// the user just killed — put them back in the composer instead.
+    /// the user just killed: the first goes back into the (empty) composer,
+    /// and the rest are dropped with a notice — they were recorded in history
+    /// at queue time, so Up recalls them.
     fn interrupt(&mut self, h: &Handles) {
         h.shared.cancel.store(true, Ordering::Relaxed);
-        if !self.queued.is_empty() {
-            let mut restored = std::mem::take(&mut self.queued).join(" ");
-            if !self.input.is_empty() {
-                restored.push(' ');
-                restored.push_str(&self.input);
-            }
-            self.input = restored;
+        if self.queued.is_empty() {
+            return;
+        }
+        let mut q = std::mem::take(&mut self.queued);
+        if self.input.is_empty() {
+            self.input = q.remove(0);
             self.cursor = self.char_len();
+        }
+        if !q.is_empty() {
+            self.push(
+                Kind::Notice,
+                format!("({} queued message(s) cleared — recall with Up)", q.len()),
+            );
         }
     }
 
@@ -1567,6 +1574,9 @@ impl App {
                         ))
                     })
                     .collect();
+                // A very long question must not push the answer line (and its
+                // cursor) below the area — clip the question, keep the input.
+                lines.truncate((area.height as usize).saturating_sub(1));
                 lines.push(Line::from(vec![
                     Span::styled(self.prompt_str(), Style::default().fg(self.palette.accent)),
                     Span::raw(self.q_input.clone()),

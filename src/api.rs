@@ -16,8 +16,8 @@ pub struct Message {
     #[serde(default)]
     pub content: String,
     /// Attached images as `data:image/...;base64,...` URIs. Sent to the API as
-    /// OpenAI content parts (see `messages_payload`); persisted via derive so
-    /// resumed sessions keep them.
+    /// OpenAI content parts (see `messages_payload`). Stripped when sessions
+    /// are saved — the payloads would balloon the session file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -115,10 +115,12 @@ pub fn session_path() -> PathBuf {
 }
 
 impl Config {
-    pub fn load() -> Config {
+    /// Read config.json leniently: each known field is merged independently,
+    /// so one malformed field (a typo in mcp_servers, say) can't reset the
+    /// others. No env override — this is the on-disk truth, safe to rewrite.
+    fn load_disk() -> Config {
         let mut cfg = Config::default();
         if let Ok(text) = std::fs::read_to_string(config_path()) {
-            // Merge known fields; tolerate a partial/legacy file.
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(s) = v.get("provider").and_then(|x| x.as_str()) {
                     cfg.provider = s.to_string();
@@ -135,6 +137,15 @@ impl Config {
                 if let Some(s) = v.get("theme").and_then(|x| x.as_str()) {
                     cfg.theme = s.to_string();
                 }
+                if let Some(n) = v.get("context_window").and_then(|x| x.as_u64()) {
+                    cfg.context_window = n as u32;
+                }
+                if let Some(n) = v.get("price_in").and_then(|x| x.as_f64()) {
+                    cfg.price_in = n;
+                }
+                if let Some(n) = v.get("price_out").and_then(|x| x.as_f64()) {
+                    cfg.price_out = n;
+                }
                 if let Some(m) = v.get("mcp_servers") {
                     if let Ok(servers) = serde_json::from_value(m.clone()) {
                         cfg.mcp_servers = servers;
@@ -145,6 +156,11 @@ impl Config {
                 }
             }
         }
+        cfg
+    }
+
+    pub fn load() -> Config {
+        let mut cfg = Self::load_disk();
         for var in ["DEEPSEEK_API_KEY", "PICODE_API_KEY"] {
             if let Ok(k) = std::env::var(var) {
                 if !k.is_empty() {
@@ -171,13 +187,22 @@ impl Config {
             "api_key": on_disk.api_key,
             "theme": on_disk.theme,
         });
-        // Preserve user-configured MCP servers across model/theme rewrites.
+        // Preserve user customizations across model/theme rewrites; only
+        // non-default values are written, keeping the common file minimal.
         if !on_disk.mcp_servers.is_empty() {
             json["mcp_servers"] = serde_json::to_value(&on_disk.mcp_servers).unwrap_or_default();
         }
-        // Only written when turned off (default is on).
         if !on_disk.auto_commit {
             json["auto_commit"] = serde_json::json!(false);
+        }
+        if on_disk.context_window != default_ctx() {
+            json["context_window"] = serde_json::json!(on_disk.context_window);
+        }
+        if on_disk.price_in != default_price_in() {
+            json["price_in"] = serde_json::json!(on_disk.price_in);
+        }
+        if on_disk.price_out != default_price_out() {
+            json["price_out"] = serde_json::json!(on_disk.price_out);
         }
         let path = config_path();
         std::fs::write(&path, serde_json::to_string_pretty(&json)?)
@@ -187,28 +212,18 @@ impl Config {
     }
 
     /// Update only the model field on disk, preserving the rest of the file.
+    /// Goes through the lenient loader — a strict parse here could fall back
+    /// to defaults on any malformed field and wipe the saved key.
     pub fn persist_model(&self) {
-        let mut disk = Config::default();
-        if let Ok(text) = std::fs::read_to_string(config_path()) {
-            if let Ok(c) = serde_json::from_str::<Config>(&text) {
-                disk = c;
-            }
-        }
+        let mut disk = Config::load_disk();
         disk.model = self.model.clone();
-        disk.key_from_env = false;
         let _ = disk.save();
     }
 
     /// Persist only the theme name, preserving the rest of the file.
     pub fn persist_theme(theme: &str) {
-        let mut disk = Config::default();
-        if let Ok(text) = std::fs::read_to_string(config_path()) {
-            if let Ok(c) = serde_json::from_str::<Config>(&text) {
-                disk = c;
-            }
-        }
+        let mut disk = Config::load_disk();
         disk.theme = theme.to_string();
-        disk.key_from_env = false;
         let _ = disk.save();
     }
 }

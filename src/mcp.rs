@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -42,7 +43,14 @@ struct Server {
 impl Server {
     /// Send a request and wait for the response with the matching id, skipping
     /// notifications and unrelated messages. Returns the `result` value.
-    fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    /// Polls `cancel` (when given) so Esc can abort a slow tool call.
+    fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
@@ -53,13 +61,18 @@ impl Server {
             .map_err(|e| format!("write failed: {e}"))?;
         let deadline = std::time::Instant::now() + timeout;
         loop {
+            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return Err("interrupted".into());
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(format!("timed out waiting for {method}"));
             }
-            let line = match self.rx.recv_timeout(remaining) {
+            // Short recv slices keep the cancel check responsive.
+            let slice = remaining.min(Duration::from_millis(250));
+            let line = match self.rx.recv_timeout(slice) {
                 Ok(l) => l,
-                Err(mpsc::RecvTimeoutError::Timeout) => return Err(format!("timed out waiting for {method}")),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => return Err("server closed the connection".into()),
             };
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
@@ -160,10 +173,11 @@ impl Mcp {
                 "clientInfo": {"name":"picode","version":env!("CARGO_PKG_VERSION")}
             }),
             INIT_TIMEOUT,
+            None,
         )?;
         server.notify("notifications/initialized", json!({}));
 
-        let listed = server.request("tools/list", json!({}), INIT_TIMEOUT)?;
+        let listed = server.request("tools/list", json!({}), INIT_TIMEOUT, None)?;
         let tools = parse_tools(name, &listed);
         Ok((server, tools))
     }
@@ -182,7 +196,8 @@ impl Mcp {
     }
 
     /// Call an `mcp__server__tool` with the given arguments; returns text.
-    pub fn call(&mut self, full_name: &str, args: &Value) -> String {
+    /// `cancel` aborts the wait (the server may still finish the work).
+    pub fn call(&mut self, full_name: &str, args: &Value, cancel: &AtomicBool) -> String {
         let Some(tool) = self.tools.iter().find(|t| t.full_name == full_name).cloned() else {
             return format!("ERROR: unknown MCP tool {full_name}");
         };
@@ -190,7 +205,7 @@ impl Mcp {
             return format!("ERROR: MCP server {} is not running", tool.server);
         };
         let params = json!({"name": tool.tool, "arguments": args});
-        match server.request("tools/call", params, CALL_TIMEOUT) {
+        match server.request("tools/call", params, CALL_TIMEOUT, Some(cancel)) {
             Ok(result) => render_tool_result(&result),
             Err(e) => format!("ERROR: MCP call failed: {e}"),
         }
@@ -210,6 +225,19 @@ impl Drop for Mcp {
     }
 }
 
+/// OpenAI-compatible APIs require function names matching
+/// `^[a-zA-Z0-9_-]{1,64}$`; one bad MCP name would 400 every request. Map
+/// anything else to `_` and clamp the length. Dispatch looks tools up by this
+/// sanitized name, while the call still uses the server's real tool name.
+fn sanitize_name(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    out.truncate(64);
+    out
+}
+
 fn parse_tools(server: &str, listed: &Value) -> Vec<McpTool> {
     let Some(arr) = listed.get("tools").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -227,7 +255,7 @@ fn parse_tools(server: &str, listed: &Value) -> Vec<McpTool> {
                 .cloned()
                 .unwrap_or_else(|| json!({"type":"object","properties":{}}));
             Some(McpTool {
-                full_name: format!("mcp__{server}__{tool}"),
+                full_name: sanitize_name(&format!("mcp__{server}__{tool}")),
                 server: server.to_string(),
                 tool: tool.to_string(),
                 description,
@@ -292,14 +320,23 @@ for line in sys.stdin:
     #[test]
     #[ignore] // needs python3; run with `cargo test -- --ignored`
     fn mcp_handshake_list_and_call() {
+        let cancel = AtomicBool::new(false);
         let mut mcp = Mcp::launch(&mini_config());
         assert_eq!(mcp.tools().len(), 1, "status: {:?}", mcp.status().iter().map(|s| &s.detail).collect::<Vec<_>>());
         assert_eq!(mcp.tools()[0].full_name, "mcp__mini__add");
         assert!(mcp.handles("mcp__mini__add"));
-        let out = mcp.call("mcp__mini__add", &json!({"a": 2, "b": 40}));
+        let out = mcp.call("mcp__mini__add", &json!({"a": 2, "b": 40}), &cancel);
         assert_eq!(out, "sum=42");
-        let bad = mcp.call("mcp__mini__missing", &json!({}));
+        let bad = mcp.call("mcp__mini__missing", &json!({}), &cancel);
         assert!(bad.starts_with("ERROR"));
+    }
+
+    #[test]
+    fn sanitize_tool_names() {
+        assert_eq!(sanitize_name("mcp__mini__add"), "mcp__mini__add");
+        assert_eq!(sanitize_name("mcp__my.server__do/it"), "mcp__my_server__do_it");
+        let long = sanitize_name(&format!("mcp__s__{}", "x".repeat(100)));
+        assert_eq!(long.len(), 64);
     }
 
     #[test]

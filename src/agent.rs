@@ -115,7 +115,11 @@ pub fn spawn(
     let shared = Shared { cancel: cancel.clone(), perm: perm.clone() };
 
     let join = std::thread::spawn(move || {
-        let system_len = messages.len();
+        // The protected prefix is the leading run of system messages (prompt,
+        // memory, project context, git state). Counting by role — rather than
+        // taking the startup message count — keeps /reset and /compact correct
+        // for resumed sessions, where startup messages span the whole history.
+        let system_len = system_prefix_len(&messages);
         // Launch MCP servers before the loop (can take a moment per server).
         let mcp = if cfg.mcp_servers.is_empty() {
             Mcp::disabled()
@@ -235,7 +239,19 @@ impl Worker {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(json) = serde_json::to_string(&self.messages) {
+        // Strip image payloads: a few photos would balloon the session file to
+        // multi-MB rewritten every turn (painful on a Pi Zero). The text
+        // around each image survives, so a resumed session stays coherent.
+        let slim: Vec<Message> = self
+            .messages
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                m.images.clear();
+                m
+            })
+            .collect();
+        if let Ok(json) = serde_json::to_string(&slim) {
             let _ = std::fs::write(path, json);
         }
     }
@@ -322,6 +338,9 @@ impl Worker {
     }
 
     fn run_turn(&mut self, text: String, images: Vec<String>) {
+        // Drop images a previous interrupted turn queued but never consumed,
+        // so they can't surface mid-way through an unrelated turn.
+        self.pending_images.clear();
         self.messages.push(Message::user_with_images(text, images));
         self.run_loop();
     }
@@ -446,8 +465,10 @@ impl Worker {
         self.system_len = saved_len;
         // The parent's context size is unchanged by the sub-agent (only the
         // report re-enters it); restore the gauge so auto-compaction tracks
-        // the parent, not the sub-agent's final prompt.
+        // the parent, not the sub-agent's final prompt — and tell the UI so
+        // its ctx bar doesn't keep showing the sub-agent's usage.
         self.last_prompt = saved_prompt;
+        let _ = self.ui.send(UiEvent::Context(saved_prompt));
         self.messages = saved_msgs;
 
         if report.trim().is_empty() {
@@ -725,7 +746,8 @@ impl Worker {
                     self.result_event(&r);
                     return r;
                 }
-                let r = self.mcp.call(other, args);
+                let cancel = self.cancel.clone();
+                let r = self.mcp.call(other, args, &cancel);
                 self.result_event(&r);
                 r
             }
@@ -799,12 +821,14 @@ fn render_for_summary(messages: &[Message]) -> String {
     api::truncate(&out, 300_000)
 }
 
-/// Crude size estimate (~4 chars/token) for the post-compaction context bar.
+/// Crude size estimate (~4 chars/token, ~1000 tokens per image) for the
+/// post-compaction context bar.
 fn estimate_tokens(messages: &[Message]) -> u32 {
     let chars: usize = messages
         .iter()
         .map(|m| {
             m.content.len()
+                + m.images.len() * 4000
                 + m.tool_calls
                     .as_ref()
                     .map(|cs| cs.iter().map(|c| c.function.arguments.len() + 20).sum())
@@ -812,6 +836,12 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
         })
         .sum();
     (chars / 4) as u32
+}
+
+/// Length of the leading run of system messages — the conversation prefix
+/// that /reset and /compact must preserve.
+fn system_prefix_len(messages: &[Message]) -> usize {
+    messages.iter().take_while(|m| m.role == "system").count()
 }
 
 /// Parse the `edits` argument of multi_edit into typed edit requests.
@@ -853,4 +883,26 @@ fn preview(s: &str, maxlines: usize) -> String {
     }
     let head = lines[..maxlines].join("\n");
     format!("{head}\n… (+{} more lines)", lines.len() - maxlines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prefix_counts_leading_system_only() {
+        // Fresh session: every startup message is system.
+        let fresh = vec![Message::system("a"), Message::system("b")];
+        assert_eq!(system_prefix_len(&fresh), 2);
+        // Resumed session: the prefix ends at the first user message, even
+        // though the whole history was passed in at spawn.
+        let resumed = vec![
+            Message::system("prompt"),
+            Message::system("memory"),
+            Message::user("hi"),
+            Message::system("not a prefix message"),
+        ];
+        assert_eq!(system_prefix_len(&resumed), 2);
+        assert_eq!(system_prefix_len(&[]), 0);
+    }
 }

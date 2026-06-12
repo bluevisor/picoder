@@ -373,9 +373,12 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     if paths.is_empty() || !in_git_repo(dir) {
         return String::new();
     }
+    // Tools expand `~` before touching the filesystem; git does not, so the
+    // model's raw path strings must be expanded the same way here.
+    let paths: Vec<PathBuf> = paths.iter().map(|p| expand(p)).collect();
     let mut add = Command::new("git");
     add.arg("-C").arg(dir).arg("add").arg("--");
-    for p in paths {
+    for p in &paths {
         add.arg(p);
     }
     if add.stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) {
@@ -390,7 +393,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
             c.args(["-c", "user.name=picode", "-c", "user.email=picode@localhost"]);
         }
         c.args(["commit", "--no-verify", "-m", message, "--"]);
-        for p in paths {
+        for p in &paths {
             c.arg(p);
         }
         c.stdout(Stdio::null()).stderr(Stdio::null()).status()
