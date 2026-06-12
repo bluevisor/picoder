@@ -1718,6 +1718,7 @@ impl App {
             "  /model [id|n]  open the model picker, or set directly by id/number",
             "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
             "  /reset         clear conversation context",
+            "  /new           delete session, fresh start",
             "  /compact       summarize older turns to free context (auto at 80%)",
             "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
