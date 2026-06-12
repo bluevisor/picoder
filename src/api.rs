@@ -169,6 +169,14 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"question":{"type":"string"}},
             "required":["question"]
         })),
+        tool("task","Delegate a self-contained sub-task to a fresh sub-agent that has its own context and the same tools. Use to parallelize exploration or keep a big sub-task's intermediate steps out of your context. Give complete instructions; you only get back the sub-agent's final report.", serde_json::json!({
+            "type":"object",
+            "properties":{
+                "description":{"type":"string","description":"Short label for the sub-task (a few words)."},
+                "prompt":{"type":"string","description":"Full instructions for the sub-agent, including everything it needs to know."}
+            },
+            "required":["prompt"]
+        })),
     ])
 }
 

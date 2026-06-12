@@ -87,6 +87,9 @@ struct Worker {
     session: Option<PathBuf>,
     /// Prompt tokens of the last completion, for the auto-compaction trigger.
     last_prompt: u32,
+    /// True while a sub-agent is running: suppresses streaming the sub-agent's
+    /// tokens as the main reply, and blocks nested `task` calls.
+    quiet: bool,
 }
 
 pub fn spawn(
@@ -115,6 +118,7 @@ pub fn spawn(
             appr_rx,
             session,
             last_prompt: 0,
+            quiet: false,
         };
         w.refresh_balance(); // initial account balance for the status line
         while let Ok(cmd) = cmd_rx.recv() {
@@ -274,10 +278,19 @@ impl Worker {
 
     fn run_turn(&mut self, text: String) {
         self.messages.push(Message::user(text));
+        self.run_loop();
+    }
+
+    /// The model/tool loop over `self.messages`. Returns the final assistant
+    /// text (the reply with no tool calls). When `self.quiet` is set (inside a
+    /// sub-agent) assistant tokens aren't streamed to the UI as the main reply,
+    /// but tool activity still shows so the user can follow along and approve.
+    fn run_loop(&mut self) -> String {
+        let quiet = self.quiet;
         for _ in 0..MAX_STEPS {
             if self.cancel.load(Ordering::Relaxed) {
                 let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
-                return;
+                return String::new();
             }
             let ui = self.ui.clone();
             let ui2 = self.ui.clone();
@@ -288,10 +301,14 @@ impl Worker {
                 &self.messages,
                 &self.cancel,
                 move |t| {
-                    let _ = ui.send(UiEvent::Token(t.to_string()));
+                    if !quiet {
+                        let _ = ui.send(UiEvent::Token(t.to_string()));
+                    }
                 },
                 move |t| {
-                    let _ = ui2.send(UiEvent::Reasoning(t.to_string()));
+                    if !quiet {
+                        let _ = ui2.send(UiEvent::Reasoning(t.to_string()));
+                    }
                 },
                 move |m| {
                     let _ = ui3.send(UiEvent::ResetLive);
@@ -302,7 +319,7 @@ impl Worker {
                 Ok(x) => x,
                 Err(e) => {
                     let _ = self.ui.send(UiEvent::Error(e.to_string()));
-                    return;
+                    return String::new();
                 }
             };
             if let Some(u) = usage {
@@ -312,7 +329,9 @@ impl Worker {
                     completion: u.total_tokens.saturating_sub(u.prompt_tokens),
                 });
             }
-            let _ = self.ui.send(UiEvent::AssistantCommit);
+            if !quiet {
+                let _ = self.ui.send(UiEvent::AssistantCommit);
+            }
 
             let mut msg = Message {
                 role: "assistant".into(),
@@ -333,17 +352,52 @@ impl Worker {
             self.messages.push(msg);
 
             if calls.is_empty() {
-                return;
+                return content;
             }
             for (i, c) in calls.into_iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
                     let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
-                    return;
+                    return String::new();
                 }
                 self.handle_call(c, i);
             }
         }
         let _ = self.ui.send(UiEvent::Notice("(stopped: hit max steps)".into()));
+        String::new()
+    }
+
+    /// Run a delegated task in an isolated sub-agent: a fresh conversation with
+    /// the same tools (minus `task`). Only its final report returns to the
+    /// parent — the intermediate steps never enter the parent's context.
+    fn run_subagent(&mut self, task: &str) -> String {
+        // Swap in a fresh context; restore the parent's afterward.
+        let saved_msgs = std::mem::replace(
+            &mut self.messages,
+            vec![
+                Message::system(subagent_prompt()),
+                Message::user(task.to_string()),
+            ],
+        );
+        let saved_len = self.system_len;
+        let saved_prompt = self.last_prompt;
+        self.system_len = 1;
+        self.quiet = true;
+
+        let report = self.run_loop();
+
+        self.quiet = false;
+        self.system_len = saved_len;
+        // The parent's context size is unchanged by the sub-agent (only the
+        // report re-enters it); restore the gauge so auto-compaction tracks
+        // the parent, not the sub-agent's final prompt.
+        self.last_prompt = saved_prompt;
+        self.messages = saved_msgs;
+
+        if report.trim().is_empty() {
+            "(sub-agent returned no report)".to_string()
+        } else {
+            report
+        }
     }
 
     fn handle_call(&mut self, c: AccumCall, idx: usize) {
@@ -355,7 +409,7 @@ impl Worker {
             .as_ref()
             .ok()
             .and_then(|a| {
-                ["command", "path", "pattern", "note", "query", "url", "question"]
+                ["command", "path", "pattern", "note", "query", "url", "question", "description"]
                     .iter()
                     .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
             })
@@ -377,7 +431,7 @@ impl Worker {
         self.messages.push(Message::tool(id, result));
     }
 
-    fn run_tool(&self, name: &str, args: &Value) -> String {
+    fn run_tool(&mut self, name: &str, args: &Value) -> String {
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
         // Plan mode: refuse mutating tools and ask the model to plan instead.
@@ -442,6 +496,23 @@ impl Worker {
             }
             "todo" => {
                 let r = tools::todo(args.get("items").unwrap_or(&Value::Null));
+                self.result_event(&r);
+                r
+            }
+            "task" => {
+                // No nested sub-agents: a sub-agent calling task would recurse.
+                if self.quiet {
+                    let r = "ERROR: a sub-agent cannot spawn another sub-agent.".to_string();
+                    self.result_event(&r);
+                    return r;
+                }
+                let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                if prompt.trim().is_empty() {
+                    let r = "ERROR: task needs a 'prompt' describing the work.".to_string();
+                    self.result_event(&r);
+                    return r;
+                }
+                let r = self.run_subagent(prompt);
                 self.result_event(&r);
                 r
             }
@@ -592,6 +663,23 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
         })
         .sum();
     (chars / 4) as u32
+}
+
+/// System prompt for a delegated sub-agent. Its whole job is one task; its
+/// final message becomes the report handed back to the parent.
+fn subagent_prompt() -> String {
+    let host = crate::sysinfo::host_descriptor();
+    format!(
+        "You are a sub-agent of picode, a terminal coding agent running ON {host}. You were \
+delegated a single focused task by the main agent.
+
+Rules:
+- Use tools to inspect and change the real filesystem; never invent file contents.
+- Work autonomously — you cannot ask the user questions.
+- Stay strictly within the delegated task.
+- When done, reply with a concise final report (findings, files changed, key results) \
+and no tool call. That report is ALL the parent agent sees, so make it self-contained."
+    )
 }
 
 fn preview(s: &str, maxlines: usize) -> String {
