@@ -25,8 +25,54 @@ fn local_ip() -> Option<String> {
     Some(sock.local_addr().ok()?.ip().to_string())
 }
 
-/// Current WiFi SSID. Tries NetworkManager (nmcli), then iwgetid, then iw.
+/// macOS: the Wi-Fi service device (usually en0), from networksetup.
+fn macos_wifi_device() -> Option<String> {
+    let out = std::process::Command::new("networksetup")
+        .arg("-listallhardwareports")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut in_wifi = false;
+    for line in text.lines() {
+        if let Some(port) = line.strip_prefix("Hardware Port:") {
+            in_wifi = port.contains("Wi-Fi") || port.contains("AirPort");
+        } else if in_wifi {
+            if let Some(dev) = line.strip_prefix("Device:") {
+                return Some(dev.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// macOS: the `SSID : <name>` line from `ipconfig getsummary`, raw. Present
+/// (possibly as `<redacted>`) only while associated to a network.
+fn macos_ssid_raw() -> Option<String> {
+    let dev = macos_wifi_device().unwrap_or_else(|| "en0".to_string());
+    let out = std::process::Command::new("ipconfig")
+        .args(["getsummary", &dev])
+        .output()
+        .ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(rest) = line.trim().strip_prefix("SSID : ") {
+            let s = rest.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Current WiFi SSID. On macOS via ipconfig — but macOS 14.4+ redacts the
+/// name from processes without Location Services permission, so `<redacted>`
+/// counts as unknown (wifi_state still reports the association; granting the
+/// terminal Location Services makes the real name appear). On Linux tries
+/// NetworkManager (nmcli), then iwgetid, then iw.
 fn ssid() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        return macos_ssid_raw().filter(|s| s != "<redacted>");
+    }
     if let Ok(out) =
         std::process::Command::new("nmcli").args(["-t", "-f", "active,ssid", "dev", "wifi"]).output()
     {
@@ -167,6 +213,10 @@ fn parse_kb(s: &str) -> u64 {
 }
 
 fn wifi_state() -> String {
+    if cfg!(target_os = "macos") {
+        // Associated (name possibly hidden by macOS privacy) vs not.
+        return if macos_ssid_raw().is_some() { "OK".into() } else { "n/a".into() };
+    }
     let interpret = |s: &str| {
         let s = s.trim();
         if s == "up" {

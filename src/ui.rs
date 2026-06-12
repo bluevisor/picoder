@@ -3,7 +3,7 @@
 //! worker thread and feeds this UI through a channel.
 
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
-use crate::config::{memory_path, Config, ConfigPatch};
+use crate::config::{memory_path, Config, ConfigPatch, PROVIDERS};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
@@ -251,16 +251,6 @@ const SETTING_LABELS: &[&str] = &[
     "auto-commit",
     "theme",
     "context window",
-];
-
-/// Provider presets cycled by the `/config` panel (same as first-run setup).
-const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("deepseek",  "https://api.deepseek.com",                     "deepseek-v4-pro"),
-    ("openai",    "https://api.openai.com/v1",                     "gpt-4o-mini"),
-    ("anthropic", "https://api.anthropic.com/v1",                  "claude-sonnet-4-20250514"),
-    ("groq",      "https://api.groq.com/openai/v1",                "llama-3.3-70b-versatile"),
-    ("openrouter","https://openrouter.ai/api/v1",                  "openai/gpt-4o-mini"),
-    ("google",    "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
 ];
 
 /// Heavy block-letter "PICODE" for capable terminals.
@@ -718,10 +708,12 @@ impl App {
         {
             return Vec::new();
         }
+        // One prefix allocation per command, not per history entry.
         let uses = |cmd: &str| {
+            let with_arg = format!("{cmd} ");
             self.history
                 .iter()
-                .filter(|h| h.as_str() == cmd || h.starts_with(&format!("{cmd} ")))
+                .filter(|h| h.as_str() == cmd || h.starts_with(&with_arg))
                 .count()
         };
         let mut scored: Vec<((&'static str, &'static str), usize)> = SLASH_COMMANDS
@@ -1069,6 +1061,7 @@ impl App {
             3 => {
                 if !val.is_empty() {
                     self.settings.api_key = val.clone();
+                    self.settings.key_from_env = false;
                     let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
                 }
             }
@@ -1677,7 +1670,13 @@ impl App {
                         .into_iter()
                         .rev()
                         .collect();
-                    format!("…{tail}")
+                    // An env key silently overrides whatever is saved or
+                    // edited here on the next launch — make that visible.
+                    if s.key_from_env {
+                        format!("…{tail} (from env — overrides the saved key)")
+                    } else {
+                        format!("…{tail}")
+                    }
                 }
             }
             4 => if s.thinking { "on".into() } else { "off".into() },
@@ -2082,10 +2081,18 @@ fn caps_char(key: &KeyEvent, c: char) -> char {
     if !key.state.contains(KeyEventState::CAPS_LOCK) || !c.is_alphabetic() {
         return c;
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
-        c.to_lowercase().next().unwrap_or(c)
+    // Only simple 1:1 case mappings; multi-char expansions (ß → SS) keep the
+    // original — which matches real keyboards, where Caps Lock doesn't
+    // affect such keys.
+    let mapped: Vec<char> = if key.modifiers.contains(KeyModifiers::SHIFT) {
+        c.to_lowercase().collect()
     } else {
-        c.to_uppercase().next().unwrap_or(c)
+        c.to_uppercase().collect()
+    };
+    if mapped.len() == 1 {
+        mapped[0]
+    } else {
+        c
     }
 }
 

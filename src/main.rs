@@ -71,7 +71,8 @@ usage:
 
 in the TUI: @path attaches a file · Tab autocompletes commands/paths
 
-config: ~/.config/picode/config.json  (or env DEEPSEEK_API_KEY / PICODE_API_KEY)
+config: ~/.config/picode/config.json  (key also via PICODE_API_KEY, or the
+        configured provider's var, e.g. DEEPSEEK_API_KEY / OPENAI_API_KEY)
 auto-loads PICODE.md / AGENTS.md / CLAUDE.md from the working directory";
 
 fn main() {

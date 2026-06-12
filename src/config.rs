@@ -63,6 +63,33 @@ fn default_permission() -> String {
     "ask".to_string()
 }
 
+/// Provider presets: (name, base_url, default model) — the single source for
+/// the first-run wizard and the `/config` panel's provider row.
+pub const PROVIDERS: &[(&str, &str, &str)] = &[
+    ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
+    ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
+    ("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"),
+    ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    ("openrouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+    ("google", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
+];
+
+/// Env vars that may supply the API key for `provider`, highest priority
+/// first — only the configured provider's key is ever picked up, so a machine
+/// with several providers' keys exported can't hand the wrong one to this
+/// one. PICODE_API_KEY is the explicit universal override and always wins.
+fn key_env_vars(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "deepseek" => &["PICODE_API_KEY", "DEEPSEEK_API_KEY"],
+        "openai" => &["PICODE_API_KEY", "OPENAI_API_KEY"],
+        "anthropic" => &["PICODE_API_KEY", "ANTHROPIC_API_KEY"],
+        "groq" => &["PICODE_API_KEY", "GROQ_API_KEY"],
+        "openrouter" => &["PICODE_API_KEY", "OPENROUTER_API_KEY"],
+        "google" => &["PICODE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        _ => &["PICODE_API_KEY"],
+    }
+}
+
 /// One settings change from the `/config` panel. The worker applies it to its
 /// live config and mirrors it to disk (each variant maps onto one field).
 pub enum ConfigPatch {
@@ -193,21 +220,14 @@ impl Config {
 
     pub fn load() -> Config {
         let mut cfg = Self::load_disk();
-        // Provider-specific env vars (highest priority) + generic fallback.
-        for var in [
-            "DEEPSEEK_API_KEY",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "GROQ_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GOOGLE_API_KEY",
-            "GEMINI_API_KEY",
-            "PICODE_API_KEY",
-        ] {
+        // First match wins, so PICODE_API_KEY (listed first) overrides the
+        // provider-specific var.
+        for var in key_env_vars(&cfg.provider) {
             if let Ok(k) = std::env::var(var) {
                 if !k.is_empty() {
                     cfg.api_key = k;
                     cfg.key_from_env = true;
+                    break;
                 }
             }
         }
@@ -331,6 +351,25 @@ mod tests {
         c.apply_patch(&ConfigPatch::ContextWindow(0));
         assert_eq!(c.context_window, 1);
     }
+
+    #[test]
+    fn env_keys_are_provider_scoped() {
+        // Only the configured provider's var (plus the universal override)
+        // can supply the key — never another provider's.
+        for (name, _, _) in PROVIDERS {
+            let vars = key_env_vars(name);
+            assert_eq!(vars[0], "PICODE_API_KEY", "{name}: override must win");
+            for v in &vars[1..] {
+                let prov_upper = name.to_uppercase();
+                assert!(
+                    v.starts_with(&prov_upper) || (*name == "google" && v.starts_with("GEMINI")),
+                    "{name} must not read {v}"
+                );
+            }
+        }
+        // Unknown/custom providers get only the explicit override.
+        assert_eq!(key_env_vars("my-llm-box"), &["PICODE_API_KEY"]);
+    }
 }
 
 #[cfg(unix)]
@@ -346,26 +385,25 @@ pub fn run_setup() -> Result<Config> {
     let mut cfg = Config::load();
     println!("\x1b[1mpicode setup\x1b[0m");
     println!("Provider:");
-    println!("  1) DeepSeek (default)   2) OpenAI      3) Anthropic");
-    println!("  4) Groq                 5) OpenRouter   6) Google");
-    println!("  7) Custom");
+    for (i, (name, _, _)) in PROVIDERS.iter().enumerate() {
+        let default = if i == 0 { " (default)" } else { "" };
+        println!("  {}) {name}{default}", i + 1);
+    }
+    let custom_n = PROVIDERS.len() + 1;
+    println!("  {custom_n}) custom");
     let choice = prompt("> [1] ")?;
-    let choice = if choice.is_empty() { "1".into() } else { choice };
-    let (prov, base, model): (String, String, String) = match choice.as_str() {
-        "2" => ("openai".into(),    "https://api.openai.com/v1".into(),                     "gpt-4o-mini".into()),
-        "3" => ("anthropic".into(), "https://api.anthropic.com/v1".into(),                  "claude-sonnet-4-20250514".into()),
-        "4" => ("groq".into(),      "https://api.groq.com/openai/v1".into(),                "llama-3.3-70b-versatile".into()),
-        "5" => ("openrouter".into(),"https://openrouter.ai/api/v1".into(),                  "openai/gpt-4o-mini".into()),
-        "6" => ("google".into(),    "https://generativelanguage.googleapis.com/v1beta/openai".into(), "gemini-2.5-flash".into()),
-        "7" => {
-            let p = nonempty(prompt("provider name: ")?, "custom");
-            let b = prompt("base_url (OpenAI-compatible): ")?;
-            let m = prompt("model: ")?;
-            (p, b, m)
-        }
-        _ => ("deepseek".into(), "https://api.deepseek.com".into(), "deepseek-v4-pro".into()),
+    let n = choice.trim().parse::<usize>().unwrap_or(1);
+    let custom = n == custom_n;
+    let (prov, base, model): (String, String, String) = if custom {
+        let p = nonempty(prompt("provider name: ")?, "custom");
+        let b = prompt("base_url (OpenAI-compatible): ")?;
+        let m = prompt("model: ")?;
+        (p, b, m)
+    } else {
+        let (p, b, m) = PROVIDERS[n.saturating_sub(1).min(PROVIDERS.len() - 1)];
+        (p.into(), b.into(), m.into())
     };
-    let model = if choice == "7" {
+    let model = if custom {
         model
     } else {
         let m = prompt(&format!("model [{model}]: "))?;
