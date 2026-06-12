@@ -42,6 +42,9 @@ dependencies.
   history, word-skip and word-delete, code-block highlighting.
 - **Status bar** — model · session tokens + $ cost · context-window bar ·
   account balance.
+- **Settings panel** (`/config`) — provider preset, base URL, model, API key,
+  thinking mode, default permission mode, auto-commit, theme, and context
+  window, edited in-TUI; changes apply live and persist to `config.json`.
 - **Themes** (`/theme`) — `default`, `apple2` (green phosphor), `msdos`.
 - **Tuned for the Pi framebuffer console** — ASCII fallback and clear-on-exit
   under `TERM=linux`, plus a launch banner with live MEM / Wi-Fi / IP.

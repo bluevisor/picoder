@@ -313,6 +313,11 @@ fn chat_stream(
         body["tools"] = t.clone();
         body["tool_choice"] = serde_json::json!("auto");
     }
+    // DeepSeek-style thinking switch; other providers may not know the field
+    // (the /config panel notes it), so it is only sent when enabled.
+    if cfg.thinking {
+        body["thinking"] = serde_json::json!({"type": "enabled"});
+    }
     let resp = http
         .post(&url)
         .set("Authorization", &format!("Bearer {}", cfg.api_key))

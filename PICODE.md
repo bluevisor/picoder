@@ -70,7 +70,12 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Launch banner: Apple-rainbow PICODE block art + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `default`, `apple2` (green phosphor, `] ▒`),
   `msdos` (gray, `C:\>`); persisted in config. Theme sets colors, prompt, cursor.
-- Slash commands: `/model /auto /reset /compact /mcp /memory /theme /init /clear /help /exit`.
+- Slash commands: `/model /auto /reset /compact /config /mcp /memory /theme /init /clear /help /exit`.
+- `/config`: interactive settings panel — provider preset (deepseek/openai/groq),
+  base URL, model, API key (masked), thinking mode (DeepSeek-style
+  `"thinking":{"type":"enabled"}` request field; off by default), default
+  permission mode (ask/bypass/plan — applies live and saves for new sessions),
+  auto-commit, theme, context window. Changes apply immediately and persist.
 
 ## Building (must be done on the Mac — the Pi can't compile this)
 

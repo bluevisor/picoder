@@ -42,6 +42,14 @@ pub struct Config {
     /// every change is a restorable checkpoint. On by default; no-op outside a repo.
     #[serde(default = "default_true")]
     pub auto_commit: bool,
+    /// Ask the model to think before answering, via the DeepSeek-style
+    /// `"thinking": {"type": "enabled"}` request field. Off by default;
+    /// providers that don't know the field may reject requests — turn it off.
+    #[serde(default)]
+    pub thinking: bool,
+    /// Default permission mode for new sessions: "ask", "bypass", or "plan".
+    #[serde(default = "default_permission")]
+    pub permission: String,
     /// True when the key came from the environment; we never persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
@@ -49,6 +57,22 @@ pub struct Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_permission() -> String {
+    "ask".to_string()
+}
+
+/// One settings change from the `/config` panel. The worker applies it to its
+/// live config and mirrors it to disk (each variant maps onto one field).
+pub enum ConfigPatch {
+    Provider { provider: String, base_url: String, model: String },
+    BaseUrl(String),
+    ApiKey(String),
+    Thinking(bool),
+    Permission(String),
+    AutoCommit(bool),
+    ContextWindow(u32),
 }
 
 fn default_theme() -> String {
@@ -77,6 +101,8 @@ impl Default for Config {
             price_out: default_price_out(),
             mcp_servers: BTreeMap::new(),
             auto_commit: true,
+            thinking: false,
+            permission: default_permission(),
             key_from_env: false,
         }
     }
@@ -154,6 +180,12 @@ impl Config {
                 if let Some(b) = v.get("auto_commit").and_then(|x| x.as_bool()) {
                     cfg.auto_commit = b;
                 }
+                if let Some(b) = v.get("thinking").and_then(|x| x.as_bool()) {
+                    cfg.thinking = b;
+                }
+                if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
+                    cfg.permission = s.to_string();
+                }
             }
         }
         cfg
@@ -204,6 +236,12 @@ impl Config {
         if on_disk.price_out != default_price_out() {
             json["price_out"] = serde_json::json!(on_disk.price_out);
         }
+        if on_disk.thinking {
+            json["thinking"] = serde_json::json!(true);
+        }
+        if on_disk.permission != default_permission() {
+            json["permission"] = serde_json::json!(on_disk.permission);
+        }
         let path = config_path();
         std::fs::write(&path, serde_json::to_string_pretty(&json)?)
             .context("write config")?;
@@ -225,6 +263,63 @@ impl Config {
         let mut disk = Config::load_disk();
         disk.theme = theme.to_string();
         let _ = disk.save();
+    }
+
+    pub fn apply_patch(&mut self, p: &ConfigPatch) {
+        match p {
+            ConfigPatch::Provider { provider, base_url, model } => {
+                self.provider = provider.clone();
+                self.base_url = base_url.clone();
+                self.model = model.clone();
+            }
+            ConfigPatch::BaseUrl(u) => self.base_url = u.clone(),
+            ConfigPatch::ApiKey(k) => {
+                self.api_key = k.clone();
+                self.key_from_env = false;
+            }
+            ConfigPatch::Thinking(b) => self.thinking = *b,
+            ConfigPatch::Permission(m) => self.permission = m.clone(),
+            ConfigPatch::AutoCommit(b) => self.auto_commit = *b,
+            ConfigPatch::ContextWindow(n) => self.context_window = (*n).max(1),
+        }
+    }
+
+    /// Mirror one patch to disk, preserving every other field.
+    pub fn persist_patch(p: &ConfigPatch) {
+        let mut disk = Config::load_disk();
+        disk.apply_patch(p);
+        let _ = disk.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patches_map_to_fields() {
+        let mut c = Config::default();
+        c.apply_patch(&ConfigPatch::Provider {
+            provider: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4o-mini".into(),
+        });
+        assert_eq!((c.provider.as_str(), c.model.as_str()), ("openai", "gpt-4o-mini"));
+        c.apply_patch(&ConfigPatch::Thinking(true));
+        c.apply_patch(&ConfigPatch::Permission("plan".into()));
+        c.apply_patch(&ConfigPatch::AutoCommit(false));
+        c.apply_patch(&ConfigPatch::ContextWindow(64000));
+        assert!(c.thinking);
+        assert_eq!(c.permission, "plan");
+        assert!(!c.auto_commit);
+        assert_eq!(c.context_window, 64000);
+        // A key set through the panel always counts as a disk key.
+        c.key_from_env = true;
+        c.apply_patch(&ConfigPatch::ApiKey("sk-x".into()));
+        assert!(!c.key_from_env);
+        // Zero context window is clamped, not propagated.
+        c.apply_patch(&ConfigPatch::ContextWindow(0));
+        assert_eq!(c.context_window, 1);
     }
 }
 

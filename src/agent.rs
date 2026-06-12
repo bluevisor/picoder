@@ -2,7 +2,7 @@
 //! the blocking model/tool loop, talking to the UI thread over channels.
 
 use crate::api::{self, AccumCall, Message};
-use crate::config::Config;
+use crate::config::{Config, ConfigPatch};
 use crate::mcp::Mcp;
 use crate::tools;
 use serde_json::Value;
@@ -53,6 +53,8 @@ pub enum WorkerCmd {
     Reset,
     Compact,
     SetModel(String),
+    /// A `/config` panel change: apply to the live config and persist.
+    Patch(ConfigPatch),
     ListModels,
     ListMcp,
     Quit,
@@ -173,6 +175,16 @@ pub fn spawn(
                     w.cfg.persist_model();
                     let _ = w.ui.send(UiEvent::ModelChanged(m.clone()));
                     let _ = w.ui.send(UiEvent::Notice(format!("model set to {m}")));
+                }
+                WorkerCmd::Patch(p) => {
+                    w.cfg.apply_patch(&p);
+                    Config::persist_patch(&p);
+                    // Provider presets also switch the model; reflect it.
+                    if let ConfigPatch::Provider { model, provider, .. } = &p {
+                        let _ = w.ui.send(UiEvent::ModelChanged(model.clone()));
+                        let _ = w.ui.send(UiEvent::Notice(format!("provider set to {provider}")));
+                        w.refresh_balance();
+                    }
                 }
                 WorkerCmd::ListModels => {
                     match api::list_models(&w.http, &w.cfg) {

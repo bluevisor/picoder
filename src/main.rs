@@ -339,7 +339,16 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     let ctx_limit = cfg.context_window;
     let price_in = cfg.price_in;
     let price_out = cfg.price_out;
-    let perm_start = if auto { agent::PERM_AUTO } else { agent::PERM_ASK };
+    let settings = cfg.clone();
+    let perm_start = if auto {
+        agent::PERM_AUTO
+    } else {
+        match cfg.permission.as_str() {
+            "bypass" | "auto" => agent::PERM_AUTO,
+            "plan" => agent::PERM_PLAN,
+            _ => agent::PERM_ASK,
+        }
+    };
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     // Wire up sudo askpass before the worker exists (it mutates process env).
@@ -362,6 +371,7 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
             price_in,
             price_out,
             perm: h.shared.perm.clone(),
+            settings,
         },
         history,
     );

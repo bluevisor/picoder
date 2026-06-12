@@ -3,7 +3,7 @@
 //! worker thread and feeds this UI through a channel.
 
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
-use crate::config::memory_path;
+use crate::config::{memory_path, Config, ConfigPatch};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -221,8 +221,28 @@ enum Kind {
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/model", "/auto", "/reset", "/compact", "/mcp", "/memory", "/theme", "/init", "/clear",
-    "/help", "/exit",
+    "/model", "/auto", "/reset", "/compact", "/config", "/mcp", "/memory", "/theme", "/init",
+    "/clear", "/help", "/exit",
+];
+
+/// Rows of the `/config` panel, in display order.
+const SETTING_LABELS: &[&str] = &[
+    "provider",
+    "base url",
+    "model",
+    "api key",
+    "thinking",
+    "permissions",
+    "auto-commit",
+    "theme",
+    "context window",
+];
+
+/// Provider presets cycled by the `/config` panel (same as first-run setup).
+const PROVIDERS: &[(&str, &str, &str)] = &[
+    ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
+    ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
+    ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
 ];
 
 /// Heavy block-letter "PICODE" for capable terminals.
@@ -371,6 +391,9 @@ enum Mode {
     Password { prompt: String },
     /// The ask_user tool: a visible one-line answer to the agent's question.
     Question { prompt: String },
+    /// The `/config` panel. `edit` holds the text buffer while a free-text
+    /// row (base url, model, api key, context window) is being edited.
+    Settings { cursor: usize, edit: Option<String> },
 }
 
 /// Everything the UI needs from config, captured before the worker consumes it.
@@ -382,6 +405,8 @@ pub struct UiConfig {
     pub price_in: f64,
     pub price_out: f64,
     pub perm: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Snapshot for the `/config` panel; kept in sync as patches are sent.
+    pub settings: Config,
 }
 
 pub struct App {
@@ -426,6 +451,7 @@ pub struct App {
     sess_prompt: u64,
     sess_completion: u64,
     balance: Option<String>,
+    settings: Config,
 }
 
 impl App {
@@ -472,6 +498,7 @@ impl App {
             sess_prompt: 0,
             sess_completion: 0,
             balance: None,
+            settings: cfg.settings,
         }
     }
 
@@ -599,6 +626,7 @@ impl App {
                 self.push(Kind::Notice, "set with: /model <id>  or  /model <number>".to_string());
             }
             UiEvent::ModelChanged(m) => {
+                self.settings.model = m.clone();
                 self.model_info = m;
             }
             UiEvent::Usage { prompt, completion } => {
@@ -710,6 +738,7 @@ impl App {
                 match &self.mode {
                     Mode::Approval(_) => self.on_key_approval(alt_key, h),
                     Mode::ThemeSelect { .. } => self.on_key_themeselect(alt_key, h),
+                    Mode::Settings { .. } => self.on_key_settings(alt_key, h),
                     Mode::Busy => self.on_key_busy(alt_key, h),
                     Mode::Password { .. } | Mode::Question { .. } => {}
                     Mode::Idle => self.on_key_idle(alt_key, h),
@@ -723,6 +752,7 @@ impl App {
         match &self.mode {
             Mode::Approval(_) => self.on_key_approval(key, h),
             Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
+            Mode::Settings { .. } => self.on_key_settings(key, h),
             Mode::Busy => self.on_key_busy(key, h),
             // Password/Question are intercepted at the top of on_key.
             Mode::Password { .. } | Mode::Question { .. } => {}
@@ -742,6 +772,7 @@ impl App {
                 self.mode = Mode::Idle;
             }
             Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
+            Mode::Settings { .. } => self.mode = Mode::Idle,
             // Password/Question Esc is handled in their own key handlers.
             Mode::Password { .. } | Mode::Question { .. } => {}
             Mode::Idle => {
@@ -865,6 +896,143 @@ impl App {
         crate::config::Config::persist_theme(name);
         self.push(Kind::Notice, format!("theme set to {name}"));
         self.mode = Mode::Idle;
+    }
+
+    /// `/config` panel keys. Up/Down move; Enter/←/→ cycle a choice row or
+    /// open a text row for editing; while editing, Enter commits, Esc cancels;
+    /// Esc otherwise closes the panel (everything was applied as it changed).
+    fn on_key_settings(&mut self, key: KeyEvent, h: &Handles) {
+        let (cur, editing) = match &self.mode {
+            Mode::Settings { cursor, edit } => (*cursor, edit.clone()),
+            _ => return,
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(mut buf) = editing {
+            match key.code {
+                KeyCode::Enter => {
+                    self.mode = Mode::Settings { cursor: cur, edit: None };
+                    self.commit_setting(cur, buf, h);
+                }
+                KeyCode::Esc => self.mode = Mode::Settings { cursor: cur, edit: None },
+                KeyCode::Char('u') if ctrl => {
+                    self.mode = Mode::Settings { cursor: cur, edit: Some(String::new()) };
+                }
+                KeyCode::Backspace => {
+                    buf.pop();
+                    self.mode = Mode::Settings { cursor: cur, edit: Some(buf) };
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    buf.push(c);
+                    self.mode = Mode::Settings { cursor: cur, edit: Some(buf) };
+                }
+                _ => {}
+            }
+            return;
+        }
+        let n = SETTING_LABELS.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Settings { cursor: (cur + n - 1) % n, edit: None };
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.mode = Mode::Settings { cursor: (cur + 1) % n, edit: None };
+            }
+            KeyCode::Enter | KeyCode::Right => self.activate_setting(cur, 1, h),
+            KeyCode::Left => self.activate_setting(cur, -1, h),
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Idle,
+            _ => {}
+        }
+    }
+
+    /// Act on a `/config` row: cycle choice rows by `dir`, or open text rows
+    /// in the edit buffer. Choice changes apply (and persist) immediately.
+    fn activate_setting(&mut self, cur: usize, dir: i32, h: &Handles) {
+        let cycle = |i: usize, n: usize| ((i as i32 + dir).rem_euclid(n as i32)) as usize;
+        let edit_with = |s: String| Mode::Settings { cursor: cur, edit: Some(s) };
+        match cur {
+            0 => {
+                let i = PROVIDERS
+                    .iter()
+                    .position(|(n, _, _)| *n == self.settings.provider)
+                    .map(|i| cycle(i, PROVIDERS.len()))
+                    .unwrap_or(0);
+                let (p, b, m) = PROVIDERS[i];
+                self.settings.provider = p.to_string();
+                self.settings.base_url = b.to_string();
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Provider {
+                    provider: p.to_string(),
+                    base_url: b.to_string(),
+                    model: m.to_string(),
+                }));
+            }
+            1 => self.mode = edit_with(self.settings.base_url.clone()),
+            2 => self.mode = edit_with(self.settings.model.clone()),
+            3 => self.mode = edit_with(String::new()),
+            4 => {
+                let v = !self.settings.thinking;
+                self.settings.thinking = v;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Thinking(v)));
+            }
+            5 => {
+                let next = if dir >= 0 { (self.perm() + 1) % 3 } else { (self.perm() + 2) % 3 };
+                self.perm.store(next, Ordering::Relaxed);
+                let name = perm_name(next);
+                self.settings.permission = name.to_string();
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Permission(name.to_string())));
+            }
+            6 => {
+                let v = !self.settings.auto_commit;
+                self.settings.auto_commit = v;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AutoCommit(v)));
+            }
+            7 => {
+                let i = THEMES
+                    .iter()
+                    .position(|t| *t == self.palette.name)
+                    .map(|i| cycle(i, THEMES.len()))
+                    .unwrap_or(0);
+                self.palette = palette_by_name(THEMES[i]);
+                self.settings.theme = THEMES[i].to_string();
+                Config::persist_theme(THEMES[i]);
+            }
+            8 => self.mode = edit_with(self.settings.context_window.to_string()),
+            _ => {}
+        }
+    }
+
+    /// Commit a text edit from the `/config` panel.
+    fn commit_setting(&mut self, cur: usize, val: String, h: &Handles) {
+        let val = val.trim().to_string();
+        match cur {
+            1 => {
+                if !val.is_empty() {
+                    let v = val.trim_end_matches('/').to_string();
+                    self.settings.base_url = v.clone();
+                    let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::BaseUrl(v)));
+                }
+            }
+            2 => {
+                if !val.is_empty() {
+                    // SetModel persists and echoes ModelChanged + a notice.
+                    let _ = h.cmd_tx.send(WorkerCmd::SetModel(val));
+                }
+            }
+            3 => {
+                if !val.is_empty() {
+                    self.settings.api_key = val.clone();
+                    let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
+                }
+            }
+            8 => match val.parse::<u32>() {
+                Ok(n) if n > 0 => {
+                    self.settings.context_window = n;
+                    self.ctx_limit = n;
+                    let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ContextWindow(n)));
+                }
+                _ => self.push(Kind::ErrorK, "context window must be a positive integer".to_string()),
+            },
+            _ => {}
+        }
     }
 
     fn on_key_themeselect(&mut self, key: KeyEvent, _h: &Handles) {
@@ -1233,6 +1401,9 @@ impl App {
                 let _ = h.cmd_tx.send(WorkerCmd::ListMcp);
                 self.mode = Mode::Busy;
             }
+            "config" | "settings" => {
+                self.mode = Mode::Settings { cursor: 0, edit: None };
+            }
             "memory" => {
                 let mem = std::fs::read_to_string(memory_path()).unwrap_or_default();
                 let mem = mem.trim();
@@ -1292,6 +1463,7 @@ impl App {
             "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
             "  /reset         clear conversation context",
             "  /compact       summarize older turns to free context (auto at 80%)",
+            "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
             "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos)",
@@ -1408,6 +1580,38 @@ impl App {
         self.render_status2(f, pad1(chunks[5]));
     }
 
+    /// Display value for one `/config` row.
+    fn setting_value(&self, row: usize) -> String {
+        let s = &self.settings;
+        match row {
+            0 => s.provider.clone(),
+            1 => s.base_url.clone(),
+            2 => self.model_info.clone(),
+            3 => {
+                if s.api_key.is_empty() {
+                    "(not set)".to_string()
+                } else {
+                    let tail: String = s
+                        .api_key
+                        .chars()
+                        .rev()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    format!("…{tail}")
+                }
+            }
+            4 => if s.thinking { "on".into() } else { "off".into() },
+            5 => perm_name(self.perm()).to_string(),
+            6 => if s.auto_commit { "on".into() } else { "off".into() },
+            7 => self.palette.name.to_string(),
+            8 => s.context_window.to_string(),
+            _ => String::new(),
+        }
+    }
+
     fn prompt_str(&self) -> &'static str {
         self.palette.prompt.unwrap_or(self.glyphs.prompt)
     }
@@ -1431,6 +1635,8 @@ impl App {
             Mode::Approval(_) => 2,
             // Header line + one line per theme.
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
+            // Header line + one line per setting.
+            Mode::Settings { .. } => SETTING_LABELS.len() as u16 + 1,
             // Prompt line + masked-input line.
             Mode::Password { .. } => 2,
             // Wrapped question + answer line.
@@ -1563,6 +1769,50 @@ impl App {
                 }
                 f.render_widget(Paragraph::new(lines), area);
             }
+            Mode::Settings { cursor, edit } => {
+                let mut lines: Vec<Line> = Vec::new();
+                let hint = if self.ascii {
+                    "(up/down move - Enter/left/right change - Esc close)"
+                } else {
+                    "(↑/↓ move · Enter/←/→ change · Esc close)"
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("settings ", Style::default().fg(Color::Yellow)),
+                    Span::styled(hint, Style::default().fg(self.dim_text())),
+                ]));
+                let marker = if self.ascii { ">" } else { "▸" };
+                let block = if self.ascii { "#" } else { "▒" };
+                for (i, label) in SETTING_LABELS.iter().enumerate() {
+                    let sel = i == *cursor;
+                    let lead = if sel { marker } else { " " };
+                    let label_style = if sel {
+                        Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.dim_text())
+                    };
+                    let mut spans = vec![Span::styled(format!("{lead} {label:<15}"), label_style)];
+                    match edit {
+                        Some(buf) if sel => {
+                            // api key edits render masked, like the sudo prompt.
+                            let shown = if i == 3 {
+                                "•".repeat(buf.chars().count())
+                            } else {
+                                buf.clone()
+                            };
+                            spans.push(Span::styled(shown, Style::default().fg(self.palette.accent)));
+                            spans.push(Span::styled(block, Style::default().fg(self.palette.accent)));
+                        }
+                        _ => {
+                            spans.push(Span::styled(
+                                self.setting_value(i),
+                                Style::default().fg(if sel { self.palette.accent } else { self.dim_text() }),
+                            ));
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
+                f.render_widget(Paragraph::new(lines), area);
+            }
             Mode::Question { prompt } => {
                 let block = if self.ascii { "#" } else { "▒" };
                 let mut lines: Vec<Line> = textwrap::wrap(prompt, (area.width as usize).max(1))
@@ -1671,6 +1921,9 @@ impl App {
             self.model_info.clone(),
             Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD),
         )];
+        if self.settings.thinking {
+            spans.push(Span::styled(" think", gray));
+        }
 
         let tokens = self.sess_prompt + self.sess_completion;
         if tokens > 0 {
@@ -1718,6 +1971,14 @@ impl App {
             Span::styled(format!("   {}", self.cwd), Style::default().fg(self.dim_text())),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+}
+
+fn perm_name(p: u8) -> &'static str {
+    match p {
+        crate::agent::PERM_AUTO => "bypass",
+        crate::agent::PERM_PLAN => "plan",
+        _ => "ask",
     }
 }
 
