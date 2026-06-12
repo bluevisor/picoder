@@ -3,6 +3,7 @@
 
 use crate::api::{self, AccumCall, Message};
 use crate::config::Config;
+use crate::mcp::Mcp;
 use crate::tools;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -53,6 +54,7 @@ pub enum WorkerCmd {
     Compact,
     SetModel(String),
     ListModels,
+    ListMcp,
     Quit,
 }
 
@@ -93,6 +95,10 @@ struct Worker {
     /// Images queued by view_image, injected as a user message after the
     /// current round of tool results.
     pending_images: Vec<String>,
+    /// Launched MCP servers and their tools.
+    mcp: Mcp,
+    /// Built-in + MCP tool schema, rebuilt once at startup; sent each request.
+    tools: Value,
 }
 
 pub fn spawn(
@@ -110,6 +116,22 @@ pub fn spawn(
 
     let join = std::thread::spawn(move || {
         let system_len = messages.len();
+        // Launch MCP servers before the loop (can take a moment per server).
+        let mcp = if cfg.mcp_servers.is_empty() {
+            Mcp::disabled()
+        } else {
+            let _ = ui.send(UiEvent::Notice(format!(
+                "starting {} MCP server(s)…",
+                cfg.mcp_servers.len()
+            )));
+            let mcp = Mcp::launch(&cfg.mcp_servers);
+            for s in mcp.status() {
+                let msg = format!("mcp {}: {}", s.name, s.detail);
+                let _ = ui.send(if s.ok { UiEvent::Notice(msg) } else { UiEvent::Error(msg) });
+            }
+            mcp
+        };
+        let tools = api::tools_spec_with(mcp.tools());
         let mut w = Worker {
             http: api::agent_http(),
             cfg,
@@ -123,6 +145,8 @@ pub fn spawn(
             last_prompt: 0,
             quiet: false,
             pending_images: Vec::new(),
+            mcp,
+            tools,
         };
         w.refresh_balance(); // initial account balance for the status line
         while let Ok(cmd) = cmd_rx.recv() {
@@ -153,6 +177,22 @@ pub fn spawn(
                         }
                         Err(e) => {
                             let _ = w.ui.send(UiEvent::Error(format!("could not fetch models: {e}")));
+                        }
+                    }
+                    let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::ListMcp => {
+                    if w.mcp.status().is_empty() {
+                        let _ = w.ui.send(UiEvent::Notice(
+                            "no MCP servers configured (add \"mcp_servers\" to config.json).".into(),
+                        ));
+                    } else {
+                        for s in w.mcp.status() {
+                            let tag = if s.ok { "ok" } else { "FAILED" };
+                            let _ = w.ui.send(UiEvent::Notice(format!("mcp {} [{tag}]: {}", s.name, s.detail)));
+                        }
+                        for t in w.mcp.tools() {
+                            let _ = w.ui.send(UiEvent::Notice(format!("  {}", t.full_name)));
                         }
                     }
                     let _ = w.ui.send(UiEvent::TurnDone);
@@ -304,6 +344,7 @@ impl Worker {
                 &self.http,
                 &self.cfg,
                 &self.messages,
+                &self.tools,
                 &self.cancel,
                 move |t| {
                     if !quiet {
@@ -618,6 +659,26 @@ impl Worker {
                         r
                     }
                 }
+            }
+            other if self.mcp.handles(other) => {
+                // MCP tools can have side effects; gate them like bash unless
+                // auto-approve is on. Plan mode can't tell read from write, so
+                // it blocks them all.
+                if self.perm.load(Ordering::Relaxed) == PERM_PLAN {
+                    let r = "[plan mode] Not executed. picode is in read-only plan mode — \
+                             MCP tools may have side effects."
+                        .to_string();
+                    self.result_event(&r);
+                    return r;
+                }
+                if !self.approve(&format!("call MCP tool {other}")) {
+                    let r = "DENIED by user.".to_string();
+                    self.result_event(&r);
+                    return r;
+                }
+                let r = self.mcp.call(other, args);
+                self.result_event(&r);
+                r
             }
             other => {
                 let e = format!("ERROR: unknown tool {other}");

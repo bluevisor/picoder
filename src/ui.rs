@@ -221,8 +221,8 @@ enum Kind {
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/model", "/auto", "/reset", "/compact", "/memory", "/theme", "/init", "/clear", "/help",
-    "/exit",
+    "/model", "/auto", "/reset", "/compact", "/mcp", "/memory", "/theme", "/init", "/clear",
+    "/help", "/exit",
 ];
 
 /// Heavy block-letter "PICODE" for capable terminals.
@@ -1177,6 +1177,10 @@ impl App {
                 let _ = h.cmd_tx.send(WorkerCmd::Compact);
                 self.mode = Mode::Busy;
             }
+            "mcp" => {
+                let _ = h.cmd_tx.send(WorkerCmd::ListMcp);
+                self.mode = Mode::Busy;
+            }
             "memory" => {
                 let mem = std::fs::read_to_string(memory_path()).unwrap_or_default();
                 let mem = mem.trim();
@@ -1236,6 +1240,7 @@ impl App {
             "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
             "  /reset         clear conversation context",
             "  /compact       summarize older turns to free context (auto at 80%)",
+            "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
             "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos)",
             "  /init          summarize this project into PICODE.md",

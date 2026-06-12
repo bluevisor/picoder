@@ -4,8 +4,19 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
+
+/// One MCP server entry from config.json (`mcp_servers`). Spawned over stdio.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -24,6 +35,9 @@ pub struct Config {
     pub price_in: f64,
     #[serde(default = "default_price_out")]
     pub price_out: f64,
+    /// MCP servers to launch, keyed by name (advertised as mcp__<name>__<tool>).
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     /// True when the key came from the environment; we never persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
@@ -53,6 +67,7 @@ impl Default for Config {
             context_window: default_ctx(),
             price_in: default_price_in(),
             price_out: default_price_out(),
+            mcp_servers: BTreeMap::new(),
             key_from_env: false,
         }
     }
@@ -111,6 +126,11 @@ impl Config {
                 if let Some(s) = v.get("theme").and_then(|x| x.as_str()) {
                     cfg.theme = s.to_string();
                 }
+                if let Some(m) = v.get("mcp_servers") {
+                    if let Ok(servers) = serde_json::from_value(m.clone()) {
+                        cfg.mcp_servers = servers;
+                    }
+                }
             }
         }
         for var in ["DEEPSEEK_API_KEY", "PICODE_API_KEY"] {
@@ -132,13 +152,17 @@ impl Config {
         if self.key_from_env {
             on_disk.api_key = String::new();
         }
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "provider": on_disk.provider,
             "base_url": on_disk.base_url,
             "model": on_disk.model,
             "api_key": on_disk.api_key,
             "theme": on_disk.theme,
         });
+        // Preserve user-configured MCP servers across model/theme rewrites.
+        if !on_disk.mcp_servers.is_empty() {
+            json["mcp_servers"] = serde_json::to_value(&on_disk.mcp_servers).unwrap_or_default();
+        }
         let path = config_path();
         std::fs::write(&path, serde_json::to_string_pretty(&json)?)
             .context("write config")?;

@@ -9,6 +9,7 @@ mod api;
 mod askpass;
 mod config;
 mod diff;
+mod mcp;
 mod sysinfo;
 mod tools;
 mod ui;

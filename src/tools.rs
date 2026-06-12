@@ -412,7 +412,7 @@ pub fn image_data_uri(path: &str) -> std::result::Result<String, String> {
 /// Standard base64 (no line wrapping). Kept tiny so we add no dependency.
 pub fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b = [
             chunk[0],

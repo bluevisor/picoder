@@ -225,6 +225,17 @@ fn tool(name: &str, desc: &str, params: serde_json::Value) -> serde_json::Value 
     })
 }
 
+/// The built-in tool schema plus any MCP tools, as one array for the request.
+pub fn tools_spec_with(mcp: &[crate::mcp::McpTool]) -> serde_json::Value {
+    let mut spec = tools_spec();
+    if let Some(arr) = spec.as_array_mut() {
+        for t in mcp {
+            arr.push(tool(&t.full_name, &t.description, t.schema.clone()));
+        }
+    }
+    spec
+}
+
 /// Token usage reported by the API (the final stream chunk).
 #[derive(Default, Clone, Copy, Deserialize)]
 pub struct Usage {
@@ -272,7 +283,7 @@ fn chat_stream(
     http: &ureq::Agent,
     cfg: &Config,
     messages: &[Message],
-    with_tools: bool,
+    tools: Option<&serde_json::Value>,
     cancel: &AtomicBool,
     mut on_content: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
@@ -285,8 +296,8 @@ fn chat_stream(
         "stream": true,
         "stream_options": {"include_usage": true},
     });
-    if with_tools {
-        body["tools"] = tools_spec();
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
         body["tool_choice"] = serde_json::json!("auto");
     }
     let resp = http
@@ -374,10 +385,12 @@ fn chat_stream(
 
 /// chat_stream with retry: a dropped SSE chunk can corrupt streamed tool-call
 /// JSON, so we re-request a clean response. Also retries transient net errors.
+#[allow(clippy::too_many_arguments)]
 pub fn chat_resilient(
     http: &ureq::Agent,
     cfg: &Config,
     messages: &[Message],
+    tools: &serde_json::Value,
     cancel: &AtomicBool,
     mut on_content: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
@@ -389,7 +402,7 @@ pub fn chat_resilient(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        match chat_stream(http, cfg, messages, true, cancel, &mut on_content, &mut on_reasoning) {
+        match chat_stream(http, cfg, messages, Some(tools), cancel, &mut on_content, &mut on_reasoning) {
             Err(e) => {
                 if attempt == tries {
                     return Err(e);
@@ -425,7 +438,7 @@ pub fn chat_plain(
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
         }
-        match chat_stream(http, cfg, messages, false, cancel, |_| {}, |_| {}) {
+        match chat_stream(http, cfg, messages, None, cancel, |_| {}, |_| {}) {
             Ok((content, _, _)) => {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(anyhow!("cancelled"));
