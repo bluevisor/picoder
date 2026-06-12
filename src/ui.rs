@@ -1646,6 +1646,9 @@ impl App {
             "reset" => {
                 let _ = h.cmd_tx.send(WorkerCmd::Reset);
             }
+            "new" => {
+                let _ = h.cmd_tx.send(WorkerCmd::New);
+            }
             "compact" => {
                 let _ = h.cmd_tx.send(WorkerCmd::Compact);
                 self.mode = Mode::Busy;
