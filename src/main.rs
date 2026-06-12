@@ -54,6 +54,7 @@ usage:
   picode \"do a thing\"     one-shot task, then exit
   picode --continue      resume this directory's last session (alias: -c)
   picode --auto ...      auto-approve tool calls
+  picode --output FILE   one-shot: also write the final reply to FILE (alias: -o)
   picode --config        set up provider + API key
   picode model [id]      list models, or set the model
   picode --banner        print the launch banner (debug) and exit
@@ -104,6 +105,16 @@ fn main() {
     let cont = args.iter().any(|a| a == "--continue" || a == "-c");
     args.retain(|a| a != "--auto" && a != "--continue" && a != "-c");
 
+    let mut output: Option<String> = None;
+    if let Some(pos) = args.iter().position(|a| a == "--output" || a == "-o") {
+        if pos + 1 >= args.len() {
+            eprintln!("--output needs a file path");
+            return;
+        }
+        output = Some(args.remove(pos + 1));
+        args.remove(pos);
+    }
+
     let mut cfg = Config::load();
 
     if !args.is_empty() && args[0] == "model" {
@@ -133,8 +144,12 @@ fn main() {
         // Only persist a one-shot turn when explicitly continuing a session,
         // so a stray `picode "x"` can't clobber a richer interactive session.
         let session = cont.then(config::session_path);
-        run_oneshot(cfg, messages, session, args.join(" "));
+        run_oneshot(cfg, messages, session, args.join(" "), output);
     } else {
+        if output.is_some() {
+            eprintln!("--output only applies to one-shot mode (picode \"task\" -o file)");
+            return;
+        }
         let (messages, notes) = build_context(cont);
         run_tui(cfg, messages, notes, auto);
     }
@@ -206,7 +221,13 @@ fn load_session() -> Option<Vec<Message>> {
     }
 }
 
-fn run_oneshot(cfg: Config, messages: Vec<Message>, session: Option<std::path::PathBuf>, task: String) {
+fn run_oneshot(
+    cfg: Config,
+    messages: Vec<Message>,
+    session: Option<std::path::PathBuf>,
+    task: String,
+    output: Option<String>,
+) {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     let h = agent::spawn(cfg, messages, agent::PERM_AUTO, session, ui_tx);
     let (task, attached) = ui::expand_attachments(&task);
@@ -217,12 +238,25 @@ fn run_oneshot(cfg: Config, messages: Vec<Message>, session: Option<std::path::P
 
     let mut out = std::io::stdout();
     let mut at_line_start = true;
+    // Track the final assistant message (the last committed non-empty one)
+    // so --output can write it to disk after the turn.
+    let mut live = String::new();
+    let mut final_text = String::new();
     while let Ok(ev) = ui_rx.recv() {
         match ev {
             UiEvent::Token(t) => {
                 print!("{t}");
                 at_line_start = t.ends_with('\n');
+                live.push_str(&t);
                 let _ = out.flush();
+            }
+            UiEvent::ResetLive => live.clear(),
+            UiEvent::AssistantCommit => {
+                if !live.trim().is_empty() {
+                    final_text = std::mem::take(&mut live);
+                } else {
+                    live.clear();
+                }
             }
             UiEvent::ToolStart { name, summary } => {
                 if !at_line_start {
@@ -259,6 +293,14 @@ fn run_oneshot(cfg: Config, messages: Vec<Message>, session: Option<std::path::P
     }
     if !at_line_start {
         println!();
+    }
+    if let Some(path) = output {
+        let mut text = final_text.trim_end().to_string();
+        text.push('\n');
+        match std::fs::write(&path, text) {
+            Ok(()) => eprintln!("\x1b[2mwrote {path}\x1b[0m"),
+            Err(e) => eprintln!("\x1b[31mcould not write {path}: {e}\x1b[0m"),
+        }
     }
     let _ = h.cmd_tx.send(WorkerCmd::Quit);
     let _ = h.join.join();
