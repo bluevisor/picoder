@@ -255,9 +255,12 @@ const SETTING_LABELS: &[&str] = &[
 
 /// Provider presets cycled by the `/config` panel (same as first-run setup).
 const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
-    ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    ("deepseek",  "https://api.deepseek.com",                     "deepseek-v4-pro"),
+    ("openai",    "https://api.openai.com/v1",                     "gpt-4o-mini"),
+    ("anthropic", "https://api.anthropic.com/v1",                  "claude-sonnet-4-20250514"),
+    ("groq",      "https://api.groq.com/openai/v1",                "llama-3.3-70b-versatile"),
+    ("openrouter","https://openrouter.ai/api/v1",                  "openai/gpt-4o-mini"),
+    ("google",    "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
 ];
 
 /// Heavy block-letter "PICODE" for capable terminals.
