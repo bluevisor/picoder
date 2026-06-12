@@ -57,6 +57,8 @@ pub enum WorkerCmd {
     Patch(ConfigPatch),
     ListModels,
     ListMcp,
+    /// `/new`: delete the session file and reset to a clean slate.
+    New,
     Quit,
 }
 
@@ -410,6 +412,25 @@ impl Worker {
                 let _ = self.ui.send(UiEvent::AssistantCommit);
             }
 
+            // Esc during streaming: chat_stream stops early and returns what
+            // had accumulated so far. Half-streamed tool calls must not enter
+            // history (their args may be truncated and they'll never get
+            // results, which the API rejects on the next request) — keep only
+            // the partial text and end the turn.
+            if self.cancel.load(Ordering::Relaxed) {
+                if !content.is_empty() {
+                    self.messages.push(Message {
+                        role: "assistant".into(),
+                        content,
+                        images: Vec::new(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+                let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
+                return String::new();
+            }
+
             let mut msg = Message {
                 role: "assistant".into(),
                 content: content.clone(),
@@ -432,12 +453,26 @@ impl Worker {
             if calls.is_empty() {
                 return content;
             }
+            // Once the assistant message above is in history, every one of its
+            // tool_call_ids must get a tool result or the API rejects the next
+            // request — so an Esc here answers the skipped calls instead of
+            // returning with the history dangling.
+            let mut interrupted = false;
             for (i, c) in calls.into_iter().enumerate() {
-                if self.cancel.load(Ordering::Relaxed) {
-                    let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
-                    return String::new();
+                if interrupted || self.cancel.load(Ordering::Relaxed) {
+                    if !interrupted {
+                        interrupted = true;
+                        let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
+                    }
+                    let id = if c.id.is_empty() { format!("call_{i}") } else { c.id.clone() };
+                    self.messages
+                        .push(Message::tool(id, "(interrupted by user; tool not run)".into()));
+                    continue;
                 }
                 self.handle_call(c, i);
+            }
+            if interrupted {
+                return String::new();
             }
             // view_image queues images to hand to the model on the next call;
             // add them as a user message after the tool results (which must
