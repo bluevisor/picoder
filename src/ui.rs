@@ -5,8 +5,9 @@
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
 use crate::config::{memory_path, Config, ConfigPatch};
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -847,7 +848,7 @@ impl App {
             KeyCode::Backspace => {
                 self.pw_input.pop();
             }
-            KeyCode::Char(c) if !ctrl && !alt => self.pw_input.push(c),
+            KeyCode::Char(c) if !ctrl && !alt => self.pw_input.push(caps_char(&key, c)),
             _ => {}
         }
     }
@@ -882,7 +883,7 @@ impl App {
             KeyCode::Backspace => {
                 self.q_input.pop();
             }
-            KeyCode::Char(c) if !ctrl && !alt => self.q_input.push(c),
+            KeyCode::Char(c) if !ctrl && !alt => self.q_input.push(caps_char(&key, c)),
             _ => {}
         }
     }
@@ -967,7 +968,7 @@ impl App {
                     self.mode = Mode::Settings { cursor: cur, edit: Some(buf) };
                 }
                 KeyCode::Char(c) if !ctrl => {
-                    buf.push(c);
+                    buf.push(caps_char(&key, c));
                     self.mode = Mode::Settings { cursor: cur, edit: Some(buf) };
                 }
                 _ => {}
@@ -1223,7 +1224,7 @@ impl App {
             // macOS Option-as-Meta sends ESC b / ESC f for word motion.
             KeyCode::Char('b') if alt => self.cursor = self.prev_word(),
             KeyCode::Char('f') if alt => self.cursor = self.next_word(),
-            KeyCode::Char(c) if !ctrl => self.insert_char(c),
+            KeyCode::Char(c) if !ctrl => self.insert_char(caps_char(&key, c)),
             KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Backspace => {
                 if self.cursor > 0 {
@@ -2065,6 +2066,23 @@ impl App {
             Span::styled(format!("   {}", self.cwd), Style::default().fg(self.dim_text())),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+}
+
+/// Apply Caps Lock to a typed character. Under the Kitty keyboard protocol
+/// (pushed in setup_terminal) the terminal reports the BASE key — 'a' even
+/// with Caps Lock on — plus a CAPS_LOCK state flag, leaving case to the app.
+/// Caps alone uppercases letters; Caps+Shift lowercases them, like a real
+/// keyboard. Legacy terminals pre-shift the char and set no state flag, so
+/// this is a no-op there.
+fn caps_char(key: &KeyEvent, c: char) -> char {
+    if !key.state.contains(KeyEventState::CAPS_LOCK) || !c.is_alphabetic() {
+        return c;
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        c.to_lowercase().next().unwrap_or(c)
+    } else {
+        c.to_uppercase().next().unwrap_or(c)
     }
 }
 
