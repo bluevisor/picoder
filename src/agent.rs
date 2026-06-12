@@ -48,7 +48,7 @@ pub enum UiEvent {
 
 /// UI → Worker control messages (processed between turns).
 pub enum WorkerCmd {
-    User(String),
+    User { text: String, images: Vec<String> },
     Reset,
     Compact,
     SetModel(String),
@@ -90,6 +90,9 @@ struct Worker {
     /// True while a sub-agent is running: suppresses streaming the sub-agent's
     /// tokens as the main reply, and blocks nested `task` calls.
     quiet: bool,
+    /// Images queued by view_image, injected as a user message after the
+    /// current round of tool results.
+    pending_images: Vec<String>,
 }
 
 pub fn spawn(
@@ -119,6 +122,7 @@ pub fn spawn(
             session,
             last_prompt: 0,
             quiet: false,
+            pending_images: Vec::new(),
         };
         w.refresh_balance(); // initial account balance for the status line
         while let Ok(cmd) = cmd_rx.recv() {
@@ -153,11 +157,11 @@ pub fn spawn(
                     }
                     let _ = w.ui.send(UiEvent::TurnDone);
                 }
-                WorkerCmd::User(text) => {
+                WorkerCmd::User { text, images } => {
                     w.cancel.store(false, Ordering::Relaxed);
                     w.maybe_auto_compact();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        w.run_turn(text);
+                        w.run_turn(text, images);
                     }));
                     if result.is_err() {
                         let _ = w.ui.send(UiEvent::Error("internal error in agent turn".into()));
@@ -252,6 +256,7 @@ impl Worker {
                 new.push(Message {
                     role: "assistant".into(),
                     content: "Understood — continuing from that summary.".into(),
+                    images: Vec::new(),
                     tool_calls: None,
                     tool_call_id: None,
                 });
@@ -276,8 +281,8 @@ impl Worker {
         }
     }
 
-    fn run_turn(&mut self, text: String) {
-        self.messages.push(Message::user(text));
+    fn run_turn(&mut self, text: String, images: Vec<String>) {
+        self.messages.push(Message::user_with_images(text, images));
         self.run_loop();
     }
 
@@ -336,6 +341,7 @@ impl Worker {
             let mut msg = Message {
                 role: "assistant".into(),
                 content: content.clone(),
+                images: Vec::new(),
                 tool_calls: None,
                 tool_call_id: None,
             };
@@ -360,6 +366,16 @@ impl Worker {
                     return String::new();
                 }
                 self.handle_call(c, i);
+            }
+            // view_image queues images to hand to the model on the next call;
+            // add them as a user message after the tool results (which must
+            // immediately follow their tool calls).
+            if !self.pending_images.is_empty() {
+                let imgs = std::mem::take(&mut self.pending_images);
+                self.messages.push(Message::user_with_images(
+                    "(attached image(s) from view_image)",
+                    imgs,
+                ));
             }
         }
         let _ = self.ui.send(UiEvent::Notice("(stopped: hit max steps)".into()));
@@ -491,6 +507,18 @@ impl Worker {
             }
             "web_search" => {
                 let r = tools::web_search(&self.http, s("query"));
+                self.result_event(&r);
+                r
+            }
+            "view_image" => {
+                let path = s("path");
+                let r = match tools::image_data_uri(path) {
+                    Ok(uri) => {
+                        self.pending_images.push(uri);
+                        format!("Loaded image {path} into context.")
+                    }
+                    Err(e) => e,
+                };
                 self.result_event(&r);
                 r
             }

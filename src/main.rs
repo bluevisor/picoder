@@ -230,11 +230,14 @@ fn run_oneshot(
 ) {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     let h = agent::spawn(cfg, messages, agent::PERM_AUTO, session, ui_tx);
-    let (task, attached) = ui::expand_attachments(&task);
-    if !attached.is_empty() {
-        eprintln!("\x1b[2mattached: {}\x1b[0m", attached.join(", "));
+    let (task_text, attached) = ui::expand_attachments(&task);
+    let (images, img_names) = ui::extract_images(&task);
+    let mut all = attached;
+    all.extend(img_names);
+    if !all.is_empty() {
+        eprintln!("\x1b[2mattached: {}\x1b[0m", all.join(", "));
     }
-    let _ = h.cmd_tx.send(WorkerCmd::User(task));
+    let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
 
     let mut out = std::io::stdout();
     let mut at_line_start = true;

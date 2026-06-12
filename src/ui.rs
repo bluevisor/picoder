@@ -1143,10 +1143,13 @@ impl App {
         }
         self.push(Kind::User, text.clone());
         let (expanded, attached) = expand_attachments(&text);
-        if !attached.is_empty() {
-            self.push(Kind::Notice, format!("attached: {}", attached.join(", ")));
+        let (images, img_names) = extract_images(&text);
+        let mut all = attached;
+        all.extend(img_names);
+        if !all.is_empty() {
+            self.push(Kind::Notice, format!("attached: {}", all.join(", ")));
         }
-        let _ = h.cmd_tx.send(WorkerCmd::User(expanded));
+        let _ = h.cmd_tx.send(WorkerCmd::User { text: expanded, images });
         self.mode = Mode::Busy;
     }
 
@@ -1217,7 +1220,7 @@ impl App {
             "init" => {
                 let prompt = "Explore the current project directory (list_files, then read key files like README, Cargo.toml, package.json, pyproject.toml, Makefile, etc.) and write a concise PICODE.md summarizing: what this project is, its structure, and how to build/run/test it. Keep it short and accurate.";
                 self.push(Kind::User, "/init".to_string());
-                let _ = h.cmd_tx.send(WorkerCmd::User(prompt.to_string()));
+                let _ = h.cmd_tx.send(WorkerCmd::User { text: prompt.to_string(), images: Vec::new() });
                 self.mode = Mode::Busy;
             }
             other => {
@@ -1723,16 +1726,23 @@ fn expand_user(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+/// Strip a `@path` token: drop the `@` and any trailing sentence punctuation
+/// so "@calc.py?" resolves to calc.py. Returns None for a bare "@".
+fn attach_token(tok: &str) -> Option<&str> {
+    let p = tok.strip_prefix('@')?;
+    let p = p.trim_end_matches(|c: char| "?.,;:!)]}'\"".contains(c));
+    (!p.is_empty()).then_some(p)
+}
+
 /// Expand `@path` tokens into appended fenced file contents for the model.
-/// Returns (text_to_send, attached_paths). Display text keeps the raw `@path`.
+/// Image paths are skipped (handled by `extract_images`). Returns
+/// (text_to_send, attached_paths). Display text keeps the raw `@path`.
 pub fn expand_attachments(text: &str) -> (String, Vec<String>) {
     let mut attached = Vec::new();
     let mut blocks = String::new();
     for tok in text.split_whitespace() {
-        let Some(p) = tok.strip_prefix('@') else { continue };
-        // Drop trailing sentence punctuation so "@calc.py?" resolves to calc.py.
-        let p = p.trim_end_matches(|c: char| "?.,;:!)]}'\"".contains(c));
-        if p.is_empty() {
+        let Some(p) = attach_token(tok) else { continue };
+        if crate::tools::is_image_path(p) {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(expand_user(p)) {
@@ -1746,6 +1756,24 @@ pub fn expand_attachments(text: &str) -> (String, Vec<String>) {
     } else {
         (format!("{text}{blocks}"), attached)
     }
+}
+
+/// Resolve `@image.png` tokens to base64 data URIs. Returns (uris, names) so
+/// the caller can both attach the images and report what was attached.
+pub fn extract_images(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut uris = Vec::new();
+    let mut names = Vec::new();
+    for tok in text.split_whitespace() {
+        let Some(p) = attach_token(tok) else { continue };
+        if !crate::tools::is_image_path(p) {
+            continue;
+        }
+        if let Ok(uri) = crate::tools::image_data_uri(p) {
+            uris.push(uri);
+            names.push(p.to_string());
+        }
+    }
+    (uris, names)
 }
 
 /// Filesystem completions for a path prefix; dirs get a trailing '/'.

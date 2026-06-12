@@ -15,6 +15,11 @@ pub struct Message {
     pub role: String,
     #[serde(default)]
     pub content: String,
+    /// Attached images as `data:image/...;base64,...` URIs. Sent to the API as
+    /// OpenAI content parts (see `messages_payload`); persisted via derive so
+    /// resumed sessions keep them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,14 +28,42 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Message {
-        Message { role: "system".into(), content: content.into(), tool_calls: None, tool_call_id: None }
+        Message { role: "system".into(), content: content.into(), images: Vec::new(), tool_calls: None, tool_call_id: None }
     }
     pub fn user(content: impl Into<String>) -> Message {
-        Message { role: "user".into(), content: content.into(), tool_calls: None, tool_call_id: None }
+        Message { role: "user".into(), content: content.into(), images: Vec::new(), tool_calls: None, tool_call_id: None }
+    }
+    pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Message {
+        Message { role: "user".into(), content: content.into(), images, tool_calls: None, tool_call_id: None }
     }
     pub fn tool(id: String, content: String) -> Message {
-        Message { role: "tool".into(), content, tool_calls: None, tool_call_id: Some(id) }
+        Message { role: "tool".into(), content, images: Vec::new(), tool_calls: None, tool_call_id: Some(id) }
     }
+}
+
+/// Serialize messages for the API request. A message with images becomes the
+/// OpenAI multimodal form (`content` as an array of text + image_url parts);
+/// plain messages serialize normally.
+fn messages_payload(messages: &[Message]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            if m.images.is_empty() {
+                return serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+            }
+            let mut parts: Vec<serde_json::Value> = Vec::new();
+            if !m.content.is_empty() {
+                parts.push(serde_json::json!({"type":"text","text":m.content}));
+            }
+            for uri in &m.images {
+                parts.push(serde_json::json!({
+                    "type":"image_url",
+                    "image_url":{"url":uri}
+                }));
+            }
+            serde_json::json!({"role": m.role, "content": parts})
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +185,11 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"query":{"type":"string"}},
             "required":["query"]
         })),
+        tool("view_image","Load an image file (png/jpg/gif/webp) from disk into the conversation so you can see it. Use for screenshots, diagrams, and mockups.", serde_json::json!({
+            "type":"object",
+            "properties":{"path":{"type":"string"}},
+            "required":["path"]
+        })),
         tool("todo","Maintain a visible plan for multi-step tasks. Pass the FULL list every time (it replaces the previous plan; it is shown to the user). Keep items short; mark exactly one item in_progress while working on it.", serde_json::json!({
             "type":"object",
             "properties":{"items":{"type":"array","items":{
@@ -242,7 +280,7 @@ fn chat_stream(
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({
         "model": cfg.model,
-        "messages": messages,
+        "messages": messages_payload(messages),
         "temperature": 0.2,
         "stream": true,
         "stream_options": {"include_usage": true},
