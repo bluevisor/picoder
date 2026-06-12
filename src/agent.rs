@@ -31,6 +31,9 @@ pub enum UiEvent {
     /// sudo (via the askpass helper) needs a password. The UI pops a masked
     /// prompt and sends the result back over `reply` (None = user cancelled).
     PasswordRequest { prompt: String, reply: Sender<Option<String>> },
+    /// The ask_user tool: the UI pops a visible input line and sends the
+    /// answer back over `reply` (None = user declined).
+    Question { prompt: String, reply: Sender<Option<String>> },
     ModelList(Vec<String>),
     ModelChanged(String),
     Usage { prompt: u32, completion: u32 },
@@ -352,7 +355,7 @@ impl Worker {
             .as_ref()
             .ok()
             .and_then(|a| {
-                ["command", "path", "pattern", "note", "query", "url"]
+                ["command", "path", "pattern", "note", "query", "url", "question"]
                     .iter()
                     .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
             })
@@ -429,6 +432,28 @@ impl Worker {
             }
             "web_fetch" => {
                 let r = tools::web_fetch(&self.http, s("url"));
+                self.result_event(&r);
+                r
+            }
+            "web_search" => {
+                let r = tools::web_search(&self.http, s("query"));
+                self.result_event(&r);
+                r
+            }
+            "todo" => {
+                let r = tools::todo(args.get("items").unwrap_or(&Value::Null));
+                self.result_event(&r);
+                r
+            }
+            "ask_user" => {
+                let (tx, rx) = mpsc::channel();
+                let _ = self.ui.send(UiEvent::Question { prompt: s("question").to_string(), reply: tx });
+                let r = match rx.recv() {
+                    Ok(Some(ans)) if !ans.trim().is_empty() => {
+                        format!("User answered: {}", ans.trim())
+                    }
+                    _ => "(user declined to answer)".to_string(),
+                };
                 self.result_event(&r);
                 r
             }

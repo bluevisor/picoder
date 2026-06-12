@@ -136,6 +136,28 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"url":{"type":"string","description":"http:// or https:// URL"}},
             "required":["url"]
         })),
+        tool("web_search","Search the web (DuckDuckGo) and return the top results as title, URL and snippet. Follow up with web_fetch to read a promising result.", serde_json::json!({
+            "type":"object",
+            "properties":{"query":{"type":"string"}},
+            "required":["query"]
+        })),
+        tool("todo","Maintain a visible plan for multi-step tasks. Pass the FULL list every time (it replaces the previous plan; it is shown to the user). Keep items short; mark exactly one item in_progress while working on it.", serde_json::json!({
+            "type":"object",
+            "properties":{"items":{"type":"array","items":{
+                "type":"object",
+                "properties":{
+                    "text":{"type":"string"},
+                    "status":{"type":"string","enum":["pending","in_progress","completed"]}
+                },
+                "required":["text"]
+            }}},
+            "required":["items"]
+        })),
+        tool("ask_user","Ask the user ONE question and wait for their typed answer. Use only when blocked on a decision or missing information you cannot determine yourself.", serde_json::json!({
+            "type":"object",
+            "properties":{"question":{"type":"string"}},
+            "required":["question"]
+        })),
     ])
 }
 

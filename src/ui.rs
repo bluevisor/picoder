@@ -324,6 +324,8 @@ enum Mode {
     /// Masked sudo password entry, requested by the askpass helper. `prompt` is
     /// the text sudo asked with (e.g. "[sudo] password for user:").
     Password { prompt: String },
+    /// The ask_user tool: a visible one-line answer to the agent's question.
+    Question { prompt: String },
 }
 
 /// Everything the UI needs from config, captured before the worker consumes it.
@@ -353,6 +355,9 @@ pub struct App {
     /// in memory only; never pushed to the transcript, history, or session.
     pw_input: String,
     pw_reply: Option<std::sync::mpsc::Sender<Option<String>>>,
+    /// Buffer + reply channel for an in-flight ask_user question.
+    q_input: String,
+    q_reply: Option<std::sync::mpsc::Sender<Option<String>>>,
     follow: bool,
     scroll: usize,
     max_top: usize,
@@ -398,6 +403,8 @@ impl App {
             mode: Mode::Idle,
             pw_input: String::new(),
             pw_reply: None,
+            q_input: String::new(),
+            q_reply: None,
             follow: true,
             scroll: 0,
             max_top: 0,
@@ -530,6 +537,12 @@ impl App {
                 self.pw_reply = Some(reply);
                 self.mode = Mode::Password { prompt };
             }
+            UiEvent::Question { prompt, reply } => {
+                self.flush_live();
+                self.q_input.clear();
+                self.q_reply = Some(reply);
+                self.mode = Mode::Question { prompt };
+            }
             UiEvent::ModelList(ids) => {
                 self.flush_live();
                 self.last_models = ids.clone();
@@ -617,6 +630,11 @@ impl App {
             self.on_key_password(key);
             return;
         }
+        // ask_user answers likewise capture every key.
+        if matches!(self.mode, Mode::Question { .. }) {
+            self.on_key_question(key);
+            return;
+        }
         // Cycle permission mode in any state. Shift+Tab is the primary binding:
         // it arrives as BackTab on ANSI terminals, or Tab+SHIFT under the Kitty
         // keyboard protocol. But the Linux framebuffer console (TERM=linux)
@@ -648,7 +666,7 @@ impl App {
                     Mode::Approval(_) => self.on_key_approval(alt_key, h),
                     Mode::ThemeSelect { .. } => self.on_key_themeselect(alt_key, h),
                     Mode::Busy => self.on_key_busy(alt_key, h),
-                    Mode::Password { .. } => {}
+                    Mode::Password { .. } | Mode::Question { .. } => {}
                     Mode::Idle => self.on_key_idle(alt_key, h),
                 }
                 return;
@@ -661,8 +679,8 @@ impl App {
             Mode::Approval(_) => self.on_key_approval(key, h),
             Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
             Mode::Busy => self.on_key_busy(key, h),
-            // Password is intercepted at the top of on_key; unreachable here.
-            Mode::Password { .. } => {}
+            // Password/Question are intercepted at the top of on_key.
+            Mode::Password { .. } | Mode::Question { .. } => {}
             Mode::Idle => self.on_key_idle(key, h),
         }
     }
@@ -679,8 +697,8 @@ impl App {
                 self.mode = Mode::Idle;
             }
             Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
-            // Password Esc is handled directly in on_key_password; never reaches here.
-            Mode::Password { .. } => {}
+            // Password/Question Esc is handled in their own key handlers.
+            Mode::Password { .. } | Mode::Question { .. } => {}
             Mode::Idle => {
                 self.input.clear();
                 self.cursor = 0;
@@ -718,6 +736,39 @@ impl App {
     fn cancel_password(&mut self) {
         self.pw_input.clear();
         if let Some(tx) = self.pw_reply.take() {
+            let _ = tx.send(None);
+        }
+        self.mode = Mode::Busy;
+    }
+
+    /// The ask_user answer line. Enter sends the answer; Esc declines. The
+    /// agent's bash-free turn is still running, so we return to the busy view.
+    fn on_key_question(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Enter => {
+                let ans = std::mem::take(&mut self.q_input);
+                self.push(Kind::User, ans.clone());
+                if let Some(tx) = self.q_reply.take() {
+                    let _ = tx.send(Some(ans));
+                }
+                self.mode = Mode::Busy;
+            }
+            KeyCode::Esc => self.cancel_question(),
+            KeyCode::Char('c') if ctrl => self.cancel_question(),
+            KeyCode::Char('u') if ctrl => self.q_input.clear(),
+            KeyCode::Backspace => {
+                self.q_input.pop();
+            }
+            KeyCode::Char(c) if !ctrl && !alt => self.q_input.push(c),
+            _ => {}
+        }
+    }
+
+    fn cancel_question(&mut self) {
+        self.q_input.clear();
+        if let Some(tx) = self.q_reply.take() {
             let _ = tx.send(None);
         }
         self.mode = Mode::Busy;
@@ -1334,6 +1385,11 @@ impl App {
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
             // Prompt line + masked-input line.
             Mode::Password { .. } => 2,
+            // Wrapped question + answer line.
+            Mode::Question { prompt } => {
+                let w = (width as usize).saturating_sub(2).max(1);
+                (prompt.chars().count() / w + 1).min(4) as u16 + 1
+            }
             Mode::Idle => self.input_rows(width),
         }
     }
@@ -1457,6 +1513,28 @@ impl App {
                         style,
                     )]));
                 }
+                f.render_widget(Paragraph::new(lines), area);
+            }
+            Mode::Question { prompt } => {
+                let block = if self.ascii { "#" } else { "▒" };
+                let mut lines: Vec<Line> = textwrap::wrap(prompt, (area.width as usize).max(1))
+                    .into_iter()
+                    .map(|piece| {
+                        Line::from(Span::styled(
+                            piece.into_owned(),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ))
+                    })
+                    .collect();
+                lines.push(Line::from(vec![
+                    Span::styled(self.prompt_str(), Style::default().fg(self.palette.accent)),
+                    Span::raw(self.q_input.clone()),
+                    Span::styled(block, Style::default().fg(self.palette.accent)),
+                    Span::styled(
+                        "  (Enter to answer · Esc to decline)",
+                        Style::default().fg(self.dim_text()),
+                    ),
+                ]));
                 f.render_widget(Paragraph::new(lines), area);
             }
             Mode::Password { prompt } => {

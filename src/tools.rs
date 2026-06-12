@@ -325,14 +325,7 @@ fn html_to_text(html: &str) -> String {
         .unwrap();
     let s = breaks.replace_all(&s, "\n");
     let tags = regex::Regex::new(r"<[^>]*>").unwrap();
-    let s = tags.replace_all(&s, " ");
-    let s = s
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ");
+    let s = decode_entities(&tags.replace_all(&s, " "));
     // Collapse runs of spaces and blank lines left behind by stripped markup.
     let mut out = String::new();
     let mut blank_run = 0;
@@ -350,6 +343,159 @@ fn html_to_text(html: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+fn decode_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
+}
+
+// ----------------------------------------------------------- web_search -----
+
+/// Search DuckDuckGo's HTML endpoint and return "title / url / snippet" rows.
+pub fn web_search(http: &ureq::Agent, query: &str) -> String {
+    if query.trim().is_empty() {
+        return "ERROR: empty query".into();
+    }
+    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencode(query));
+    let resp = http
+        .get(&url)
+        .timeout(Duration::from_secs(30))
+        .set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) picode/0.1")
+        .call();
+    let resp = match resp {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => return format!("ERROR: search returned HTTP {code}"),
+        Err(e) => return format!("ERROR: {e}"),
+    };
+    let mut body = String::new();
+    if let Err(e) = resp.into_reader().take(2_000_000).read_to_string(&mut body) {
+        return format!("ERROR: read failed: {e}");
+    }
+    parse_ddg(&body)
+}
+
+fn parse_ddg(html: &str) -> String {
+    let re = |p: &str| {
+        regex::RegexBuilder::new(p)
+            .case_insensitive(true)
+            .dot_matches_new_line(true)
+            .build()
+            .unwrap()
+    };
+    let link_re = re(r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#);
+    let snip_re = re(r#"class="result__snippet"[^>]*>(.*?)</a>"#);
+    let snippets: Vec<String> = snip_re.captures_iter(html).map(|c| clean_inline(&c[1])).collect();
+    let mut out = String::new();
+    for (i, c) in link_re.captures_iter(html).take(8).enumerate() {
+        let title = clean_inline(&c[2]);
+        out.push_str(&format!("{}. {title}\n   {}\n", i + 1, resolve_ddg_url(&c[1])));
+        if let Some(s) = snippets.get(i) {
+            if !s.is_empty() {
+                out.push_str(&format!("   {s}\n"));
+            }
+        }
+    }
+    if out.is_empty() {
+        "(no results)".into()
+    } else {
+        truncate(&out, MAX_TOOL_OUTPUT)
+    }
+}
+
+/// DDG result hrefs are redirects like `//duckduckgo.com/l/?uddg=<encoded>&…`;
+/// pull out and decode the real destination.
+fn resolve_ddg_url(href: &str) -> String {
+    if let Some(pos) = href.find("uddg=") {
+        let rest = &href[pos + 5..];
+        let end = rest.find('&').unwrap_or(rest.len());
+        return urldecode(&rest[..end]);
+    }
+    if let Some(rest) = href.strip_prefix("//") {
+        format!("https://{rest}")
+    } else {
+        href.to_string()
+    }
+}
+
+/// Strip tags and entities from an inline HTML fragment, collapsing whitespace.
+fn clean_inline(s: &str) -> String {
+    let tags = regex::Regex::new(r"<[^>]*>").unwrap();
+    decode_entities(&tags.replace_all(s, ""))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(v);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+// --------------------------------------------------------------- todo -------
+
+/// Format the model's plan as a checklist. The returned string is both the
+/// tool result (so the model sees the current plan) and the transcript view.
+pub fn todo(items: &serde_json::Value) -> String {
+    let Some(arr) = items.as_array() else {
+        return "ERROR: items must be an array of {text, status}".into();
+    };
+    if arr.is_empty() {
+        return "(plan cleared)".into();
+    }
+    let mut out = String::new();
+    for it in arr {
+        let text = it.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let mark = match it.get("status").and_then(|v| v.as_str()).unwrap_or("pending") {
+            "completed" => "[x]",
+            "in_progress" => "[>]",
+            _ => "[ ]",
+        };
+        out.push_str(&format!("{mark} {text}\n"));
+    }
+    out.trim_end().to_string()
 }
 
 // ------------------------------------------------------------- memory -------
@@ -423,6 +569,53 @@ mod tests {
         let http = crate::api::agent_http();
         assert!(web_fetch(&http, "file:///etc/passwd").starts_with("ERROR"));
         assert!(web_fetch(&http, "ftp://x").starts_with("ERROR"));
+    }
+
+    #[test]
+    fn url_encode_decode_roundtrip() {
+        let s = "rust ureq & \"tools\" ~/.config";
+        assert_eq!(urldecode(&urlencode(s)), s);
+        assert_eq!(urlencode("a b"), "a+b");
+        assert_eq!(urldecode("https%3A%2F%2Fexample.com%2Fx"), "https://example.com/x");
+    }
+
+    #[test]
+    fn ddg_redirect_resolution() {
+        assert_eq!(
+            resolve_ddg_url("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs&rut=abc"),
+            "https://example.com/docs"
+        );
+        assert_eq!(resolve_ddg_url("https://direct.example.com"), "https://direct.example.com");
+    }
+
+    #[test]
+    fn ddg_parse_fixture() {
+        let html = r#"<div class="result"><h2 class="result__title">
+            <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F&rut=x">Example <b>Domain</b></a></h2>
+            <a class="result__snippet" href="x">This domain is for use in &amp;c.</a></div>"#;
+        let out = parse_ddg(html);
+        assert!(out.contains("1. Example Domain"), "got: {out}");
+        assert!(out.contains("https://example.com/"));
+        assert!(out.contains("This domain is for use in &c."));
+    }
+
+    #[test]
+    fn todo_formats_checklist() {
+        let items = serde_json::json!([
+            {"text": "explore", "status": "completed"},
+            {"text": "edit", "status": "in_progress"},
+            {"text": "test"},
+        ]);
+        assert_eq!(todo(&items), "[x] explore\n[>] edit\n[ ] test");
+        assert!(todo(&serde_json::json!("nope")).starts_with("ERROR"));
+    }
+
+    #[test]
+    #[ignore] // hits the network; run with `cargo test -- --ignored`
+    fn web_search_real() {
+        let http = crate::api::agent_http();
+        let out = web_search(&http, "rust programming language");
+        assert!(out.contains("rust-lang.org"), "got: {out}");
     }
 
     #[test]
