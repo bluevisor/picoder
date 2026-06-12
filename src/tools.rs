@@ -5,10 +5,12 @@
 use crate::api::{truncate, MAX_TOOL_OUTPUT};
 use crate::config::{config_dir, memory_path};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 fn expand(path: &str) -> PathBuf {
@@ -68,6 +70,115 @@ pub fn bash(command: &str, timeout: u64, cwd: &Path) -> String {
         }
         Err(e) => format!("ERROR: {e}"),
     }
+}
+
+// -------------------------------------------------------- background jobs ---
+
+/// A shell command running detached from the agent loop. Output accumulates
+/// in `buf`; `read_to` tracks how much bash_output has already returned.
+struct Job {
+    pid: u32,
+    command: String,
+    buf: Arc<Mutex<String>>,
+    exit: Arc<Mutex<Option<i32>>>,
+    read_to: usize,
+}
+
+const JOB_BUF_MAX: usize = 1_000_000;
+
+fn jobs() -> &'static Mutex<HashMap<u32, Job>> {
+    static JOBS: OnceLock<Mutex<HashMap<u32, Job>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn bash_background(command: &str, cwd: &Path) -> String {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Own process group, so bash_kill can take out the whole pipeline.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("ERROR: failed to spawn shell: {e}"),
+    };
+    let pid = child.id();
+    let buf = Arc::new(Mutex::new(String::new()));
+    let exit = Arc::new(Mutex::new(None));
+    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
+        child.stdout.take().map(|p| Box::new(p) as _),
+        child.stderr.take().map(|p| Box::new(p) as _),
+    ];
+    for pipe in pipes.into_iter().flatten() {
+        let buf = buf.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(pipe);
+            let mut line = String::new();
+            while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                let mut b = buf.lock().unwrap();
+                if b.len() < JOB_BUF_MAX {
+                    b.push_str(&line);
+                }
+                line.clear();
+            }
+        });
+    }
+    {
+        let exit = exit.clone();
+        std::thread::spawn(move || {
+            let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+            *exit.lock().unwrap() = Some(code);
+        });
+    }
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    jobs().lock().unwrap().insert(
+        id,
+        Job { pid, command: command.to_string(), buf, exit, read_to: 0 },
+    );
+    format!("Started background job {id} (pid {pid}). Poll with bash_output, stop with bash_kill.")
+}
+
+/// Output produced since the last bash_output call, plus run status.
+pub fn bash_output(id: u64) -> String {
+    let mut map = jobs().lock().unwrap();
+    let Some(job) = map.get_mut(&(id as u32)) else {
+        return format!("ERROR: no background job {id}");
+    };
+    let buf = job.buf.lock().unwrap();
+    let new = buf[job.read_to..].to_string();
+    job.read_to = buf.len();
+    drop(buf);
+    let status = match *job.exit.lock().unwrap() {
+        Some(code) => format!("[exited {code}]"),
+        None => "[running]".to_string(),
+    };
+    let header = format!("job {id}: {}", truncate(&job.command, 100));
+    let body = if new.is_empty() { "(no new output)".to_string() } else { truncate(&new, MAX_TOOL_OUTPUT) };
+    format!("{header}\n{body}\n{status}")
+}
+
+pub fn bash_kill(id: u64) -> String {
+    let map = jobs().lock().unwrap();
+    let Some(job) = map.get(&(id as u32)) else {
+        return format!("ERROR: no background job {id}");
+    };
+    if job.exit.lock().unwrap().is_some() {
+        return format!("job {id} has already exited");
+    }
+    let pid = job.pid;
+    drop(map);
+    // Negative pid = the whole process group (sh + its children).
+    let _ = Command::new("sh").arg("-c").arg(format!("kill -KILL -{pid}")).status();
+    format!("killed job {id} (process group {pid})")
 }
 
 // ------------------------------------------------------------ read/list -----
@@ -608,6 +719,30 @@ mod tests {
         ]);
         assert_eq!(todo(&items), "[x] explore\n[>] edit\n[ ] test");
         assert!(todo(&serde_json::json!("nope")).starts_with("ERROR"));
+    }
+
+    #[test]
+    fn background_job_lifecycle() {
+        let cwd = std::env::temp_dir();
+        let start = bash_background("echo hello; sleep 30", &cwd);
+        assert!(start.contains("Started background job"), "got: {start}");
+        let id: u64 = start
+            .split_whitespace()
+            .nth(3)
+            .and_then(|s| s.parse().ok())
+            .expect("job id in start message");
+        std::thread::sleep(Duration::from_millis(300));
+        let out = bash_output(id);
+        assert!(out.contains("hello"), "got: {out}");
+        assert!(out.contains("[running]"), "got: {out}");
+        // Second poll returns only new output.
+        let out2 = bash_output(id);
+        assert!(out2.contains("(no new output)"), "got: {out2}");
+        let killed = bash_kill(id);
+        assert!(killed.contains("killed job"), "got: {killed}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(bash_output(id).contains("[exited"), "job should be dead");
+        assert!(bash_output(999).starts_with("ERROR"));
     }
 
     #[test]

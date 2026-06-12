@@ -382,7 +382,7 @@ impl Worker {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
         // Plan mode: refuse mutating tools and ask the model to plan instead.
         if self.perm.load(Ordering::Relaxed) == PERM_PLAN
-            && matches!(name, "bash" | "write_file" | "edit_file")
+            && matches!(name, "bash" | "write_file" | "edit_file" | "bash_kill")
         {
             let r = "[plan mode] Not executed. picode is in read-only plan mode — \
                      describe the change you'd make; the user will switch off plan mode to apply it."
@@ -459,13 +459,29 @@ impl Worker {
             }
             "bash" => {
                 let cmd = s("command");
+                let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
                 let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
-                if !self.approve(&format!("run: {cmd}")) {
+                let desc = if background { format!("run in background: {cmd}") } else { format!("run: {cmd}") };
+                if !self.approve(&desc) {
                     let r = "DENIED by user.".to_string();
                     self.result_event(&r);
                     return r;
                 }
-                let r = tools::bash(cmd, timeout, &cwd);
+                let r = if background {
+                    tools::bash_background(cmd, &cwd)
+                } else {
+                    tools::bash(cmd, timeout, &cwd)
+                };
+                self.result_event(&r);
+                r
+            }
+            "bash_output" => {
+                let r = tools::bash_output(args.get("id").and_then(|v| v.as_u64()).unwrap_or(0));
+                self.result_event(&r);
+                r
+            }
+            "bash_kill" => {
+                let r = tools::bash_kill(args.get("id").and_then(|v| v.as_u64()).unwrap_or(0));
                 self.result_event(&r);
                 r
             }

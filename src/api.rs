@@ -77,13 +77,24 @@ pub fn agent_http() -> ureq::Agent {
 /// The tool schema advertised to the model.
 pub fn tools_spec() -> serde_json::Value {
     serde_json::json!([
-        tool("bash", "Run a shell command in the working directory and return stdout, stderr and exit code. Use for git, builds, tests, searching, installing, etc.", serde_json::json!({
+        tool("bash", "Run a shell command in the working directory and return stdout, stderr and exit code. Use for git, builds, tests, searching, installing, etc. Set background=true for long-running commands (servers, builds): it returns a job id immediately; poll with bash_output.", serde_json::json!({
             "type":"object",
             "properties":{
                 "command":{"type":"string","description":"Shell command to run."},
-                "timeout":{"type":"integer","description":"Seconds (default 120)."}
+                "timeout":{"type":"integer","description":"Seconds (default 120). Ignored for background jobs."},
+                "background":{"type":"boolean","description":"Run detached; returns a job id."}
             },
             "required":["command"]
+        })),
+        tool("bash_output","Read output a background bash job has produced since the last bash_output call, plus its run status.", serde_json::json!({
+            "type":"object",
+            "properties":{"id":{"type":"integer","description":"Job id from bash."}},
+            "required":["id"]
+        })),
+        tool("bash_kill","Kill a background bash job (its whole process group).", serde_json::json!({
+            "type":"object",
+            "properties":{"id":{"type":"integer","description":"Job id from bash."}},
+            "required":["id"]
         })),
         tool("read_file","Read a UTF-8 text file, optionally a 1-based inclusive line range.", serde_json::json!({
             "type":"object",
