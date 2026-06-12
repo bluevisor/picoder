@@ -80,22 +80,26 @@ if [[ "$CMD" == "pull" ]]; then
 fi
 
 # ----------------------------------------------------------- build/deploy ----
-# Two targets: ARMv6 static musl for the Pi Zero W, and aarch64 static musl for
-# the Pi 5 (a 64-bit box — running the 32-bit ARMv6 binary under compat is
-# fragile and can segfault, so it gets a native build).
+# Three targets, all static musl: ARMv6 for the Pi Zero W, ARMv7 for 32-bit
+# Pi OS on the Pi 2/3/4 (armv7l), and aarch64 for the Pi 5 / 64-bit boxes
+# (running the 32-bit ARMv6 binary under compat is fragile and can segfault,
+# so 64-bit hosts get a native build).
 TARGET_ARMV6=arm-unknown-linux-musleabihf
+TARGET_ARMV7=armv7-unknown-linux-musleabihf
 TARGET_ARM64=aarch64-unknown-linux-musl
 
 # Map a remote `uname -m` to the Rust target triple we deploy there.
 target_for_arch() {
   case "$1" in
-    aarch64|arm64)      echo "$TARGET_ARM64" ;;
-    armv6l|armv7l|arm)  echo "$TARGET_ARMV6" ;;
-    *)                  echo "" ;;
+    aarch64|arm64)  echo "$TARGET_ARM64" ;;
+    armv7l)         echo "$TARGET_ARMV7" ;;
+    armv6l|arm)     echo "$TARGET_ARMV6" ;;
+    *)              echo "" ;;
   esac
 }
 
-# Build one target (idempotent — cargo no-ops if already up to date).
+# Build one target (idempotent — cargo no-ops if already up to date). The
+# ARMv7 build reuses the ARMv6 musl gcc as linker/CC (see .cargo/config.toml).
 build_target() {
   local t="$1"
   echo ">> building $t (release)..."
@@ -103,6 +107,11 @@ build_target() {
     "$TARGET_ARMV6")
       CC_arm_unknown_linux_musleabihf=${TARGET_ARMV6}-gcc \
       AR_arm_unknown_linux_musleabihf=${TARGET_ARMV6}-ar \
+      TARGET_CC=${TARGET_ARMV6}-gcc \
+        cargo build --release --target "$t" ;;
+    "$TARGET_ARMV7")
+      CC_armv7_unknown_linux_musleabihf=${TARGET_ARMV6}-gcc \
+      AR_armv7_unknown_linux_musleabihf=${TARGET_ARMV6}-ar \
       TARGET_CC=${TARGET_ARMV6}-gcc \
         cargo build --release --target "$t" ;;
     "$TARGET_ARM64")
@@ -115,10 +124,11 @@ build_target() {
 }
 
 if [[ "$CMD" != "deploy" ]]; then
-  # Plain build: produce both binaries.
+  # Plain build: produce all three binaries.
   build_target "$TARGET_ARMV6"
+  build_target "$TARGET_ARMV7"
   build_target "$TARGET_ARM64"
-  for t in "$TARGET_ARMV6" "$TARGET_ARM64"; do
+  for t in "$TARGET_ARMV6" "$TARGET_ARMV7" "$TARGET_ARM64"; do
     file "target/$t/release/picode"
   done
   exit 0

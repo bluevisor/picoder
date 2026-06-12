@@ -81,9 +81,12 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 
 ## Building (must be done on the Mac — the Pi can't compile this)
 
-Cross-compiled from macOS to **two** static musl targets: ARMv6 for the Pi
-Zero W, and aarch64 for the Pi 5 (a 64-bit box — running the 32-bit ARMv6 build
-under compat is fragile and can segfault, so it gets a native binary).
+Cross-compiled from macOS to **three** static musl targets: ARMv6 for the Pi
+Zero W, ARMv7 for 32-bit Pi OS on the Pi 2/3/4 (`armv7l`), and aarch64 for the
+Pi 5 (a 64-bit box — running the 32-bit ARMv6 build under compat is fragile and
+can segfault, so it gets a native binary). The ARMv7 build reuses the ARMv6
+musl gcc as linker, so no extra toolchain is needed beyond
+`rustup target add armv7-unknown-linux-musleabihf`.
 
 ```
 # one-time toolchain setup:
@@ -99,7 +102,8 @@ PI=user@host ./build.sh deploy               # install to a single host instead
 ```
 
 `deploy` queries each host's `uname -m` and installs the matching binary
-(`armv6l` → ARMv6, `aarch64` → aarch64) to `~/.local/bin/picode`. Hosts come
+(`armv6l` → ARMv6, `armv7l` → ARMv7, `aarch64` → aarch64) to
+`~/.local/bin/picode`. Hosts come
 from the `PICODE_HOSTS` env var (space-separated `user@host`; defaults to the
 Pi Zero + Pi 5), or `PI=user@host` for a single host.
 

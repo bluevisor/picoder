@@ -1,6 +1,13 @@
 [target.arm-unknown-linux-musleabihf]
 linker = "arm-unknown-linux-musleabihf-gcc"
 
+# 32-bit Raspberry Pi OS on the Pi 2/3/4 (armv7l), static musl. Rust codegen
+# targets ARMv7; the ARMv6 musl gcc is reused as linker (and CC for ring's C
+# pieces — ARMv6 code runs fine on ARMv7), so no extra toolchain is needed.
+# No target-cpu tune: a Pi 2 (Cortex-A7) must not get ARMv8-only encodings.
+[target.armv7-unknown-linux-musleabihf]
+linker = "arm-unknown-linux-musleabihf-gcc"
+
 # Raspberry Pi 5 (Cortex-A76) native build, static musl. The Pi 5 is aarch64;
 # running the 32-bit ARMv6 build under compat is fragile (it can segfault), so
 # the Pi 5 gets its own native binary. Tunes codegen to the Pi 5's CPU and

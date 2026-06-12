@@ -54,8 +54,9 @@ dependencies.
 ## Install / build
 
 picode is cross-compiled from macOS to static musl binaries (the Pi can't
-compile Rust itself). Two targets are produced: **ARMv6** for the Pi Zero W and
-**aarch64** for the Pi 5 — `deploy` picks the matching one per host.
+compile Rust itself). Three targets are produced: **ARMv6** for the Pi Zero W,
+**ARMv7** for 32-bit Pi OS on the Pi 2/3/4, and **aarch64** for the Pi 5 —
+`deploy` picks the matching one per host via `uname -m`.
 
 ```sh
 # one-time toolchain setup
