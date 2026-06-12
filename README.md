@@ -11,9 +11,16 @@ dependencies.
 
 ## Features
 
-- **Agentic tool loop** — `bash` (with timeout), `read` / `write` / `edit` /
-  `list`, `grep` (regex), `glob`, `web_fetch` (URL → readable text), and
-  `remember` / `recall` memory.
+- **Agentic tool loop** — `bash` (with timeout, or detached `background` jobs +
+  `bash_output` / `bash_kill`), `read` / `write` / `edit` / `list`, `grep`
+  (regex), `glob`, `web_fetch`, `web_search`, `todo` (a visible plan),
+  `ask_user`, `view_image`, and `remember` / `recall` memory.
+- **Sub-agents** — the `task` tool delegates a self-contained job to a fresh
+  agent with its own context and the same tools; only its report comes back.
+- **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
+  at start; their tools show up as `mcp__<server>__<tool>` (`/mcp` lists them).
+- **Images** — `@image.png` attaches as a base64 data URI and `view_image`
+  loads one from disk, sent as OpenAI multimodal content parts.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
   live token streaming, and colored unified diffs previewed before every
   write/edit.
@@ -21,6 +28,8 @@ dependencies.
   window; triggers automatically at 80% full.
 - **Queued input** — keep typing while the agent works; Enter queues messages
   that send as turns finish.
+- **One-shot `--output`** — `picode "task" -o out.md` writes the final reply to
+  disk after the run.
 - **Permission modes** (`Shift+Tab`) — *ask* / *bypass* / *plan* (read-only).
 - **Context files** — auto-loads `PICODE.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md` from the working directory.
@@ -64,10 +73,23 @@ On first run, picode walks you through provider, model, and API key. State lives
 in `~/.config/picode/`:
 
 ```
-config.json   provider / model / key
+config.json   provider / model / key (+ optional mcp_servers)
 memory.md     remember/recall store
 history       composer history
 sessions/     per-directory session transcripts
+```
+
+To expose [MCP](https://modelcontextprotocol.io) tools, add an `mcp_servers`
+block to `config.json`; each entry is launched over stdio at start and its
+tools appear as `mcp__<server>__<tool>`:
+
+```json
+"mcp_servers": {
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/pi"]
+  }
+}
 ```
 
 ## Keyboard

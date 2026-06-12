@@ -15,11 +15,13 @@ Cargo.toml            deps + release profile (static musl, size-optimized)
 .cargo/config.toml    cross-linker for arm-unknown-linux-musleabihf
 build.sh              cross-compile (and `build.sh deploy` to install on the Pis)
 src/
-  main.rs             CLI args, first-run setup, one-shot mode, session/context wiring
-  config.rs           ~/.config/picode/config.json, setup wizard, session paths
-  api.rs              OpenAI-compatible streaming SSE, tool schema, retry, list_models
-  tools.rs            tool impls: bash, read/write/edit/list, grep, glob, remember, recall
-  agent.rs            worker thread: owns the conversation, runs the model/tool loop
+  main.rs             CLI args, first-run setup, one-shot mode (+ --output), session/context wiring
+  config.rs           ~/.config/picode/config.json (incl. mcp_servers), setup wizard, session paths
+  api.rs              OpenAI-compatible streaming SSE, tool schema, multimodal parts, retry, list_models
+  tools.rs            tool impls: bash (+ background), read/write/edit/list, grep, glob,
+                      web_fetch, web_search, todo, view_image, remember, recall
+  agent.rs            worker thread: owns the conversation, runs the model/tool loop, sub-agents
+  mcp.rs              stdio MCP client: spawn servers, JSON-RPC handshake, tools/list + tools/call
   ui.rs               ratatui full-screen TUI: transcript, composer, status bar
   diff.rs             unified diff for edit/write previews
 ```
@@ -34,13 +36,22 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 
 ## Features
 
-- Tools: bash (timeout), read/write/edit/list, grep (regex), glob, remember/recall,
-  web_fetch (URL → readable text, HTML stripped).
+- Tools: bash (timeout, or `background` jobs + bash_output/bash_kill),
+  read/write/edit/list, grep (regex), glob, web_fetch (URL → readable text),
+  web_search (DuckDuckGo), todo (visible plan), ask_user, task (sub-agent),
+  view_image, remember/recall — plus any MCP tools.
+- Sub-agents: the `task` tool delegates a self-contained job to a fresh agent
+  with its own context and the same tools; only its final report returns.
+- MCP: stdio servers from `mcp_servers` in config.json are launched at start
+  and their tools advertised as `mcp__<server>__<tool>` (`/mcp` lists them).
+- Images: `@image.png` attaches as a base64 data URI, and `view_image` loads
+  one from disk — both sent as OpenAI multimodal content parts.
 - Streaming with a Claude-style composer (`›`, reverse-block cursor, placeholder).
 - Context compaction: `/compact` summarizes older turns (keeping the system
   prefix and latest exchange); auto-triggers at 80% of the context window.
 - Queued input: the composer stays live while the agent works — Enter queues
   messages that send in order as turns finish (Esc interrupts and restores them).
+- One-shot `--output FILE` writes the final reply to disk after the run.
 - Status bar: model · session tokens + $ cost · context-window bar · account balance.
 - Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
 - Auto-loads `PICODE.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
@@ -55,7 +66,7 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Launch banner: Apple-rainbow PICODE block art + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `default`, `apple2` (green phosphor, `] ▒`),
   `msdos` (gray, `C:\>`); persisted in config. Theme sets colors, prompt, cursor.
-- Slash commands: `/model /auto /reset /compact /memory /theme /init /clear /help /exit`.
+- Slash commands: `/model /auto /reset /compact /mcp /memory /theme /init /clear /help /exit`.
 
 ## Building (must be done on the Mac — the Pi can't compile this)
 
@@ -92,3 +103,23 @@ fully static binary.
 
 `~/.config/picode/` — `config.json` (provider/model/key), `memory.md`,
 `history`, `sessions/`.
+
+MCP servers are optional and configured by hand in `config.json`:
+
+```json
+{
+  "provider": "deepseek",
+  "model": "deepseek-v4-pro",
+  "api_key": "...",
+  "mcp_servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/pi"],
+      "env": {}
+    }
+  }
+}
+```
+
+Each server is spawned over stdio at launch; its tools appear as
+`mcp__filesystem__<tool>`. `/model` and `/theme` rewrites preserve the block.
