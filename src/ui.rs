@@ -220,10 +220,24 @@ enum Kind {
     BannerDim,
 }
 
-const SLASH_COMMANDS: &[&str] = &[
-    "/model", "/auto", "/reset", "/compact", "/config", "/mcp", "/memory", "/theme", "/init",
-    "/clear", "/help", "/exit",
+/// Slash commands with the one-line description shown in the `/` palette.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/model", "list models, or switch by id/number"),
+    ("/config", "settings: provider, model, key, thinking, …"),
+    ("/compact", "summarize older turns to free context"),
+    ("/reset", "clear conversation context"),
+    ("/auto", "toggle bypass-permissions"),
+    ("/mcp", "list MCP servers and their tools"),
+    ("/memory", "show persistent memory"),
+    ("/theme", "open the theme picker"),
+    ("/init", "summarize this project into PICODE.md"),
+    ("/clear", "clear the screen transcript"),
+    ("/help", "show help"),
+    ("/exit", "quit picode"),
 ];
+
+/// Most suggestions shown under the composer for a `/` prefix.
+const MAX_SUGGEST: usize = 8;
 
 /// Rows of the `/config` panel, in display order.
 const SETTING_LABELS: &[&str] = &[
@@ -420,6 +434,8 @@ pub struct App {
     pending: String,
     /// Messages typed while the agent was busy, sent in order as turns finish.
     queued: Vec<String>,
+    /// Highlighted row of the `/` command palette (clamped at use).
+    suggest_idx: usize,
     mode: Mode,
     /// Buffer + reply channel for an in-flight masked sudo password prompt. Held
     /// in memory only; never pushed to the transcript, history, or session.
@@ -471,6 +487,7 @@ impl App {
             hist_idx,
             pending: String::new(),
             queued: Vec::new(),
+            suggest_idx: 0,
             mode: Mode::Idle,
             pw_input: String::new(),
             pw_reply: None,
@@ -682,6 +699,34 @@ impl App {
         let byte = self.byte_at(self.cursor);
         self.input.insert(byte, c);
         self.cursor += 1;
+        // New text narrows the `/` palette — restart from the top match.
+        self.suggest_idx = 0;
+    }
+
+    /// Commands matching the typed `/` prefix, for the palette under the
+    /// composer. "Most likely" first: ranked by how often each command appears
+    /// in composer history, with the curated order breaking ties. Empty unless
+    /// idle with a bare command token (no arguments yet).
+    fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        if !matches!(self.mode, Mode::Idle)
+            || !self.input.starts_with('/')
+            || self.input.contains(char::is_whitespace)
+        {
+            return Vec::new();
+        }
+        let uses = |cmd: &str| {
+            self.history
+                .iter()
+                .filter(|h| h.as_str() == cmd || h.starts_with(&format!("{cmd} ")))
+                .count()
+        };
+        let mut scored: Vec<((&'static str, &'static str), usize)> = SLASH_COMMANDS
+            .iter()
+            .filter(|(c, _)| c.starts_with(self.input.as_str()))
+            .map(|&(c, d)| ((c, d), uses(c)))
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1)); // stable: ties keep curated order
+        scored.into_iter().map(|(cd, _)| cd).take(MAX_SUGGEST).collect()
     }
 
     fn byte_at(&self, char_idx: usize) -> usize {
@@ -1101,6 +1146,34 @@ impl App {
 
     fn on_key_idle(&mut self, key: KeyEvent, h: &Handles) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // While the `/` palette is open, Up/Down/Tab/Enter act on it.
+        let sugg = self.slash_suggestions();
+        if !sugg.is_empty() {
+            let idx = self.suggest_idx.min(sugg.len() - 1);
+            match key.code {
+                KeyCode::Down => {
+                    self.suggest_idx = (idx + 1) % sugg.len();
+                    return;
+                }
+                KeyCode::Up => {
+                    self.suggest_idx = (idx + sugg.len() - 1) % sugg.len();
+                    return;
+                }
+                KeyCode::Tab => {
+                    self.input = sugg[idx].0.to_string();
+                    self.cursor = self.char_len();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.input = sugg[idx].0.to_string();
+                    self.cursor = self.char_len();
+                    self.suggest_idx = 0;
+                    self.submit(h);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Enter => self.submit(h),
             KeyCode::Char('c') if ctrl => {
@@ -1243,8 +1316,8 @@ impl App {
             let s = token.clone();
             let cands: Vec<String> = SLASH_COMMANDS
                 .iter()
-                .filter(|c| c.starts_with(&s))
-                .map(|c| c.to_string())
+                .filter(|(c, _)| c.starts_with(&s))
+                .map(|(c, _)| c.to_string())
                 .collect();
             ("".to_string(), s, cands)
         } else {
@@ -1644,7 +1717,7 @@ impl App {
                 let w = (width as usize).saturating_sub(2).max(1);
                 (prompt.chars().count() / w + 1).min(4) as u16 + 1
             }
-            Mode::Idle => self.input_rows(width),
+            Mode::Idle => self.input_rows(width) + self.slash_suggestions().len() as u16,
         }
     }
 
@@ -1904,6 +1977,27 @@ impl App {
                 spans.push(Span::styled(hint, Style::default().fg(self.dim_text())));
             }
             lines.push(Line::from(spans));
+        }
+        // The `/` command palette, under the input (idle only).
+        let sugg = self.slash_suggestions();
+        if !sugg.is_empty() {
+            let idx = self.suggest_idx.min(sugg.len() - 1);
+            let marker = if self.ascii { ">" } else { "▸" };
+            for (i, (name, desc)) in sugg.iter().enumerate() {
+                let sel = i == idx;
+                let name_style = if sel {
+                    Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.dim_text())
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} {name:<9} ", if sel { marker } else { " " }),
+                        name_style,
+                    ),
+                    Span::styled(desc.to_string(), Style::default().fg(self.dim_text())),
+                ]));
+            }
         }
         f.render_widget(Paragraph::new(lines), inner);
         if cursor == CursorKind::Caret {

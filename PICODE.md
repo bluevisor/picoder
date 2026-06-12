@@ -60,7 +60,9 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
 - Auto-loads `PICODE.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
 - Session persistence + resume (`picode --continue`, per working directory).
-- Composer: `@file` attach, Tab autocomplete (commands + paths), history,
+- Composer: typing `/` opens a command palette (suggestions ranked by your
+  usage history; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab
+  autocomplete (commands + paths), history,
   word-skip (Alt/Ctrl/Cmd + arrows), word-delete (Option/Alt+Backspace and
   Option/Alt+Delete), code-block highlighting.
 - Enables the Kitty keyboard protocol when the terminal supports it, so

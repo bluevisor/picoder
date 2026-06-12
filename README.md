@@ -38,8 +38,10 @@ dependencies.
 - **Context files** — auto-loads `PICODE.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md` from the working directory.
 - **Sessions** — persisted per working directory; resume with `picode --continue`.
-- **Composer niceties** — `@file` attach, Tab autocomplete (commands + paths),
-  history, word-skip and word-delete, code-block highlighting.
+- **Composer niceties** — a `/` command palette (suggestions ranked by your
+  usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
+  (commands + paths), history, word-skip and word-delete, code-block
+  highlighting.
 - **Status bar** — model · session tokens + $ cost · context-window bar ·
   account balance.
 - **Settings panel** (`/config`) — provider preset, base URL, model, API key,
