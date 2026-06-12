@@ -38,9 +38,17 @@ pub struct Config {
     /// MCP servers to launch, keyed by name (advertised as mcp__<name>__<tool>).
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    /// Auto-commit each successful edit to the working-directory git repo so
+    /// every change is a restorable checkpoint. On by default; no-op outside a repo.
+    #[serde(default = "default_true")]
+    pub auto_commit: bool,
     /// True when the key came from the environment; we never persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_theme() -> String {
@@ -68,6 +76,7 @@ impl Default for Config {
             price_in: default_price_in(),
             price_out: default_price_out(),
             mcp_servers: BTreeMap::new(),
+            auto_commit: true,
             key_from_env: false,
         }
     }
@@ -131,6 +140,9 @@ impl Config {
                         cfg.mcp_servers = servers;
                     }
                 }
+                if let Some(b) = v.get("auto_commit").and_then(|x| x.as_bool()) {
+                    cfg.auto_commit = b;
+                }
             }
         }
         for var in ["DEEPSEEK_API_KEY", "PICODE_API_KEY"] {
@@ -162,6 +174,10 @@ impl Config {
         // Preserve user-configured MCP servers across model/theme rewrites.
         if !on_disk.mcp_servers.is_empty() {
             json["mcp_servers"] = serde_json::to_value(&on_disk.mcp_servers).unwrap_or_default();
+        }
+        // Only written when turned off (default is on).
+        if !on_disk.auto_commit {
+            json["auto_commit"] = serde_json::json!(false);
         }
         let path = config_path();
         std::fs::write(&path, serde_json::to_string_pretty(&json)?)

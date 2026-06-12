@@ -262,6 +262,55 @@ fn banner_art(w: usize, ascii: bool) -> Vec<String> {
     }
 }
 
+const TAGLINE: &str = "a tiny agentic coding CLI";
+
+/// Role of a banner line, so the TUI and the ANSI `--banner` preview color the
+/// same layout identically.
+#[derive(Clone, Copy)]
+enum BRole {
+    Art(usize), // rainbow/mono block-art row
+    Version,    // bold accent
+    Tagline,    // dim
+    Frame,      // dim panel rule / blank
+    Data,       // accent status line
+}
+
+struct BLine {
+    text: String,
+    role: BRole,
+}
+
+/// Build the launch banner as structured lines: centered block art, a version
+/// + tagline, and a bordered SYSTEM panel wrapping the status lines.
+fn banner_lines(w: usize, ascii: bool, status: &[String]) -> Vec<BLine> {
+    let center = |s: &str| {
+        let pad = " ".repeat(w.saturating_sub(s.chars().count()) / 2);
+        format!("{pad}{s}")
+    };
+    let art = banner_art(w, ascii);
+    let artw = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let art_pad = " ".repeat(w.saturating_sub(artw) / 2);
+
+    let mut out = Vec::new();
+    for (i, l) in art.iter().enumerate() {
+        out.push(BLine { text: format!("{art_pad}{l}"), role: BRole::Art(i) });
+    }
+    out.push(BLine { text: String::new(), role: BRole::Frame });
+    out.push(BLine { text: center(&format!("picode v{}", env!("CARGO_PKG_VERSION"))), role: BRole::Version });
+    out.push(BLine { text: center(TAGLINE), role: BRole::Tagline });
+    out.push(BLine { text: String::new(), role: BRole::Frame });
+
+    let (tl, bl, h, vbar) = if ascii { ("+", "+", "-", "|") } else { ("┌", "└", "─", "│") };
+    let head = format!("{tl}{h} SYSTEM ");
+    let fill = w.saturating_sub(head.chars().count());
+    out.push(BLine { text: format!("{head}{}", h.repeat(fill)), role: BRole::Frame });
+    for line in status {
+        out.push(BLine { text: format!("{vbar} {line}"), role: BRole::Data });
+    }
+    out.push(BLine { text: format!("{bl}{}", h.repeat(w.saturating_sub(1))), role: BRole::Frame });
+    out
+}
+
 fn ansi_fg(c: Color) -> String {
     match c {
         Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
@@ -285,22 +334,18 @@ fn ansi_fg(c: Color) -> String {
 pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> String {
     let p = palette_by_name(theme);
     let w = (width as usize).saturating_sub(4).max(8);
-    let mark = if ascii { "=#" } else { "──■" };
-    let art = banner_art(w, ascii);
-    let artw = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let pad = " ".repeat(w.saturating_sub(artw) / 2);
     let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
     let reset = "\x1b[0m";
-    let acc = ansi_fg(p.accent);
 
-    let mut out = format!("{acc}{mark} PICODE v1.0{reset}\n\n");
-    for (i, line) in art.iter().enumerate() {
-        let c = p.mono_banner.unwrap_or(rainbow[i % rainbow.len()]);
-        out.push_str(&format!("{}{pad}{line}{reset}\n", ansi_fg(c)));
-    }
-    out.push_str(&format!("\n{acc}{mark} SYSTEM STATUS{reset}\n"));
-    for line in status {
-        out.push_str(&format!(" {acc}{line}{reset}\n"));
+    let mut out = String::new();
+    for bl in banner_lines(w, ascii, status) {
+        let prefix = match bl.role {
+            BRole::Art(i) => ansi_fg(p.mono_banner.unwrap_or(rainbow[i % rainbow.len()])),
+            BRole::Version => format!("\x1b[1m{}", ansi_fg(p.accent)),
+            BRole::Tagline | BRole::Frame => ansi_fg(p.notice),
+            BRole::Data => ansi_fg(p.accent),
+        };
+        out.push_str(&format!("{prefix}{}{reset}\n", bl.text));
     }
     out
 }
@@ -1256,35 +1301,23 @@ impl App {
         }
     }
 
-    /// A boot-screen banner: a PICODE block-art logo and a system-status line.
+    /// A boot-screen banner: a PICODE block-art logo, version + tagline, and a
+    /// bordered SYSTEM panel of status lines.
     pub fn banner(&mut self, width: u16, status: Vec<String>) {
         let w = (width as usize).saturating_sub(4).max(8);
-        let mark = if self.ascii { "=#" } else { "──■" };
-        let art = banner_art(w, self.ascii);
-        let artw = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-        let pad = " ".repeat(w.saturating_sub(artw) / 2);
         let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
-
-        self.push_dim(format!("{mark} PICODE v1.0"));
-        self.push_dim(String::new());
-        for (i, line) in art.iter().enumerate() {
-            let color = self.palette.mono_banner.unwrap_or(rainbow[i % rainbow.len()]);
-            self.transcript.push(TLine {
-                kind: Kind::Banner,
-                text: format!("{pad}{line}"),
-                lead: false,
-                color: Some(color),
-            });
-        }
-        self.push_dim(String::new());
-        self.push_dim(format!("{mark} SYSTEM STATUS"));
-        for line in status {
-            self.transcript.push(TLine {
-                kind: Kind::Banner,
-                text: format!(" {line}"),
-                lead: false,
-                color: Some(self.palette.accent),
-            });
+        for bl in banner_lines(w, self.ascii, &status) {
+            let (kind, color) = match bl.role {
+                BRole::Art(i) => (
+                    Kind::Banner,
+                    Some(self.palette.mono_banner.unwrap_or(rainbow[i % rainbow.len()])),
+                ),
+                BRole::Version => (Kind::Banner, None),
+                BRole::Tagline | BRole::Frame => (Kind::BannerDim, None),
+                // Non-bold accent: BannerDim base recolored to the accent.
+                BRole::Data => (Kind::BannerDim, Some(self.palette.accent)),
+            };
+            self.transcript.push(TLine { kind, text: bl.text, lead: false, color });
         }
         self.push_dim(String::new());
         self.after_push();

@@ -24,7 +24,7 @@ use std::io::{IsTerminal, Write};
 /// it has ≥4 cores or ≥2GB RAM (so the quad-core Jetson Nano, which can compile
 /// its own Rust, isn't told to avoid compiles); smaller hosts get a "keep it
 /// light" caution instead.
-fn system_prompt() -> String {
+fn system_prompt(auto_commit: bool) -> String {
     let host = sysinfo::host_descriptor();
     let capable = sysinfo::cpu_cores() >= 4 || sysinfo::mem_total_mb().unwrap_or(512) >= 2048;
     let resource_rule = if !capable {
@@ -34,6 +34,13 @@ tiny. Avoid heavy installs/compiles unless asked."
         "- Use bash for git, builds, tests. This machine is reasonably capable (multi-core, GBs of \
 RAM + swap), so builds and compiles are fine when useful."
     };
+    let git_rule = if auto_commit {
+        "\n- Every successful edit is auto-committed to git as a checkpoint. Use git history as a \
+clue: `git log`, `git show`, and `git diff` tell you what changed and let you restore a previous \
+state with `git revert`/`git checkout` if an edit was wrong. Don't commit manually unless asked."
+    } else {
+        ""
+    };
     format!(
         "You are picode, a terminal coding agent running ON {host}. You help with \
 software tasks using tools.
@@ -41,8 +48,8 @@ software tasks using tools.
 Rules:
 - Use tools to inspect and change the real filesystem; never invent file contents.
 - Prefer read_file/list_files/grep/glob before editing. Make minimal, correct edits with \
-edit_file; use write_file for new files.
-{resource_rule}
+edit_file; use write_file for new files; use multi_edit to change several files at once.
+{resource_rule}{git_rule}
 - When the task is complete, reply with a short plain-text summary and no tool call.
 - Be concise."
     )
@@ -141,7 +148,7 @@ fn main() {
     }
 
     if !args.is_empty() {
-        let (messages, _) = build_context(cont);
+        let (messages, _) = build_context(cont, &cfg);
         // Only persist a one-shot turn when explicitly continuing a session,
         // so a stray `picode "x"` can't clobber a richer interactive session.
         let session = cont.then(config::session_path);
@@ -151,7 +158,7 @@ fn main() {
             eprintln!("--output only applies to one-shot mode (picode \"task\" -o file)");
             return;
         }
-        let (messages, notes) = build_context(cont);
+        let (messages, notes) = build_context(cont, &cfg);
         run_tui(cfg, messages, notes, auto);
     }
 }
@@ -159,7 +166,7 @@ fn main() {
 /// Build the starting conversation: a resumed session if asked for and present,
 /// otherwise a fresh one (system prompt + memory + auto-loaded project file).
 /// Returns the messages and human-readable startup notes for the UI.
-fn build_context(cont: bool) -> (Vec<Message>, Vec<String>) {
+fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
     let mut notes = Vec::new();
     if cont {
         if let Some(msgs) = load_session() {
@@ -168,7 +175,7 @@ fn build_context(cont: bool) -> (Vec<Message>, Vec<String>) {
         }
         notes.push("no previous session here — starting fresh".into());
     }
-    let mut messages = vec![Message::system(system_prompt())];
+    let mut messages = vec![Message::system(system_prompt(cfg.auto_commit))];
     if let Ok(Some(mem)) = tools::load_memory() {
         messages.push(Message::system(format!(
             "Persistent memory (things you were told to remember):\n{mem}"
@@ -177,6 +184,13 @@ fn build_context(cont: bool) -> (Vec<Message>, Vec<String>) {
     if let Some((msg, name)) = load_project_context() {
         messages.push(msg);
         notes.push(format!("loaded {name}"));
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    if let Some(git) = tools::git_context(&cwd) {
+        messages.push(Message::system(format!(
+            "Current git state of the working directory (use as a clue to recent work):\n{git}"
+        )));
+        notes.push("loaded git history".into());
     }
     (messages, notes)
 }
@@ -190,11 +204,16 @@ fn status_lines(cfg: &Config, ascii: bool) -> Vec<String> {
     } else {
         format!("{} ctx", cfg.context_window)
     };
-    vec![
+    let mut lines = vec![
         format!("HW   {}", sysinfo::hardware_line(ascii)),
         format!("NET  {}", sysinfo::network_line(ascii)),
         format!("LLM  {}{sep}{}{sep}{ctx}", cfg.model, cfg.provider),
-    ]
+    ];
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    if let Some(git) = tools::git_status_line(&cwd, sep) {
+        lines.push(format!("GIT  {git}"));
+    }
+    lines
 }
 
 fn load_project_context() -> Option<(Message, String)> {

@@ -263,6 +263,68 @@ pub enum EditPreview {
     Err(String),
 }
 
+/// One requested edit (a unique-substring replacement in a file).
+pub struct EditReq {
+    pub path: String,
+    pub old_text: String,
+    pub new_text: String,
+}
+
+/// A validated multi-file edit, ready to apply.
+pub struct MultiEditPlan {
+    /// Combined diff across all touched files, for the approval preview.
+    pub diff: String,
+    /// Final content per file, in first-touched order.
+    pub files: Vec<(String, String)>,
+}
+
+/// Validate a batch of edits without writing. Edits are applied to in-memory
+/// copies in order, so several edits to the same file compose correctly. Any
+/// failure (file missing, old_text absent or ambiguous) aborts the whole
+/// batch — nothing is half-applied.
+pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, String> {
+    if edits.is_empty() {
+        return Err("ERROR: no edits provided".into());
+    }
+    let mut originals: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut current: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (i, e) in edits.iter().enumerate() {
+        if !current.contains_key(&e.path) {
+            let disk = std::fs::read_to_string(expand(&e.path))
+                .map_err(|err| format!("ERROR: edit {}: {} ({err})", i + 1, e.path))?;
+            originals.insert(e.path.clone(), disk.clone());
+            current.insert(e.path.clone(), disk);
+            order.push(e.path.clone());
+        }
+        let cur = current.get(&e.path).unwrap();
+        let n = cur.matches(&e.old_text).count();
+        if n == 0 {
+            return Err(format!("ERROR: edit {}: old_text not found in {}", i + 1, e.path));
+        }
+        if n > 1 {
+            return Err(format!(
+                "ERROR: edit {}: old_text matches {n} times in {}; make it unique",
+                i + 1,
+                e.path
+            ));
+        }
+        let updated = cur.replacen(&e.old_text, &e.new_text, 1);
+        current.insert(e.path.clone(), updated);
+    }
+    let mut diff = String::new();
+    let mut files = Vec::new();
+    for path in &order {
+        let old = &originals[path];
+        let new = &current[path];
+        diff.push_str(&format!("--- {path}\n"));
+        diff.push_str(&crate::diff::unified(old, new, 300));
+        diff.push('\n');
+        files.push((path.clone(), new.clone()));
+    }
+    Ok(MultiEditPlan { diff, files })
+}
+
 pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
     let p = expand(path);
     let data = match std::fs::read_to_string(&p) {
@@ -287,6 +349,132 @@ pub fn apply_write(path: &str, content: &str) -> String {
         Ok(()) => format!("OK edited {}", p.display()),
         Err(e) => format!("ERROR: {e}"),
     }
+}
+
+// --------------------------------------------------------------- git --------
+
+/// True if `dir` is inside a git work tree.
+pub fn in_git_repo(dir: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Commit the given paths to the repo at `dir` as an edit checkpoint. Returns a
+/// short note like ` [committed a1b2c3d]` for the tool result, or "" when there
+/// was nothing to commit / not a repo. Best-effort: never surfaces an error.
+pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
+    if paths.is_empty() || !in_git_repo(dir) {
+        return String::new();
+    }
+    let mut add = Command::new("git");
+    add.arg("-C").arg(dir).arg("add").arg("--");
+    for p in paths {
+        add.arg(p);
+    }
+    if add.stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) {
+        return String::new();
+    }
+    // A fresh Pi may have no user.name/email; retry with a fallback identity
+    // only if the first attempt fails (so configured identity is preserved).
+    let run_commit = |ident: bool| {
+        let mut c = Command::new("git");
+        c.arg("-C").arg(dir);
+        if ident {
+            c.args(["-c", "user.name=picode", "-c", "user.email=picode@localhost"]);
+        }
+        c.args(["commit", "--no-verify", "-m", message, "--"]);
+        for p in paths {
+            c.arg(p);
+        }
+        c.stdout(Stdio::null()).stderr(Stdio::null()).status()
+    };
+    let committed = run_commit(false).map(|s| s.success()).unwrap_or(false)
+        || run_commit(true).map(|s| s.success()).unwrap_or(false);
+    if !committed {
+        return String::new(); // nothing changed, or commit refused
+    }
+    let hash = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if hash.is_empty() {
+        " [committed]".to_string()
+    } else {
+        format!(" [committed {hash}]")
+    }
+}
+
+/// Recent git history + working-tree status for `dir`, as a startup context
+/// clue. None outside a repo.
+pub fn git_context(dir: &Path) -> Option<String> {
+    if !in_git_repo(dir) {
+        return None;
+    }
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let log = run(&["log", "--oneline", "-15"]);
+    let status = run(&["status", "--short"]);
+    let mut out = String::new();
+    if !branch.is_empty() {
+        out.push_str(&format!("branch: {branch}\n"));
+    }
+    if !log.is_empty() {
+        out.push_str(&format!("recent commits:\n{log}\n"));
+    }
+    if !status.is_empty() {
+        out.push_str(&format!("uncommitted changes:\n{}\n", truncate(&status, 2000)));
+    }
+    (!out.trim().is_empty()).then(|| out.trim().to_string())
+}
+
+/// Branch + clean/dirty state for the banner, e.g. `main · 3 changed` or
+/// `main · clean`. `sep` joins them (mode-aware). None outside a repo.
+pub fn git_status_line(dir: &Path, sep: &str) -> Option<String> {
+    if !in_git_repo(dir) {
+        return None;
+    }
+    let branch = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let changed = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(0);
+    let state = if changed == 0 {
+        "clean".to_string()
+    } else {
+        format!("{changed} changed")
+    };
+    Some(format!("{branch}{sep}{state}"))
 }
 
 // ----------------------------------------------------------- grep/glob ------
@@ -770,6 +958,75 @@ mod tests {
         ]);
         assert_eq!(todo(&items), "[x] explore\n[>] edit\n[ ] test");
         assert!(todo(&serde_json::json!("nope")).starts_with("ERROR"));
+    }
+
+    #[test]
+    fn multi_edit_composes_same_file() {
+        let dir = std::env::temp_dir().join("picode_multi_edit_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "one two three\n").unwrap();
+        std::fs::write(&b, "hello world\n").unwrap();
+        let edits = vec![
+            EditReq { path: a.to_string_lossy().into(), old_text: "one".into(), new_text: "1".into() },
+            // Second edit to the same file sees the result of the first.
+            EditReq { path: a.to_string_lossy().into(), old_text: "1 two".into(), new_text: "1 2".into() },
+            EditReq { path: b.to_string_lossy().into(), old_text: "world".into(), new_text: "there".into() },
+        ];
+        let plan = multi_edit_plan(&edits).expect("plan ok");
+        assert_eq!(plan.files.len(), 2);
+        let a_final = &plan.files.iter().find(|(p, _)| p.contains("a.txt")).unwrap().1;
+        assert_eq!(a_final, "1 2 three\n");
+        // Apply and confirm disk matches.
+        for (p, c) in &plan.files {
+            apply_write(p, c);
+        }
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "1 2 three\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "hello there\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn multi_edit_aborts_on_missing_match() {
+        let dir = std::env::temp_dir().join("picode_multi_edit_abort");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "keep me\n").unwrap();
+        let edits = vec![
+            EditReq { path: a.to_string_lossy().into(), old_text: "keep".into(), new_text: "KEEP".into() },
+            EditReq { path: a.to_string_lossy().into(), old_text: "absent".into(), new_text: "x".into() },
+        ];
+        assert!(multi_edit_plan(&edits).is_err());
+        // Nothing applied — file unchanged.
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "keep me\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn git_autocommit_checkpoints_edit() {
+        let dir = std::env::temp_dir().join("picode_git_test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // no git available; skip
+        }
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        assert!(in_git_repo(&dir));
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "hi\n").unwrap();
+        let note = git_autocommit(&dir, &[f.to_string_lossy().into()], "picode: write x.txt");
+        assert!(note.contains("committed"), "got: {note:?}");
+        // A second call with no change commits nothing.
+        let note2 = git_autocommit(&dir, &[f.to_string_lossy().into()], "picode: noop");
+        assert!(note2.is_empty(), "got: {note2:?}");
+        let log = git(&["log", "--oneline"]);
+        assert!(String::from_utf8_lossy(&log.stdout).contains("write x.txt"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

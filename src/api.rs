@@ -148,6 +148,19 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},
             "required":["path","old_text","new_text"]
         })),
+        tool("multi_edit","Apply a batch of edits across one or more files in a single approval and commit. Edits apply in order (so several edits to the same file compose); each old_text must be unique in its file at the time it runs. All-or-nothing: if any edit can't be located, none are applied.", serde_json::json!({
+            "type":"object",
+            "properties":{"edits":{"type":"array","items":{
+                "type":"object",
+                "properties":{
+                    "path":{"type":"string"},
+                    "old_text":{"type":"string"},
+                    "new_text":{"type":"string"}
+                },
+                "required":["path","old_text","new_text"]
+            }}},
+            "required":["edits"]
+        })),
         tool("list_files","List entries in a directory (non-recursive).", serde_json::json!({
             "type":"object",
             "properties":{"path":{"type":"string","description":"default '.'"}}

@@ -37,9 +37,13 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 ## Features
 
 - Tools: bash (timeout, or `background` jobs + bash_output/bash_kill),
-  read/write/edit/list, grep (regex), glob, web_fetch (URL → readable text),
-  web_search (DuckDuckGo), todo (visible plan), ask_user, task (sub-agent),
-  view_image, remember/recall — plus any MCP tools.
+  read/write/edit/list, multi_edit (batch edits across files), grep (regex),
+  glob, web_fetch (URL → readable text), web_search (DuckDuckGo), todo (visible
+  plan), ask_user, task (sub-agent), view_image, remember/recall — plus any MCP tools.
+- Git auto-checkpoint: every successful edit is committed to the working-dir
+  repo (`auto_commit`, on by default; no-op outside a repo). Recent git history
+  is loaded into context at startup so the agent can use `git log`/`show`/`diff`
+  as a clue and `git revert` to undo a bad edit.
 - Sub-agents: the `task` tool delegates a self-contained job to a fresh agent
   with its own context and the same tools; only its final report returns.
 - MCP: stdio servers from `mcp_servers` in config.json are launched at start

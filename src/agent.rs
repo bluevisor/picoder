@@ -493,7 +493,7 @@ impl Worker {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
         // Plan mode: refuse mutating tools and ask the model to plan instead.
         if self.perm.load(Ordering::Relaxed) == PERM_PLAN
-            && matches!(name, "bash" | "write_file" | "edit_file" | "bash_kill")
+            && matches!(name, "bash" | "write_file" | "edit_file" | "multi_edit" | "bash_kill")
         {
             let r = "[plan mode] Not executed. picode is in read-only plan mode — \
                      describe the change you'd make; the user will switch off plan mode to apply it."
@@ -636,7 +636,10 @@ impl Worker {
                     self.result_event(&r);
                     return r;
                 }
-                let r = tools::write_file(path, content);
+                let mut r = tools::write_file(path, content);
+                if r.starts_with("OK") {
+                    r.push_str(&self.autocommit(&[path], &format!("{verb} {path}")));
+                }
                 self.result_event(&r);
                 r
             }
@@ -654,7 +657,53 @@ impl Worker {
                             self.result_event(&r);
                             return r;
                         }
-                        let r = tools::apply_write(path, &new_content);
+                        let mut r = tools::apply_write(path, &new_content);
+                        if r.starts_with("OK") {
+                            r.push_str(&self.autocommit(&[path], &format!("edit {path}")));
+                        }
+                        self.result_event(&r);
+                        r
+                    }
+                }
+            }
+            "multi_edit" => {
+                let edits = parse_edits(args.get("edits"));
+                if edits.is_empty() {
+                    let r = "ERROR: multi_edit needs an 'edits' array of {path, old_text, new_text}.".to_string();
+                    self.result_event(&r);
+                    return r;
+                }
+                match tools::multi_edit_plan(&edits) {
+                    Err(e) => {
+                        self.result_event(&e);
+                        e
+                    }
+                    Ok(plan) => {
+                        let _ = self.ui.send(UiEvent::Diff(plan.diff));
+                        let paths: Vec<String> = plan.files.iter().map(|(p, _)| p.clone()).collect();
+                        if !self.approve(&format!("apply {} edits across {} file(s)", edits.len(), paths.len())) {
+                            let r = "DENIED by user.".to_string();
+                            self.result_event(&r);
+                            return r;
+                        }
+                        let mut applied = Vec::new();
+                        let mut errs = Vec::new();
+                        for (p, content) in &plan.files {
+                            let res = tools::apply_write(p, content);
+                            if res.starts_with("OK") {
+                                applied.push(p.clone());
+                            } else {
+                                errs.push(res);
+                            }
+                        }
+                        let note = self.autocommit(
+                            &applied.iter().map(String::as_str).collect::<Vec<_>>(),
+                            &format!("multi_edit: {} file(s)", applied.len()),
+                        );
+                        let mut r = format!("OK applied edits to {} file(s){note}", applied.len());
+                        if !errs.is_empty() {
+                            r.push_str(&format!("\n{} failed:\n{}", errs.len(), errs.join("\n")));
+                        }
                         self.result_event(&r);
                         r
                     }
@@ -686,6 +735,17 @@ impl Worker {
                 e
             }
         }
+    }
+
+    /// Commit just-edited paths as a checkpoint (when auto_commit is on and we
+    /// are in a repo). Returns a short note to append to the tool result.
+    fn autocommit(&self, paths: &[&str], summary: &str) -> String {
+        if !self.cfg.auto_commit {
+            return String::new();
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let owned: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+        tools::git_autocommit(&cwd, &owned, &format!("picode: {summary}"))
     }
 
     fn result_event(&self, result: &str) {
@@ -752,6 +812,21 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
         })
         .sum();
     (chars / 4) as u32
+}
+
+/// Parse the `edits` argument of multi_edit into typed edit requests.
+fn parse_edits(v: Option<&Value>) -> Vec<tools::EditReq> {
+    let Some(arr) = v.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|e| {
+            let path = e.get("path")?.as_str()?.to_string();
+            let old_text = e.get("old_text")?.as_str()?.to_string();
+            let new_text = e.get("new_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some(tools::EditReq { path, old_text, new_text })
+        })
+        .collect()
 }
 
 /// System prompt for a delegated sub-agent. Its whole job is one task; its

@@ -12,9 +12,13 @@ dependencies.
 ## Features
 
 - **Agentic tool loop** — `bash` (with timeout, or detached `background` jobs +
-  `bash_output` / `bash_kill`), `read` / `write` / `edit` / `list`, `grep`
-  (regex), `glob`, `web_fetch`, `web_search`, `todo` (a visible plan),
-  `ask_user`, `view_image`, and `remember` / `recall` memory.
+  `bash_output` / `bash_kill`), `read` / `write` / `edit` / `list`, `multi_edit`
+  (a batch of edits across files in one approval), `grep` (regex), `glob`,
+  `web_fetch`, `web_search`, `todo` (a visible plan), `ask_user`, `view_image`,
+  and `remember` / `recall` memory.
+- **Git auto-checkpoint** — every successful edit is committed to the
+  working-directory repo (`auto_commit`, on by default), so each change is
+  restorable; recent git history is fed into context as a clue.
 - **Sub-agents** — the `task` tool delegates a self-contained job to a fresh
   agent with its own context and the same tools; only its report comes back.
 - **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
