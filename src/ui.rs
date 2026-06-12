@@ -179,8 +179,11 @@ const GLYPHS_A: Glyphs = Glyphs {
     rounded: false,
 };
 
-/// Choose a glyph set. ASCII for dumb terminals, or when
-/// forced via PICODE_ASCII=1; Unicode otherwise (or forced via PICODE_UNICODE=1).
+/// Choose a glyph set. ASCII for dumb terminals, or when forced via
+/// PICODE_ASCII=1; Unicode otherwise (or forced via PICODE_UNICODE=1).
+/// TERM=linux stays Unicode: the framebuffer console renders the glyphs we
+/// use at single-cell width (set PICODE_ASCII=1 on consoles whose font
+/// doesn't cover them).
 pub fn detect_ascii() -> bool {
     if std::env::var("PICODE_UNICODE").is_ok() {
         return false;
@@ -224,6 +227,7 @@ enum Kind {
 /// Slash commands with the one-line description shown in the `/` palette.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "pick a model from the provider's list"),
+    ("/new", "clear conversation and session"),
     ("/config", "settings: provider, model, key, thinking, …"),
     ("/compact", "summarize older turns to free context"),
     ("/reset", "clear conversation context"),
@@ -505,6 +509,12 @@ pub struct App {
     last_models: Vec<String>,
     should_quit: bool,
     esc_deadline: Option<Instant>,
+    /// Set by Ctrl+L; makes the event loop clear the backend before the next
+    /// draw, forcing a full repaint (recovers from any screen desync).
+    force_clear: bool,
+    /// Terminal draws every glyph in one cell (ASCII mode, or the Linux
+    /// framebuffer console) — wide chars must be replaced before rendering.
+    single_width: bool,
     glyphs: Glyphs,
     ascii: bool,
     palette: Palette,
@@ -555,6 +565,9 @@ impl App {
             last_models: Vec::new(),
             should_quit: false,
             esc_deadline: None,
+            force_clear: false,
+            single_width: cfg.ascii
+                || matches!(std::env::var("TERM").as_deref(), Ok("linux")),
             glyphs: if cfg.ascii { GLYPHS_A } else { GLYPHS_U },
             ascii: cfg.ascii,
             palette: palette_by_name(&cfg.theme),
@@ -754,7 +767,7 @@ impl App {
     pub fn on_paste(&mut self, s: String) {
         if matches!(self.mode, Mode::Idle | Mode::Busy) {
             for c in s.chars() {
-                if c == '\n' || c == '\r' {
+                if c == '\n' || c == '\r' || c == '\t' {
                     self.insert_char(' ');
                 } else {
                     self.insert_char(c);
@@ -764,6 +777,11 @@ impl App {
     }
 
     fn insert_char(&mut self, c: char) {
+        // Control characters would be written verbatim into the composer cells
+        // and desync the terminal (a raw ESC starts an escape sequence).
+        if c.is_control() {
+            return;
+        }
         let byte = self.byte_at(self.cursor);
         self.input.insert(byte, c);
         self.cursor += 1;
@@ -836,6 +854,16 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL);
         if shift_tab || ctrl_p {
             self.cycle_perm();
+            return;
+        }
+        // Ctrl+L: force a full clear + repaint in any state. The framebuffer
+        // console in particular can drift out of sync with ratatui's diff
+        // buffer (font/width quirks, kernel messages); this recovers it.
+        if matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.force_clear = true;
+            self.follow = true;
             return;
         }
         // If ESC arrived recently (within 50 ms) and another key follows,
@@ -1340,7 +1368,6 @@ impl App {
                     self.should_quit = true;
                 }
             }
-            KeyCode::Char('l') if ctrl => self.follow = true,
             KeyCode::PageUp => self.scroll_up(),
             KeyCode::PageDown => self.scroll_down(),
             KeyCode::Esc => {
@@ -1374,7 +1401,9 @@ impl App {
             // macOS Option-as-Meta sends ESC b / ESC f for word motion.
             KeyCode::Char('b') if alt => self.cursor = self.prev_word(),
             KeyCode::Char('f') if alt => self.cursor = self.next_word(),
-            KeyCode::Char(c) if !ctrl => self.insert_char(caps_char(&key, c)),
+            // Unhandled Ctrl/Alt chords must not type their letter into the
+            // composer (e.g. Ctrl+T would otherwise insert a stray 't').
+            KeyCode::Char(c) if !ctrl && !alt => self.insert_char(caps_char(&key, c)),
             KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Backspace => {
                 if self.cursor > 0 {
@@ -1697,7 +1726,7 @@ impl App {
             "  /exit          quit picode",
             "input: @path attaches a file | Tab autocompletes commands & paths",
             "       typing while the agent works queues the message; Enter queues it",
-            "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-C quit",
+            "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-L redraw | Ctrl-C quit",
         ];
         for l in lines {
             self.push(Kind::Notice, l.to_string());
@@ -1918,15 +1947,15 @@ impl App {
     fn build_display(&self, width: usize) -> Vec<Line<'static>> {
         let mut out: Vec<Line<'static>> = Vec::new();
         for t in &self.transcript {
-            render_tline(&mut out, t.kind, &t.text, t.lead, t.color, width, self.glyphs, &self.palette);
+            render_tline(&mut out, t.kind, &t.text, t.lead, t.color, width, self.glyphs, &self.palette, self.single_width);
         }
         if !self.live.is_empty() {
             for (i, ln) in self.live.split('\n').enumerate() {
-                render_tline(&mut out, Kind::Assistant, ln, i == 0, None, width, self.glyphs, &self.palette);
+                render_tline(&mut out, Kind::Assistant, ln, i == 0, None, width, self.glyphs, &self.palette, self.single_width);
             }
         } else if !self.live_reasoning.is_empty() {
             for ln in self.live_reasoning.split('\n') {
-                render_tline(&mut out, Kind::Reasoning, ln, true, None, width, self.glyphs, &self.palette);
+                render_tline(&mut out, Kind::Reasoning, ln, true, None, width, self.glyphs, &self.palette, self.single_width);
             }
         }
         out
@@ -2461,6 +2490,36 @@ fn longest_common_prefix(items: &[String]) -> String {
     first.chars().take(end).collect()
 }
 
+/// Make a transcript line safe to hand to the terminal. Tool output and model
+/// text can carry control characters — a raw ESC (e.g. ANSI colors from a
+/// command) starts an escape sequence mid-frame, and a raw tab advances the
+/// real cursor further than ratatui's one-cell bookkeeping; both leave stray
+/// characters on screen that the diff never cleans up. Tabs become spaces,
+/// other control chars are dropped. With `single_width` (ASCII terminals and
+/// the framebuffer console, whose font draws every glyph in one cell), chars
+/// that aren't single-cell width (emoji, CJK) are replaced with '?' — ratatui
+/// books them as two cells, the console draws one, and the diff desyncs.
+fn clean_text(text: &str, single_width: bool) -> std::borrow::Cow<'_, str> {
+    use unicode_width::UnicodeWidthChar;
+    let dirty = |c: char| c.is_control() || (single_width && c.width() != Some(1));
+    if !text.chars().any(dirty) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\t' {
+            out.push_str("    ");
+        } else if c.is_control() {
+            // drop
+        } else if single_width && c.width() != Some(1) {
+            out.push('?');
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_tline(
     out: &mut Vec<Line<'static>>,
@@ -2471,7 +2530,9 @@ fn render_tline(
     width: usize,
     g: Glyphs,
     p: &Palette,
+    single_width: bool,
 ) {
+    let text = &*clean_text(text, single_width);
     let (indent, glyph) = layout(kind, g);
     let (mut base, mut glyph_style) = colors(kind, p);
     if let Some(c) = color {
@@ -2568,6 +2629,35 @@ pub fn term_width() -> u16 {
     ratatui::crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::clean_text;
+
+    #[test]
+    fn clean_text_passes_plain_text_through_borrowed() {
+        assert!(matches!(clean_text("hello world", true), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(clean_text("héllo ❯ wörld", false), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn clean_text_strips_escapes_and_expands_tabs() {
+        // ANSI color codes from tool output must not reach the terminal.
+        assert_eq!(clean_text("\x1b[31mred\x1b[0m", false), "[31mred[0m");
+        assert_eq!(clean_text("a\tb", false), "a    b");
+        assert_eq!(clean_text("a\rb\x07", false), "ab");
+    }
+
+    #[test]
+    fn clean_text_ascii_replaces_non_single_width() {
+        // Wide chars (emoji/CJK) misrender on the framebuffer console.
+        assert_eq!(clean_text("ok 🚀 漢", true), "ok ? ?");
+        // Single-width non-ASCII is fine: the console shows a 1-cell fallback.
+        assert_eq!(clean_text("héllo", true), "héllo");
+        // Unicode terminals keep wide chars as-is.
+        assert_eq!(clean_text("🚀\t", false), "🚀    ");
+    }
+}
+
 /// The UI event loop. Owns the terminal; returns when the user quits.
 pub fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
@@ -2625,6 +2715,11 @@ pub fn run<B: ratatui::backend::Backend>(
             }
         }
         if app.busy() && app.tick_spinner() {
+            dirty = true;
+        }
+        if app.force_clear {
+            app.force_clear = false;
+            terminal.clear()?;
             dirty = true;
         }
         if dirty {
