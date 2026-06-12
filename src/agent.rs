@@ -167,6 +167,16 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::Notice("context cleared.".into()));
                     let _ = w.ui.send(UiEvent::Context(0));
                 }
+                WorkerCmd::New => {
+                    // Delete the session file so we start fresh.
+                    if let Some(ref path) = w.session {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    w.messages.truncate(w.system_len);
+                    w.last_prompt = 0;
+                    let _ = w.ui.send(UiEvent::Notice("new session — fresh start.".into()));
+                    let _ = w.ui.send(UiEvent::Context(0));
+                }
                 WorkerCmd::Compact => {
                     w.cancel.store(false, Ordering::Relaxed);
                     w.compact();
