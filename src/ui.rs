@@ -2364,12 +2364,19 @@ impl App {
             ),
             _ => (if self.ascii { "*" } else { "●" }, "ask before edits", Color::Green),
         };
-        let spans = vec![
+        let down = if self.ascii { "| v" } else { "↓" };
+        let mut spans = vec![
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::styled(text, Style::default().fg(color)),
             Span::styled("  (shift+tab/ctrl+p to cycle)", Style::default().fg(self.dim_text())),
             Span::styled(format!("   {}", self.cwd), Style::default().fg(self.dim_text())),
         ];
+        if self.scrolled_up {
+            spans.push(Span::styled(
+                format!("  {down} new"),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 }
