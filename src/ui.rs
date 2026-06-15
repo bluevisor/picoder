@@ -1916,6 +1916,7 @@ impl App {
             6 => if s.auto_commit { "on".into() } else { "off".into() },
             7 => self.palette.name.to_string(),
             8 => s.context_window.to_string(),
+            9 => setting_max_tool_calls(s.max_tool_calls),
             _ => String::new(),
         }
     }
