@@ -450,7 +450,7 @@ fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::proces
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn()?;
+    let child = cmd.spawn()?;
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
