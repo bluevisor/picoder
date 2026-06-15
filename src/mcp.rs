@@ -107,6 +107,8 @@ pub struct Mcp {
     servers: Vec<Server>,
     tools: Vec<McpTool>,
     status: Vec<ServerStatus>,
+    /// Stored configs so we can restart a crashed server on the next call.
+    configs: BTreeMap<String, McpServerConfig>,
 }
 
 impl Mcp {
