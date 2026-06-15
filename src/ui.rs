@@ -1682,6 +1682,7 @@ impl App {
         }
         self.history.push(text.clone());
         self.hist_idx = self.history.len();
+        self.rebuild_cmd_uses();
         Some(text)
     }
 
