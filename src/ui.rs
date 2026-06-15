@@ -1375,6 +1375,7 @@ impl App {
                         "Press Ctrl+C again to exit".to_string(),
                     );
                 } else {
+                    self.last_ctrl_c = None;
                     self.input.clear();
                     self.cursor = 0;
                 }
