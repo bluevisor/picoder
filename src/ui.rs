@@ -148,6 +148,12 @@ fn palette_by_name(name: &str) -> Palette {
     }
 }
 
+/// Whether `name` is a known theme name (used by the CLI to avoid consuming
+/// the next argument after --banner as a theme if it's a task description).
+pub fn is_theme_name(name: &str) -> bool {
+    matches!(name, "default" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos")
+}
+
 /// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
 /// the fancy Unicode used over SSH, so we fall back to ASCII there.
 #[derive(Clone, Copy)]
