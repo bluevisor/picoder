@@ -100,6 +100,7 @@ pub enum ConfigPatch {
     Permission(String),
     AutoCommit(bool),
     ContextWindow(u32),
+    MaxToolCalls(u32),
 }
 
 fn default_theme() -> String {
