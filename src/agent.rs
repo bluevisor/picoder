@@ -499,7 +499,54 @@ impl Worker {
         String::new()
     }
 
+    /// Run a delegated task in an isolated sub-agent: a fresh conversation with
+    /// filtered tools (no `task` for recursion, no `ask_user` — sub-agents must
+    /// be autonomous). Only its final report returns to the parent — the
+    /// intermediate steps never enter the parent's context. Wrapped in
+    /// catch_unwind so a sub-agent panic cannot poison the parent worker.
+    fn run_subagent(&mut self, task: &str) -> String {
+        // Build a tool schema for the sub-agent: built-ins minus task/ask_user + MCP.
+        let sub_tools = crate::api::tools_spec_subagent(self.mcp.tools());
+        // Swap in a fresh context; restore the parent's afterward.
+        let saved_msgs = std::mem::replace(
+            &mut self.messages,
+            vec![
+                Message::system(subagent_prompt()),
+                Message::user(task.to_string()),
+            ],
+        );
+        let saved_len = self.system_len;
+        let saved_prompt = self.last_prompt;
+        let saved_tools = std::mem::replace(&mut self.tools, sub_tools);
+        self.system_len = 1;
+        self.quiet = true;
 
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_loop()
+        }));
+
+        // Always restore parent state, even if the sub-agent panicked.
+        self.quiet = false;
+        self.system_len = saved_len;
+        self.last_prompt = saved_prompt;
+        self.tools = saved_tools;
+        self.messages = saved_msgs;
+        let _ = self.ui.send(UiEvent::Context(saved_prompt));
+
+        match result {
+            Ok(report) => {
+                if report.trim().is_empty() {
+                    "(sub-agent returned no report)".to_string()
+                } else {
+                    report
+                }
+            }
+            Err(_) => {
+                let _ = self.ui.send(UiEvent::Error("sub-agent panicked".into()));
+                "(sub-agent panicked)".to_string()
+            }
+        }
+    }
 
     fn handle_call(&mut self, c: AccumCall, idx: usize) {
         let id = if c.id.is_empty() { format!("call_{idx}") } else { c.id.clone() };
