@@ -109,8 +109,9 @@ fn main() {
         // --banner from swallowing e.g. "fix" as a theme name).
         let theme = match args.get(pos + 1) {
             Some(n) if ui::is_theme_name(n) => {
+                let name = n.to_string();
                 args.remove(pos + 1);
-                n.to_string()
+                name
             }
             _ => cfg.theme,
         };
