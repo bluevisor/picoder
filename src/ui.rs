@@ -1612,17 +1612,20 @@ impl App {
     pub fn mouse_scroll(&mut self, up: bool) {
         if up {
             self.follow = false;
+            self.scrolled_up = false;
             self.scroll = self.scroll.saturating_sub(3);
         } else {
             self.scroll = (self.scroll + 3).min(self.max_top);
             if self.scroll >= self.max_top {
                 self.follow = true;
+                self.scrolled_up = false;
             }
         }
     }
 
     fn scroll_up(&mut self) {
         self.follow = false;
+        self.scrolled_up = false;
         let step = (self.view_h / 2).max(1);
         self.scroll = self.scroll.saturating_sub(step);
     }
@@ -1632,6 +1635,7 @@ impl App {
         self.scroll = (self.scroll + step).min(self.max_top);
         if self.scroll >= self.max_top {
             self.follow = true;
+            self.scrolled_up = false;
         }
     }
 
