@@ -44,23 +44,23 @@ zero competitors do this.
 | 12 | /help lists only 7 of 13+ slash commands | ui.rs:1746 | |
 | 13 | One-shot discards reasoning/diff tokens (blank terminal) | main.rs:314 | ✅ prints reasoning+diffs |
 | 14 | Paste O(n²) performance; multiline flattened to single line | ui.rs:772-781 | ✅ bulk insert_str |
-| 15 | Merge conflicts cause silent commit failure | tools.rs:400-408 | → |
+| 15 | Merge conflicts cause silent commit failure | tools.rs:400-408 | ✅ stderr captured, surfaced to model |
 | 16 | Sub-agents can call ask_user despite prompt saying they can't | agent.rs:921 + tools.rs:666 | ✅ tools_spec_subagent strips it |
 | 17 | task tool advertised to sub-agents but always fails | agent.rs:503-536 | ✅ stripped from sub-agent tools |
-| 18 | Esc 50ms delay in composer feels sluggish | ui.rs:1373 | → |
-| 19 | html_to_text regex compiled from scratch every call | tools.rs:663-678 | → |
-| 20 | Concurrent picode instances can corrupt memory.md | tools.rs:858-870 | → |
-| 21 | edit_file Unicode normalization mismatch | tools.rs:261-273 | → |
-| 22 | Setup wizard has no validation of inputs | config.rs:384-423 | → |
-| 23 | Symlinks transparently followed on writes | tools.rs:246-259 | → |
+| 18 | Esc 50ms delay in composer feels sluggish | ui.rs:1373 | ✅ 18ms deadline |
+| 19 | html_to_text regex compiled from scratch every call | tools.rs:663-678 | ✅ OnceLock statics |
+| 20 | Concurrent picode instances can corrupt memory.md | tools.rs:858-870 | ✅ lockfile with create_new + backoff |
+| 21 | edit_file Unicode normalization mismatch | tools.rs:261-273 | ✅ NFC normalize before match |
+| 22 | Setup wizard has no validation of inputs | config.rs:384-423 | ✅ URL starts-with-http check, model non-empty loop |
+| 23 | Symlinks transparently followed on writes | tools.rs:246-259 | ✅ symlink_metadata check + DENIED |
 
 ## Polish / Papercuts
 
 | # | Issue | Location | Status |
 |---|-------|----------|--------|
-| 24 | Transcript trimming (4000 lines) is silent | ui.rs:603-607 | → |
-| 25 | No "↓ new messages" indicator when scrolled up | ui.rs:1591-1601 | → |
-| 26 | last_ctrl_c timer never expires; 2nd press shows prompt again after 2s gap | ui.rs:1366-1376 | → |
+| 24 | Transcript trimming (4000 lines) is silent | ui.rs:603-607 | ✅ notice inserted at top |
+| 25 | No "↓ new messages" indicator when scrolled up | ui.rs:1591-1601 | ✅ ↓ new in status bar |
+| 26 | last_ctrl_c timer never expires; 2nd press shows prompt again after 2s gap | ui.rs:1366-1376 | ✅ cleared after timeout, fresh first press |
 | 27 | Ctrl+D on non-empty composer does nothing | ui.rs:1398 | |
 | 28 | Slash-suggestion ranking scans full history per keystroke | ui.rs:801-823 | |
 | 29 | final_text in one-shot can be stale (empty last reply) | main.rs:277-284 | |
