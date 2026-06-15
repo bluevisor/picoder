@@ -887,6 +887,19 @@ fn render_for_summary(messages: &[Message]) -> String {
                 if !m.content.trim().is_empty() {
                     out.push_str(&format!("[{role}] {}\n", api::truncate(&m.content, 4000)));
                 }
+                // Preserve image context: note how many images were attached so the
+                // summarizer knows visual context existed (even if it can't see them).
+                if !m.images.is_empty() {
+                    let count = m.images.len();
+                    out.push_str(&format!(
+                        "[{} image{} attached: {}]\n",
+                        count,
+                        if count > 1 { "s" } else { "" },
+                        m.images.iter().map(|i| {
+                            i.rsplit('/').next().unwrap_or(i).to_string()
+                        }).collect::<Vec<_>>().join(", ")
+                    ));
+                }
                 if let Some(calls) = &m.tool_calls {
                     for c in calls {
                         out.push_str(&format!(
