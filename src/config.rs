@@ -50,6 +50,9 @@ pub struct Config {
     /// Default permission mode for new sessions: "ask", "bypass", or "plan".
     #[serde(default = "default_permission")]
     pub permission: String,
+    /// Max tool-call rounds per turn. 0 means "auto" (an internal safe limit).
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: u32,
     /// True when the key came from the environment; we never persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
