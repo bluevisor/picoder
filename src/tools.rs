@@ -799,7 +799,7 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
     }
     let resp = http
         .get(url)
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(10))
         .set("Accept", "text/html, application/json, text/plain, */*")
         .call();
     let resp = match resp {
@@ -814,13 +814,12 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
         .content_type()
         .to_ascii_lowercase()
         .contains("text/html");
-    let mut body = String::new();
-    // Read via ureq's internal buffering which respects the Agent timeout.
-    // Limit to 2MB in-memory by truncating after read.
-    match resp.into_string() {
-        Ok(s) => body = s,
-        Err(e) => return format!("ERROR: read failed (binary content?): {e}"),
-    }
+    // Use into_string() (not into_reader()) so ureq's timeout covers the body
+    // read — prevents slow-loris attacks where a server dribbles bytes.
+    let mut body = match resp.into_string() {
+        Ok(s) => s,
+        Err(e) => return format!("ERROR: read failed (binary?): {e}"),
+    };
     if body.len() > 2_000_000 {
         body.truncate(2_000_000);
     }

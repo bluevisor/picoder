@@ -1,6 +1,6 @@
 [package]
 name = "picode"
-version = "0.2.58"
+version = "0.2.59"
 edition = "2021"
 description = "A tiny full-screen agentic coding CLI for the Raspberry Pi Zero W"
 
