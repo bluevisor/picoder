@@ -374,14 +374,21 @@ pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
         Ok(d) => d,
         Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
     };
-    let n = data.matches(old_text).count();
+    // NFC-normalize both sides before substring matching: the model may emit
+    // composed codepoints while the file uses decomposed forms (e.g. "é" as
+    // U+00E9 vs. "é" as e + combining acute). Normalizing makes them match.
+    let data_nfc = unicode_normalization::UnicodeNormalization::nfc(data.chars())
+        .collect::<String>();
+    let old_nfc = unicode_normalization::UnicodeNormalization::nfc(old_text.chars())
+        .collect::<String>();
+    let n = data_nfc.matches(&old_nfc).count();
     if n == 0 {
         return EditPreview::Err("ERROR: old_text not found.".into());
     }
     if n > 1 {
         return EditPreview::Err(format!("ERROR: old_text matches {n} times; make it unique."));
     }
-    let new_content = data.replacen(old_text, new_text, 1);
+    let new_content = data_nfc.replacen(&old_nfc, new_text, 1);
     let diff = crate::diff::unified(&data, &new_content, 300);
     EditPreview::Ok { diff, new_content }
 }
