@@ -362,8 +362,19 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
     }
     Ok(MultiEditPlan { diff, files })
 }
-
-
+pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
+    let p = expand(path);
+    // Refuse to write through symlinks.
+    if let Ok(meta) = std::fs::symlink_metadata(&p) {
+        if meta.file_type().is_symlink() {
+            return EditPreview::Err(format!("DENIED: {path} is a symlink; edit the real path instead."));
+        }
+    }
+    let data = match std::fs::read_to_string(&p) {
+        Ok(d) => d,
+        Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
+    };
+    let n = data.matches(old_text).count();
     if n == 0 {
         return EditPreview::Err("ERROR: old_text not found.".into());
     }
