@@ -879,9 +879,9 @@ impl App {
             self.follow = true;
             return;
         }
-        // If ESC arrived recently (within 50 ms) and another key follows,
-        // terminals are encoding Alt+key as ESC prefix.  Treat the key as
-        // Alt-modified instead of acting on the lone ESC.
+        // If ESC arrived recently (within 18 ms, just over one frame at 60 Hz)
+        // and another key follows, terminals are encoding Alt+key as ESC prefix.
+        // Treat the key as Alt-modified instead of acting on the lone ESC.
         // Only relevant in Idle mode; clear stale deadlines for other modes.
         if !matches!(&self.mode, Mode::Idle) {
             self.esc_deadline = None;
@@ -1414,7 +1414,7 @@ impl App {
             KeyCode::PageDown => self.scroll_down(),
             KeyCode::Esc => {
                 // Wait briefly: terminals often encode Alt+key as ESC prefix.
-                self.esc_deadline = Some(Instant::now() + Duration::from_millis(50));
+                self.esc_deadline = Some(Instant::now() + Duration::from_millis(18));
             }
             _ => {
                 self.on_key_edit(key);

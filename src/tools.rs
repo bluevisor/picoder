@@ -771,20 +771,7 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
 
 /// Best-effort HTML → text: drop script/style/head, turn block-level closes
 /// into newlines, strip the remaining tags, decode common entities.
-fn html_to_text(html: &str) -> String {
-    let strip_block = |s: &str, tag: &str| -> String {
-        let re = regex::RegexBuilder::new(&format!(r"<{tag}\b.*?</{tag}>"))
-            .case_insensitive(true)
-            .dot_matches_new_line(true)
-            .build()
-            .unwrap();
-        re.replace_all(s, " ").into_owned()
-    };
-    let mut s = html.to_string();
-    for tag in ["script", "style", "head", "noscript", "svg"] {
-        s = strip_block(&s, tag);
-    }
-    let breaks = regex::RegexBuilder::new(r"</(p|div|li|tr|h[1-6]|blockquote|pre)>|<br\s*/?>")
+
         .case_insensitive(true)
         .build()
         .unwrap();
