@@ -250,6 +250,20 @@ pub fn tools_spec_with(mcp: &[crate::mcp::McpTool]) -> serde_json::Value {
     spec
 }
 
+/// Tool schema for a sub-agent: same as the parent's but without `task` (no
+/// recursive sub-agents) and without `ask_user` (sub-agents must work
+/// autonomously; the parent handles user interaction).
+pub fn tools_spec_subagent(mcp: &[crate::mcp::McpTool]) -> serde_json::Value {
+    let mut spec = tools_spec_with(mcp);
+    if let Some(arr) = spec.as_array_mut() {
+        arr.retain(|t| {
+            let name = t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str());
+            !matches!(name, Some("task") | Some("ask_user"))
+        });
+    }
+    spec
+}
+
 /// Token usage reported by the API (the final stream chunk).
 #[derive(Default, Clone, Copy, Deserialize)]
 pub struct Usage {
