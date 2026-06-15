@@ -105,7 +105,15 @@ fn main() {
         let cfg = Config::load();
         let status = status_lines(&cfg, ascii);
         // Optional theme name after --banner, else the configured theme.
-        let theme = args.get(pos + 1).cloned().unwrap_or(cfg.theme);
+        // Only consume the next arg if it looks like a theme name (prevents
+        // --banner from swallowing e.g. "fix" as a theme name).
+        let theme = match args.get(pos + 1) {
+            Some(n) if ui::is_theme_name(n) => {
+                args.remove(pos + 1);
+                n.to_string()
+            }
+            _ => cfg.theme,
+        };
         print!("{}", ui::banner_ansi(ui::term_width(), ascii, &theme, &status));
         return;
     }
