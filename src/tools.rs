@@ -570,12 +570,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
             format!(" [commit skipped: {err}]")
         };
     }
-    let hash = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
+    let hash = git_output(dir, &["rev-parse", "--short", "HEAD"], 10)
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     let mut note = if hash.is_empty() {
