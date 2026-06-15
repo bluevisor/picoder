@@ -439,7 +439,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     }
     // Tools expand `~` before touching the filesystem; git does not, so the
     // model's raw path strings must be expanded the same way here.
-    let mut paths: Vec<PathBuf> = paths.iter().map(|p| expand(p)).collect();
+    let paths: Vec<PathBuf> = paths.iter().map(|p| expand(p)).collect();
 
     // Stage the edited files first, so we can check if there's anything to commit.
     let mut add = Command::new("git");
