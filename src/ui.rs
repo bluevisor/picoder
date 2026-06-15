@@ -517,6 +517,9 @@ pub struct App {
     esc_deadline: Option<Instant>,
     /// Time of last Ctrl+C with empty input; used for double-press-to-quit.
     last_ctrl_c: Option<Instant>,
+    /// Cached slash-command usage counts (command → times used). Rebuilt when
+    /// history grows so we don't scan full history per keystroke.
+    cmd_uses: HashMap<String, usize>,
     /// Set by Ctrl+L; makes the event loop clear the backend before the next
     /// draw, forcing a full repaint (recovers from any screen desync).
     force_clear: bool,
