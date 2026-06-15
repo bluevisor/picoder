@@ -417,9 +417,24 @@ pub fn run_setup() -> Result<Config> {
     let n = choice.trim().parse::<usize>().unwrap_or(1);
     let custom = n == custom_n;
     let (prov, base, model): (String, String, String) = if custom {
-        let p = nonempty(prompt("provider name: ")?, "custom");
-        let b = prompt("base_url (OpenAI-compatible): ")?;
-        let m = prompt("model: ")?;
+        let p = prompt("provider name: ")?;
+        let p = if p.trim().is_empty() { "custom".to_string() } else { p.trim().to_string() };
+        let b = loop {
+            let b = prompt("base_url (OpenAI-compatible): ")?;
+            let b = b.trim().to_string();
+            if b.starts_with("http") {
+                break b;
+            }
+            println!("\x1b[31m  URL must start with http\x1b[0m");
+        };
+        let m = loop {
+            let m = prompt("model: ")?;
+            let m = m.trim().to_string();
+            if !m.is_empty() {
+                break m;
+            }
+            println!("\x1b[31m  model is required\x1b[0m");
+        };
         (p, b, m)
     } else {
         let (p, b, m) = PROVIDERS[n.saturating_sub(1).min(PROVIDERS.len() - 1)];
