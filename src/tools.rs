@@ -892,6 +892,42 @@ fn decode_entities(s: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
+/// Read from a `Read` into a String, but abort if no bytes arrive within
+/// `deadline` — prevents slow-loris attacks where a server sends one byte
+/// every N seconds to stay under the connection timeout.
+fn read_deadline<R: std::io::Read>(mut reader: R, deadline: Duration) -> std::io::Result<String> {
+    let mut out = String::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let (tx, rx) = mpsc::channel();
+        let mut r = std::io::BufReader::new(&mut reader);
+        // Safety: we move only a reference to the BufReader into the thread;
+        // the BufReader borrows `reader` which lives on the stack above.
+        std::thread::spawn(move || {
+            let n = std::io::Read::read(&mut r, &mut buf);
+            let _ = tx.send(n);
+        });
+        let n = match rx.recv_timeout(deadline) {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(_timeout) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("no data for {}s", deadline.as_secs()),
+                ));
+            }
+        };
+        out.push_str(std::str::from_utf8(&buf[..n]).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?);
+        if out.len() > 2_000_000 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 // ----------------------------------------------------------- web_search -----
 
 /// Search DuckDuckGo's HTML endpoint and return "title / url / snippet" rows.
