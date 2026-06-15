@@ -533,7 +533,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     if version_bumped.is_some() {
         let mut add_cargo = Command::new("git");
         add_cargo.arg("-C").arg(dir).arg("add").arg("--").arg(&cargo_toml);
-        add_cargo.stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
+        run_proc(&mut add_cargo, 10).ok();
     }
 
     // A fresh Pi may have no user.name/email; retry with a fallback identity
@@ -547,7 +547,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         }
         // Commit all staged changes (the edited files + optional Cargo.toml bump).
         c.args(["commit", "--no-verify", "-m", message]);
-        c.stdout(Stdio::null()).stderr(Stdio::piped()).output().map(|o| {
+        run_proc(&mut c, 30).map(|o| {
             (o.status.success(), String::from_utf8_lossy(&o.stderr).trim().to_string())
         }).unwrap_or_default()
     };
