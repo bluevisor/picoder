@@ -499,41 +499,7 @@ impl Worker {
         String::new()
     }
 
-    /// Run a delegated task in an isolated sub-agent: a fresh conversation with
-    /// the same tools (minus `task`). Only its final report returns to the
-    /// parent — the intermediate steps never enter the parent's context.
-    fn run_subagent(&mut self, task: &str) -> String {
-        // Swap in a fresh context; restore the parent's afterward.
-        let saved_msgs = std::mem::replace(
-            &mut self.messages,
-            vec![
-                Message::system(subagent_prompt()),
-                Message::user(task.to_string()),
-            ],
-        );
-        let saved_len = self.system_len;
-        let saved_prompt = self.last_prompt;
-        self.system_len = 1;
-        self.quiet = true;
 
-        let report = self.run_loop();
-
-        self.quiet = false;
-        self.system_len = saved_len;
-        // The parent's context size is unchanged by the sub-agent (only the
-        // report re-enters it); restore the gauge so auto-compaction tracks
-        // the parent, not the sub-agent's final prompt — and tell the UI so
-        // its ctx bar doesn't keep showing the sub-agent's usage.
-        self.last_prompt = saved_prompt;
-        let _ = self.ui.send(UiEvent::Context(saved_prompt));
-        self.messages = saved_msgs;
-
-        if report.trim().is_empty() {
-            "(sub-agent returned no report)".to_string()
-        } else {
-            report
-        }
-    }
 
     fn handle_call(&mut self, c: AccumCall, idx: usize) {
         let id = if c.id.is_empty() { format!("call_{idx}") } else { c.id.clone() };

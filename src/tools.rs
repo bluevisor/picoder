@@ -28,49 +28,7 @@ fn expand(path: &str) -> PathBuf {
 
 // ----------------------------------------------------------------- bash -----
 
-pub fn bash(command: &str, timeout: u64, cwd: &Path) -> String {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => return format!("ERROR: failed to spawn shell: {e}"),
-    };
-    let pid = child.id();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(Duration::from_secs(timeout.max(1))) {
-        Ok(Ok(output)) => {
-            let mut out = String::new();
-            out.push_str(&String::from_utf8_lossy(&output.stdout));
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.trim().is_empty() {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str("[stderr]\n");
-                out.push_str(&stderr);
-            }
-            let code = output.status.code().unwrap_or(-1);
-            out = out.trim_end().to_string();
-            out.push_str(&format!("\n[exit {code}]"));
-            truncate(out.trim(), MAX_TOOL_OUTPUT)
-        }
-        Ok(Err(e)) => format!("ERROR: {e}"),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
-            format!("ERROR: command timed out after {timeout}s")
-        }
-        Err(e) => format!("ERROR: {e}"),
-    }
-}
+
 
 // -------------------------------------------------------- background jobs ---
 

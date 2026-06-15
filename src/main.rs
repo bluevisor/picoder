@@ -311,7 +311,33 @@ fn run_oneshot(
                 at_line_start = true;
             }
             UiEvent::TurnDone => break,
-            // Diffs/reasoning/approvals are not shown in one-shot mode.
+            // Reasoning and diffs are shown in one-shot mode now.
+            UiEvent::Reasoning(t) => {
+                // Thinking tokens: print dimmed, no newline.
+                print!("\x1b[2m{t}\x1b[0m");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                at_line_start = false;
+            }
+            UiEvent::Diff(d) => {
+                if !at_line_start { println!(); }
+                println!("\x1b[2m{d}\x1b[0m");
+                at_line_start = true;
+            }
+            UiEvent::Approval(d) => {
+                // In auto mode we shouldn't get here, but answer yes just in case.
+                let _ = h.appr_tx.send(agent::ApprovalResponse::Yes);
+                eprintln!("\x1b[2m[auto-approved: {d}]\x1b[0m");
+            }
+            UiEvent::Question { prompt, reply } => {
+                // In auto mode, answer with an empty decline.
+                eprintln!("\x1b[33m[question skipped in one-shot mode] {prompt}\x1b[0m");
+                let _ = reply.send(None);
+            }
+            UiEvent::PasswordRequest { prompt, reply } => {
+                eprintln!("\x1b[33m[sudo password requested but not available in one-shot mode] {prompt}\x1b[0m");
+                let _ = reply.send(None);
+            }
             _ => {}
         }
     }
