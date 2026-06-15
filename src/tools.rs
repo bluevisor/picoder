@@ -28,7 +28,57 @@ fn expand(path: &str) -> PathBuf {
 
 // ----------------------------------------------------------------- bash -----
 
-
+pub fn bash(command: &str, timeout: u64, cwd: &Path) -> String {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Own process group so we can kill the whole tree on timeout.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("ERROR: failed to spawn shell: {e}"),
+    };
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(timeout.max(1))) {
+        Ok(Ok(output)) => {
+            let mut out = String::new();
+            out.push_str(&String::from_utf8_lossy(&output.stdout));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("[stderr]\n");
+                out.push_str(&stderr);
+            }
+            let code = output.status.code().unwrap_or(-1);
+            out = out.trim_end().to_string();
+            out.push_str(&format!("\n[exit {code}]"));
+            truncate(out.trim(), MAX_TOOL_OUTPUT)
+        }
+        Ok(Err(e)) => format!("ERROR: {e}"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Negative pid = kill whole process group (sh + grandchildren).
+            let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
+            // Give the waiter thread a moment to reap the killed child.
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+            format!("ERROR: command timed out after {timeout}s")
+        }
+        Err(e) => format!("ERROR: {e}"),
+    }
+}
 
 // -------------------------------------------------------- background jobs ---
 
@@ -691,7 +741,33 @@ pub fn web_search(http: &ureq::Agent, query: &str) -> String {
     parse_ddg(&body)
 }
 
-
+fn parse_ddg(html: &str) -> String {
+    let re = |p: &str| {
+        regex::RegexBuilder::new(p)
+            .case_insensitive(true)
+            .dot_matches_new_line(true)
+            .build()
+            .unwrap()
+    };
+    let link_re = re(r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#);
+    let snip_re = re(r#"class="result__snippet"[^>]*>(.*?)</a>"#);
+    let snippets: Vec<String> = snip_re.captures_iter(html).map(|c| clean_inline(&c[1])).collect();
+    let mut out = String::new();
+    for (i, c) in link_re.captures_iter(html).take(8).enumerate() {
+        let title = clean_inline(&c[2]);
+        out.push_str(&format!("{}. {title}\n   {}\n", i + 1, resolve_ddg_url(&c[1])));
+        if let Some(s) = snippets.get(i) {
+            if !s.is_empty() {
+                out.push_str(&format!("   {s}\n"));
+            }
+        }
+    }
+    if out.is_empty() {
+        "(no results)".into()
+    } else {
+        truncate(&out, MAX_TOOL_OUTPUT)
+    }
+}
 
 /// DDG result hrefs are redirects like `//duckduckgo.com/l/?uddg=<encoded>&…`;
 /// pull out and decode the real destination.
