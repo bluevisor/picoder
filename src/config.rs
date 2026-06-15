@@ -137,6 +137,7 @@ impl Default for Config {
             auto_commit: true,
             thinking: false,
             permission: default_permission(),
+            max_tool_calls: default_max_tool_calls(),
             key_from_env: false,
         }
     }
