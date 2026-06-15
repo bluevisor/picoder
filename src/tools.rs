@@ -193,10 +193,22 @@ pub fn bash_kill(id: u64) -> String {
 
 pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let p = expand(path);
-    let content = match std::fs::read_to_string(&p) {
-        Ok(c) => c,
+    // Open and read only up to READ_FILE_LIMIT bytes to avoid OOM on huge files.
+    const READ_FILE_LIMIT: usize = 1_000_000; // 1 MB
+    let content = match std::fs::File::open(&p) {
+        Ok(f) => {
+            let mut buf = String::new();
+            match std::io::BufReader::new(f)
+                .take(READ_FILE_LIMIT as u64)
+                .read_to_string(&mut buf)
+            {
+                Ok(_) => buf,
+                Err(e) => return format!("ERROR: read failed: {e}"),
+            }
+        }
         Err(e) => return format!("ERROR: {e}"),
     };
+    let truncated_read = content.len() >= READ_FILE_LIMIT;
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let (slice, off) = match (start, end) {
         (None, None) => (&lines[..], 1usize),
@@ -217,6 +229,9 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
         if !ln.ends_with('\n') {
             out.push('\n');
         }
+    }
+    if truncated_read {
+        out.push_str("... (file truncated at 1 MB)\n");
     }
     truncate(&out, MAX_TOOL_OUTPUT)
 }
