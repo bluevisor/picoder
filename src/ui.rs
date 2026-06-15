@@ -1425,11 +1425,11 @@ impl App {
                         "Press Ctrl+C again to exit".to_string(),
                     );
                 } else {
-                    // Delete character at cursor (Emacs-style).
+                    // Delete character at cursor (Emacs-style Ctrl+D).
                     if self.cursor < self.char_len() {
-                        let byte = self.byte_at(self.cursor);
-                        let next = self.next_char_byte(byte);
-                        self.input.replace_range(byte..next, "");
+                        let start = self.byte_at(self.cursor);
+                        let end = self.byte_at(self.cursor + 1);
+                        self.input.replace_range(start..end, "");
                     }
                 }
             }
