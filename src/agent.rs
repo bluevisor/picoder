@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-const MAX_STEPS: usize = 50;
+const MAX_STEPS: usize = 100;
 
 /// Permission modes (cycled with Shift+Tab in the UI).
 pub const PERM_ASK: u8 = 0; // prompt before each write/edit/bash

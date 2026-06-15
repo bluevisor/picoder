@@ -771,13 +771,20 @@ impl App {
 
     pub fn on_paste(&mut self, s: String) {
         if matches!(self.mode, Mode::Idle | Mode::Busy) {
+            let mut filtered = String::with_capacity(s.len());
             for c in s.chars() {
                 if c == '\n' || c == '\r' || c == '\t' {
-                    self.insert_char(' ');
-                } else {
-                    self.insert_char(c);
+                    filtered.push(' ');
+                } else if !c.is_control() {
+                    filtered.push(c);
                 }
             }
+            self.last_ctrl_c = None;
+            let byte = self.byte_at(self.cursor);
+            let added = filtered.chars().count();
+            self.input.insert_str(byte, &filtered);
+            self.cursor += added;
+            self.suggest_idx = 0;
         }
     }
 
@@ -799,7 +806,7 @@ impl App {
     /// in composer history, with the curated order breaking ties. Empty unless
     /// idle with a bare command token (no arguments yet).
     fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        if !matches!(self.mode, Mode::Idle)
+        if !matches!(self.mode, Mode::Idle | Mode::Busy)
             || !self.input.starts_with('/')
             || self.input.contains(char::is_whitespace)
         {

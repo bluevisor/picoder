@@ -103,6 +103,7 @@ impl AccumCall {
 pub fn agent_http() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(20))
+        .timeout_read(std::time::Duration::from_secs(60))
         .user_agent("picode/0.1")
         .build()
 }
