@@ -1761,7 +1761,7 @@ impl App {
             "  /exit          quit picode",
             "input: @path attaches a file | Tab autocompletes commands & paths",
             "       typing while the agent works queues the message; Enter queues it",
-            "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-L redraw | Ctrl-C quit",
+            "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-L redraw | Ctrl-C twice to quit",
         ];
         for l in lines {
             self.push(Kind::Notice, l.to_string());
