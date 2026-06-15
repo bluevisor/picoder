@@ -771,12 +771,35 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
 
 /// Best-effort HTML → text: drop script/style/head, turn block-level closes
 /// into newlines, strip the remaining tags, decode common entities.
-
-        .case_insensitive(true)
-        .build()
-        .unwrap();
+fn html_to_text(html: &str) -> String {
+    // Lift regex construction into OnceLock statics so they compile once.
+    static BLOCKS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+    static BREAKS: OnceLock<regex::Regex> = OnceLock::new();
+    static ANY_TAG: OnceLock<regex::Regex> = OnceLock::new();
+    let blocks = BLOCKS.get_or_init(|| {
+        ["script", "style", "head", "noscript", "svg"]
+            .iter()
+            .map(|tag| {
+                regex::RegexBuilder::new(&format!(r"<{tag}\b.*?</{tag}>"))
+                    .case_insensitive(true)
+                    .dot_matches_new_line(true)
+                    .build()
+                    .unwrap()
+            })
+            .collect()
+    });
+    let mut s = html.to_string();
+    for re in blocks {
+        s = re.replace_all(&s, " ").into_owned();
+    }
+    let breaks = BREAKS.get_or_init(|| {
+        regex::RegexBuilder::new(r"</(p|div|li|tr|h[1-6]|blockquote|pre)>|<br\s*/?>")
+            .case_insensitive(true)
+            .build()
+            .unwrap()
+    });
     let s = breaks.replace_all(&s, "\n");
-    let tags = regex::Regex::new(r"<[^>]*>").unwrap();
+    let tags = ANY_TAG.get_or_init(|| regex::Regex::new(r"<[^>]*>").unwrap());
     let s = decode_entities(&tags.replace_all(&s, " "));
     // Collapse runs of spaces and blank lines left behind by stripped markup.
     let mut out = String::new();
