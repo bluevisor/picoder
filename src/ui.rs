@@ -18,6 +18,7 @@ use ratatui::{Frame, Terminal};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 const SPIN_U: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPIN_A: [&str; 4] = ["|", "/", "-", "\\"];
