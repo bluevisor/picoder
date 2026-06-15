@@ -65,7 +65,7 @@ zero competitors do this.
 | 28 | Slash-suggestion ranking scans full history per keystroke | ui.rs:801-823 | ✅ cached cmd_uses HashMap |
 | 29 | final_text in one-shot can be stale (empty last reply) | main.rs:277-284 | ✅ captured on ResetLive before clear |
 | 30 | --banner flag can swallow next positional as theme name | main.rs:108 | ✅ is_theme_name guard |
-| 31 | PICODE.md loading reads entire file before truncating | main.rs:222 | ✅ BufReader::take(1MB)
+| 31 | PICODE.md loading reads entire file before truncating | main.rs:222 | ✅ BufReader::take(1MB) |
 | 32 | MCP server crashes have no recovery/restart logic | mcp.rs | ✅ restart-on-call + status update |
 | 33 | Compaction summary loses image context | agent.rs:854-878 | ✅ image count + filenames in render_for_summary |
 | 34 | / not showing suggestions while agent is processing | ui.rs | ✅ accepts Busy mode |
