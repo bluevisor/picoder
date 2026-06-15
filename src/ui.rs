@@ -555,7 +555,7 @@ impl App {
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "~".into());
         let hist_idx = history.len();
-        App {
+        let mut app = App {
             transcript: Vec::new(),
             live: String::new(),
             live_reasoning: String::new(),
