@@ -1195,6 +1195,11 @@ impl App {
                 }
                 _ => self.push(Kind::ErrorK, "context window must be a positive integer".to_string()),
             },
+            9 => {
+                let n = parse_max_tool_calls(&val);
+                self.settings.max_tool_calls = n;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::MaxToolCalls(n)));
+            }
             _ => {}
         }
     }
