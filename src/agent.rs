@@ -953,7 +953,7 @@ ask the user questions or spawn further sub-agents.
 - Stay strictly within the delegated task.
 - When done, reply with a concise final report (findings, files changed, key results) \
 and no tool call. That report is ALL the parent agent sees, so make it self-contained.",
-        max = MAX_STEPS
+        max = max
     )
 }
 
