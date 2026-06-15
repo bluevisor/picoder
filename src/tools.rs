@@ -1140,6 +1140,60 @@ mod tests {
     }
 
     #[test]
+    fn bump_cargo_version_increments_patch() {
+        let dir = std::env::temp_dir().join("picode_bump_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("Cargo.toml");
+        std::fs::write(&toml, "[package]\nname = \"t\"\nversion = \"3.14.159\"\nedition = \"2021\"\n").unwrap();
+        let new = bump_cargo_version(&dir).expect("bump should succeed");
+        assert_eq!(new, "3.14.160");
+        let content = std::fs::read_to_string(&toml).unwrap();
+        assert!(content.contains("version = \"3.14.160\""));
+        // Bump again.
+        let new2 = bump_cargo_version(&dir).expect("second bump");
+        assert_eq!(new2, "3.14.161");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bump_cargo_version_no_cargo_toml() {
+        let dir = std::env::temp_dir().join("picode_bump_nocargo");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(bump_cargo_version(&dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn git_autocommit_bumps_version() {
+        let dir = std::env::temp_dir().join("picode_git_bump_test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            std::fs::remove_dir_all(&dir).ok();
+            return; // no git available; skip
+        }
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        let toml = dir.join("Cargo.toml");
+        std::fs::write(&toml, "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        // Initial commit so the repo has a HEAD.
+        git(&["add", "Cargo.toml"]);
+        git(&["commit", "-q", "-m", "init"]);
+        // Now edit a file and autocommit.
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "hi\n").unwrap();
+        let note = git_autocommit(&dir, &[f.to_string_lossy().into()], "picode: write x.txt");
+        assert!(note.contains("committed"), "got: {note:?}");
+        assert!(note.contains("version → 0.1.1"), "got: {note:?}");
+        let content = std::fs::read_to_string(&toml).unwrap();
+        assert!(content.contains("version = \"0.1.1\""));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn base64_known_vectors() {
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"f"), "Zg==");
