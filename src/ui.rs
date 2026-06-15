@@ -578,6 +578,7 @@ impl App {
             should_quit: false,
             esc_deadline: None,
             last_ctrl_c: None,
+            cmd_uses: HashMap::new(),
             force_clear: false,
             single_width: cfg.ascii
                 || matches!(std::env::var("TERM").as_deref(), Ok("linux")),
