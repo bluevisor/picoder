@@ -99,6 +99,8 @@ fn jobs() -> &'static Mutex<HashMap<u32, Job>> {
     JOBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+const MAX_BG_JOBS: usize = 64;
+
 pub fn bash_background(command: &str, cwd: &Path) -> String {
     static NEXT_ID: AtomicU32 = AtomicU32::new(1);
     let mut cmd = Command::new("sh");
