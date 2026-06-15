@@ -200,16 +200,54 @@ impl Mcp {
 
     /// Call an `mcp__server__tool` with the given arguments; returns text.
     /// `cancel` aborts the wait (the server may still finish the work).
+    /// If the server process has crashed, attempt to restart it once.
     pub fn call(&mut self, full_name: &str, args: &Value, cancel: &AtomicBool) -> String {
         let Some(tool) = self.tools.iter().find(|t| t.full_name == full_name).cloned() else {
             return format!("ERROR: unknown MCP tool {full_name}");
         };
-        let Some(server) = self.servers.iter_mut().find(|s| s.name == tool.server) else {
-            return format!("ERROR: MCP server {} is not running", tool.server);
+        let do_call = |servers: &mut Vec<Server>| -> Result<String, String> {
+            let Some(server) = servers.iter_mut().find(|s| s.name == tool.server) else {
+                return Err(format!("MCP server {} is not running", tool.server));
+            };
+            let params = json!({"name": tool.tool, "arguments": args});
+            server.request("tools/call", params, CALL_TIMEOUT, Some(cancel))
+                .map(|r| render_tool_result(&r))
         };
-        let params = json!({"name": tool.tool, "arguments": args});
-        match server.request("tools/call", params, CALL_TIMEOUT, Some(cancel)) {
-            Ok(result) => render_tool_result(&result),
+        match do_call(&mut self.servers) {
+            Ok(result) => result,
+            Err(e) if e.contains("closed") || e.contains("write failed") => {
+                // Process likely crashed — try to restart it once.
+                let cfg = match self.configs.get(&tool.server) {
+                    Some(c) => c.clone(),
+                    None => return format!("ERROR: MCP call failed: {e}"),
+                };
+                // Remove the dead server and its tools from our lists.
+                self.servers.retain(|s| s.name != tool.server);
+                self.tools.retain(|t| t.server != tool.server);
+                match Self::start_one(&tool.server, &cfg) {
+                    Ok((server, tools)) => {
+                        self.tools.extend(tools);
+                        self.servers.push(server);
+                        // Update status.
+                        if let Some(st) = self.status.iter_mut().find(|s| s.name == tool.server) {
+                            st.ok = true;
+                            st.detail = "restarted".into();
+                        }
+                        // Retry the call once.
+                        match do_call(&mut self.servers) {
+                            Ok(result) => result,
+                            Err(e2) => format!("ERROR: MCP call failed after restart: {e2}"),
+                        }
+                    }
+                    Err(e2) => {
+                        if let Some(st) = self.status.iter_mut().find(|s| s.name == tool.server) {
+                            st.ok = false;
+                            st.detail = format!("crashed: {e2}");
+                        }
+                        format!("ERROR: MCP server {} crashed and restart failed: {e2}", tool.server)
+                    }
+                }
+            }
             Err(e) => format!("ERROR: MCP call failed: {e}"),
         }
     }
