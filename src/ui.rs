@@ -595,7 +595,9 @@ impl App {
             sess_completion: 0,
             balance: None,
             settings: cfg.settings,
-        }
+        };
+        app.rebuild_cmd_uses();
+        app
     }
 
     pub fn history(&self) -> &[String] {
