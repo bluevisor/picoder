@@ -515,11 +515,16 @@ impl Worker {
     fn run_subagent(&mut self, task: &str) -> String {
         // Build a tool schema for the sub-agent: built-ins minus task/ask_user + MCP.
         let sub_tools = crate::api::tools_spec_subagent(self.mcp.tools());
+        let sub_max = if self.cfg.max_tool_calls == 0 {
+            AUTO_STEPS
+        } else {
+            self.cfg.max_tool_calls as usize
+        };
         // Swap in a fresh context; restore the parent's afterward.
         let saved_msgs = std::mem::replace(
             &mut self.messages,
             vec![
-                Message::system(subagent_prompt()),
+                Message::system(subagent_prompt(sub_max)),
                 Message::user(task.to_string()),
             ],
         );
