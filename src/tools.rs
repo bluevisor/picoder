@@ -430,6 +430,15 @@ fn git_cmd(dir: &Path, args: &[&str], timeout_secs: u64) -> std::io::Result<std:
     run_proc(&mut c, timeout_secs).map(|o| o.status)
 }
 
+/// Like git_status but captures stdout (used for `rev-parse`, `status`, etc.).
+fn git_output(dir: &Path, args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::Output> {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(dir).args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_proc(&mut c, timeout_secs)
+}
+
 /// Spawn a command, wait with timeout, kill the process group on timeout.
 /// Returns the captured Output (stdout + stderr) and the exit status.
 fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::process::Output> {
