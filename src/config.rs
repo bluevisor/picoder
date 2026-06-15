@@ -288,6 +288,9 @@ impl Config {
         if on_disk.permission != default_permission() {
             json["permission"] = serde_json::json!(on_disk.permission);
         }
+        if on_disk.max_tool_calls != default_max_tool_calls() {
+            json["max_tool_calls"] = serde_json::json!(on_disk.max_tool_calls);
+        }
         let path = config_path();
         std::fs::write(&path, serde_json::to_string_pretty(&json)?)
             .context("write config")?;
