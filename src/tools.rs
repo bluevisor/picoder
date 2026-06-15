@@ -402,8 +402,9 @@ pub fn in_git_repo(dir: &Path) -> bool {
 pub fn bump_cargo_version(dir: &Path) -> Option<String> {
     let path = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).ok()?;
-    // Match `version = "x.y.z"` and bump z.
-    let re = regex::Regex::new(r#"^(\s*version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")"#).ok()?;
+    // Match `version = "x.y.z"` and bump z. (?m) enables multi-line mode so ^
+    // matches at the start of any line, not just the start of the string.
+    let re = regex::Regex::new(r#"(?m)^(\s*version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")"#).ok()?;
     let mut bumped = String::new();
     let mut found = false;
     for line in text.lines() {
