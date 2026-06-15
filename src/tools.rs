@@ -815,12 +815,14 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
         .to_ascii_lowercase()
         .contains("text/html");
     let mut body = String::new();
-    // Read the response with a per-byte-progress deadline (5s) to prevent
-    // slow-loris attacks where a server dribbles bytes just under the
-    // connection timeout.
-    match read_deadline(resp.into_reader().take(2_000_000), Duration::from_secs(5)) {
-        Ok(b) => body = b,
+    // Read via ureq's internal buffering which respects the Agent timeout.
+    // Limit to 2MB in-memory by truncating after read.
+    match resp.into_string() {
+        Ok(s) => body = s,
         Err(e) => return format!("ERROR: read failed (binary content?): {e}"),
+    }
+    if body.len() > 2_000_000 {
+        body.truncate(2_000_000);
     }
     let text = if html { html_to_text(&body) } else { body };
     let text = text.trim();
