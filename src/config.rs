@@ -65,6 +65,9 @@ fn default_true() -> bool {
 fn default_permission() -> String {
     "ask".to_string()
 }
+fn default_max_tool_calls() -> u32 {
+    100
+}
 
 /// Provider presets: (name, base_url, default model) — the single source for
 /// the first-run wizard and the `/config` panel's provider row.
