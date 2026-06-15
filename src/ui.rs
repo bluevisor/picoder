@@ -509,6 +509,8 @@ pub struct App {
     last_models: Vec<String>,
     should_quit: bool,
     esc_deadline: Option<Instant>,
+    /// Time of last Ctrl+C with empty input; used for double-press-to-quit.
+    last_ctrl_c: Option<Instant>,
     /// Set by Ctrl+L; makes the event loop clear the backend before the next
     /// draw, forcing a full repaint (recovers from any screen desync).
     force_clear: bool,
@@ -565,6 +567,7 @@ impl App {
             last_models: Vec::new(),
             should_quit: false,
             esc_deadline: None,
+            last_ctrl_c: None,
             force_clear: false,
             single_width: cfg.ascii
                 || matches!(std::env::var("TERM").as_deref(), Ok("linux")),
@@ -1357,7 +1360,18 @@ impl App {
             KeyCode::Enter => self.submit(h),
             KeyCode::Char('c') if ctrl => {
                 if self.input.is_empty() {
-                    self.should_quit = true;
+                    let now = Instant::now();
+                    if let Some(t) = self.last_ctrl_c {
+                        if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
+                            self.should_quit = true;
+                            return;
+                        }
+                    }
+                    self.last_ctrl_c = Some(now);
+                    self.push(
+                        Kind::Notice,
+                        "Press Ctrl+C again to exit".to_string(),
+                    );
                 } else {
                     self.input.clear();
                     self.cursor = 0;
@@ -1365,7 +1379,18 @@ impl App {
             }
             KeyCode::Char('d') if ctrl => {
                 if self.input.is_empty() {
-                    self.should_quit = true;
+                    let now = Instant::now();
+                    if let Some(t) = self.last_ctrl_c {
+                        if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
+                            self.should_quit = true;
+                            return;
+                        }
+                    }
+                    self.last_ctrl_c = Some(now);
+                    self.push(
+                        Kind::Notice,
+                        "Press Ctrl+C again to exit".to_string(),
+                    );
                 }
             }
             KeyCode::PageUp => self.scroll_up(),
@@ -1403,7 +1428,10 @@ impl App {
             KeyCode::Char('f') if alt => self.cursor = self.next_word(),
             // Unhandled Ctrl/Alt chords must not type their letter into the
             // composer (e.g. Ctrl+T would otherwise insert a stray 't').
-            KeyCode::Char(c) if !ctrl && !alt => self.insert_char(caps_char(&key, c)),
+            KeyCode::Char(c) if !ctrl && !alt => {
+                self.last_ctrl_c = None;
+                self.insert_char(caps_char(&key, c));
+            }
             KeyCode::Backspace if alt => self.delete_word(),
             KeyCode::Backspace => {
                 if self.cursor > 0 {
