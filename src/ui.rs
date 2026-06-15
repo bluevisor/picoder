@@ -832,21 +832,28 @@ impl App {
         {
             return Vec::new();
         }
-        // One prefix allocation per command, not per history entry.
-        let uses = |cmd: &str| {
-            let with_arg = format!("{cmd} ");
-            self.history
-                .iter()
-                .filter(|h| h.as_str() == cmd || h.starts_with(&with_arg))
-                .count()
-        };
+        // Use cached usage counts so we don't scan full history per keystroke.
         let mut scored: Vec<((&'static str, &'static str), usize)> = SLASH_COMMANDS
             .iter()
             .filter(|(c, _)| c.starts_with(self.input.as_str()))
-            .map(|&(c, d)| ((c, d), uses(c)))
+            .map(|&(c, d)| {
+                let uses = self.cmd_uses.get(c).copied().unwrap_or(0);
+                ((c, d), uses)
+            })
             .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1)); // stable: ties keep curated order
         scored.into_iter().map(|(cd, _)| cd).take(MAX_SUGGEST).collect()
+    }
+
+    fn rebuild_cmd_uses(&mut self) {
+        self.cmd_uses.clear();
+        for h in &self.history {
+            if let Some(cmd) = h.strip_prefix('/') {
+                let name = cmd.split_whitespace().next().unwrap_or(cmd);
+                let slash_cmd = format!("/{name}");
+                *self.cmd_uses.entry(slash_cmd).or_insert(0) += 1;
+            }
+        }
     }
 
     fn byte_at(&self, char_idx: usize) -> usize {
