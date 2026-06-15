@@ -1930,8 +1930,11 @@ impl App {
 
     fn composer_rows(&self, width: u16) -> u16 {
         match &self.mode {
-            // Spinner line + queued messages + the live composer.
-            Mode::Busy => 1 + self.queued.len() as u16 + self.input_rows(width),
+            // Spinner line + queued messages + the live composer + slash palette.
+            Mode::Busy => {
+                1 + self.queued.len() as u16 + self.input_rows(width)
+                    + self.slash_suggestions().len() as u16
+            }
             // Description line + the (y)/(n)/(a) line below it.
             Mode::Approval(_) => 2,
             // Header line + one line per theme.
