@@ -331,12 +331,18 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
         if !current.contains_key(&e.path) {
             let disk = std::fs::read_to_string(expand(&e.path))
                 .map_err(|err| format!("ERROR: edit {}: {} ({err})", i + 1, e.path))?;
+            // NFC-normalize disk content so the model's composed codepoints
+            // match against possibly decomposed file text.
+            let disk_nfc: String = unicode_normalization::UnicodeNormalization::nfc(disk.chars())
+                .collect();
             originals.insert(e.path.clone(), disk.clone());
-            current.insert(e.path.clone(), disk);
+            current.insert(e.path.clone(), disk_nfc);
             order.push(e.path.clone());
         }
         let cur = current.get(&e.path).unwrap();
-        let n = cur.matches(&e.old_text).count();
+        let old_nfc: String = unicode_normalization::UnicodeNormalization::nfc(e.old_text.chars())
+            .collect();
+        let n = cur.matches(&old_nfc).count();
         if n == 0 {
             return Err(format!("ERROR: edit {}: old_text not found in {}", i + 1, e.path));
         }
