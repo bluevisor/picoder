@@ -359,10 +359,12 @@ mod tests {
         c.apply_patch(&ConfigPatch::Permission("plan".into()));
         c.apply_patch(&ConfigPatch::AutoCommit(false));
         c.apply_patch(&ConfigPatch::ContextWindow(64000));
+        c.apply_patch(&ConfigPatch::MaxToolCalls(42));
         assert!(c.thinking);
         assert_eq!(c.permission, "plan");
         assert!(!c.auto_commit);
         assert_eq!(c.context_window, 64000);
+        assert_eq!(c.max_tool_calls, 42);
         // A key set through the panel always counts as a disk key.
         c.key_from_env = true;
         c.apply_patch(&ConfigPatch::ApiKey("sk-x".into()));
