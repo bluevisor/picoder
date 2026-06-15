@@ -274,7 +274,27 @@ pub fn write_preview(path: &str, content: &str) -> (String, bool) {
     (crate::diff::unified(&old, content, 300), existed)
 }
 
-
+pub fn write_file(path: &str, content: &str) -> String {
+    let p = expand(path);
+    // Refuse to follow symlinks: writing through a symlink could overwrite an
+    // unexpected target outside the working directory.
+    if let Ok(meta) = std::fs::symlink_metadata(&p) {
+        if meta.file_type().is_symlink() {
+            return format!("DENIED: {path} is a symlink; write to the real path instead.");
+        }
+    }
+    if let Some(dir) = p.parent() {
+        if !dir.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return format!("ERROR: {e}");
+            }
+        }
+    }
+    match std::fs::write(&p, content) {
+        Ok(()) => format!("OK wrote {} ({} bytes)", p.display(), content.len()),
+        Err(e) => format!("ERROR: {e}"),
+    }
+}
 
 pub enum EditPreview {
     Ok { diff: String, new_content: String },
