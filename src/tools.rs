@@ -479,7 +479,8 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
 
     // A fresh Pi may have no user.name/email; retry with a fallback identity
     // only if the first attempt fails (so configured identity is preserved).
-    let run_commit = |ident: bool| {
+    // Capture stderr so we can surface merge-conflict and other commit failures.
+    let run_commit = |ident: bool| -> (bool, String) {
         let mut c = Command::new("git");
         c.arg("-C").arg(dir);
         if ident {
@@ -487,12 +488,28 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         }
         // Commit all staged changes (the edited files + optional Cargo.toml bump).
         c.args(["commit", "--no-verify", "-m", message]);
-        c.stdout(Stdio::null()).stderr(Stdio::null()).status()
+        c.stdout(Stdio::null()).stderr(Stdio::piped()).output().map(|o| {
+            (o.status.success(), String::from_utf8_lossy(&o.stderr).trim().to_string())
+        }).unwrap_or_default()
     };
-    let committed = run_commit(false).map(|s| s.success()).unwrap_or(false)
-        || run_commit(true).map(|s| s.success()).unwrap_or(false);
+    let (ok, err) = run_commit(false);
+    let committed = ok || {
+        let (ok2, err2) = run_commit(true);
+        if !ok2 && err2.is_empty() {
+            return if err.is_empty() {
+                String::new()
+            } else {
+                format!(" [commit skipped: {err}]")
+            };
+        }
+        ok2
+    };
     if !committed {
-        return String::new(); // nothing changed, or commit refused
+        return if err.is_empty() {
+            String::new()
+        } else {
+            format!(" [commit skipped: {err}]")
+        };
     }
     let hash = Command::new("git")
         .arg("-C")
