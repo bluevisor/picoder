@@ -378,7 +378,12 @@ impl Worker {
     /// but tool activity still shows so the user can follow along and approve.
     fn run_loop(&mut self) -> String {
         let quiet = self.quiet;
-        for _ in 0..MAX_STEPS {
+        let max = if self.cfg.max_tool_calls == 0 {
+            AUTO_STEPS
+        } else {
+            self.cfg.max_tool_calls as usize
+        };
+        for _ in 0..max {
             if self.cancel.load(Ordering::Relaxed) {
                 let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
                 return String::new();
