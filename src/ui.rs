@@ -1424,6 +1424,13 @@ impl App {
                         Kind::Notice,
                         "Press Ctrl+C again to exit".to_string(),
                     );
+                } else {
+                    // Delete character at cursor (Emacs-style).
+                    if self.cursor < self.char_len() {
+                        let byte = self.byte_at(self.cursor);
+                        let next = self.next_char_byte(byte);
+                        self.input.replace_range(byte..next, "");
+                    }
                 }
             }
             KeyCode::PageUp => self.scroll_up(),
