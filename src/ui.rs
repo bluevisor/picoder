@@ -257,6 +257,7 @@ const SETTING_LABELS: &[&str] = &[
     "auto-commit",
     "theme",
     "context window",
+    "max tool calls",
 ];
 
 /// Heavy block-letter "PICODE" for capable terminals.
