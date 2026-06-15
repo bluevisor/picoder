@@ -1389,6 +1389,7 @@ impl App {
                             self.should_quit = true;
                             return;
                         }
+                        // Timer expired: reset, this is a fresh first press.
                     }
                     self.last_ctrl_c = Some(now);
                     self.push(
@@ -1409,6 +1410,7 @@ impl App {
                             self.should_quit = true;
                             return;
                         }
+                        // Timer expired: reset, this is a fresh first press.
                     }
                     self.last_ctrl_c = Some(now);
                     self.push(
