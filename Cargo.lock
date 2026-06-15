@@ -486,6 +486,7 @@ dependencies = [
  "serde_json",
  "similar",
  "textwrap",
+ "unicode-width 0.2.0",
  "ureq",
 ]
 
