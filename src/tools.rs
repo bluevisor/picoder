@@ -150,10 +150,16 @@ pub fn bash_background(command: &str, cwd: &Path) -> String {
         });
     }
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    jobs().lock().unwrap().insert(
+    let mut map = jobs().lock().unwrap();
+    // Evict finished jobs when the table gets large, to avoid unbounded memory.
+    if map.len() >= MAX_BG_JOBS {
+        map.retain(|_, j| j.exit.lock().unwrap().is_none());
+    }
+    map.insert(
         id,
         Job { pid, command: command.to_string(), buf, exit, read_to: 0 },
     );
+    drop(map);
     format!("Started background job {id} (pid {pid}). Poll with bash_output, stop with bash_kill.")
 }
 
