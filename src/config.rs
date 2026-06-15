@@ -226,6 +226,9 @@ impl Config {
                 if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
                     cfg.permission = s.to_string();
                 }
+                if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
+                    cfg.max_tool_calls = n as u32;
+                }
             }
         }
         cfg
