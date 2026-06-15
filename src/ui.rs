@@ -2265,7 +2265,7 @@ impl App {
             }
             lines.push(Line::from(spans));
         }
-        // The `/` command palette, under the input (idle only).
+        // The `/` command palette, under the input.
         let sugg = self.slash_suggestions();
         if !sugg.is_empty() {
             let idx = self.suggest_idx.min(sugg.len() - 1);
