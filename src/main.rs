@@ -283,7 +283,16 @@ fn run_oneshot(
                 live.push_str(&t);
                 let _ = out.flush();
             }
-            UiEvent::ResetLive => live.clear(),
+            UiEvent::ResetLive => {
+                // Tool calls are starting — capture any text accumulated so far
+                // as a candidate for --output, because AssistantCommit will fire
+                // after live is cleared and would miss this turn's text.
+                if !live.trim().is_empty() {
+                    final_text = std::mem::take(&mut live);
+                } else {
+                    live.clear();
+                }
+            }
             UiEvent::AssistantCommit => {
                 if !live.trim().is_empty() {
                     final_text = std::mem::take(&mut live);
