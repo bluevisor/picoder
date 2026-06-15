@@ -397,16 +397,61 @@ pub fn in_git_repo(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Commit the given paths to the repo at `dir` as an edit checkpoint. Returns a
-/// short note like ` [committed a1b2c3d]` for the tool result, or "" when there
-/// was nothing to commit / not a repo. Best-effort: never surfaces an error.
+/// Bump the patch version in `dir/Cargo.toml`. Returns the new version string,
+/// or None if there's no Cargo.toml or the version can't be bumped.
+pub fn bump_cargo_version(dir: &Path) -> Option<String> {
+    let path = dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    // Match `version = "x.y.z"` and bump z.
+    let re = regex::Regex::new(r#"^(\s*version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")"#).ok()?;
+    let mut bumped = String::new();
+    let mut found = false;
+    for line in text.lines() {
+        if !found {
+            if let Some(caps) = re.captures(line) {
+                let z: u64 = caps[4].parse().ok()?;
+                let new_version = format!("{}.{}.{}", &caps[2], &caps[3], z + 1);
+                bumped.push_str(&format!("{}{}\"{}\n", &caps[1], new_version, &caps[5]));
+                found = true;
+                continue;
+            }
+        }
+        bumped.push_str(line);
+        bumped.push('\n');
+    }
+    if !found {
+        return None;
+    }
+    std::fs::write(&path, &bumped).ok()?;
+    // Return the new version as e.g. "0.2.3".
+    let caps = re.captures(&bumped)?;
+    Some(format!("{}.{}.{}", &caps[2], &caps[3], &caps[4]))
+}
+
+/// Commit the given paths to the repo at `dir` as an edit checkpoint. Also bumps
+/// the patch version in Cargo.toml (if present) and includes it in the commit.
+/// Returns a short note like ` [committed a1b2c3d]` for the tool result, or ""
+/// when there was nothing to commit / not a repo. Best-effort: never surfaces an
+/// error.
 pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     if paths.is_empty() || !in_git_repo(dir) {
         return String::new();
     }
     // Tools expand `~` before touching the filesystem; git does not, so the
     // model's raw path strings must be expanded the same way here.
-    let paths: Vec<PathBuf> = paths.iter().map(|p| expand(p)).collect();
+    let mut paths: Vec<PathBuf> = paths.iter().map(|p| expand(p)).collect();
+
+    // Bump Cargo.toml version if present.
+    let cargo_toml = dir.join("Cargo.toml");
+    let version_bumped = if cargo_toml.exists() {
+        bump_cargo_version(dir)
+    } else {
+        None
+    };
+    if version_bumped.is_some() {
+        paths.push(cargo_toml.clone());
+    }
+
     let mut add = Command::new("git");
     add.arg("-C").arg(dir).arg("add").arg("--");
     for p in &paths {
@@ -442,11 +487,15 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    if hash.is_empty() {
+    let mut note = if hash.is_empty() {
         " [committed]".to_string()
     } else {
         format!(" [committed {hash}]")
+    };
+    if let Some(v) = version_bumped {
+        note.push_str(&format!(" version → {v}"));
     }
+    note
 }
 
 /// Recent git history + working-tree status for `dir`, as a startup context
