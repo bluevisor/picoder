@@ -913,7 +913,8 @@ fn resolve_ddg_url(href: &str) -> String {
 
 /// Strip tags and entities from an inline HTML fragment, collapsing whitespace.
 fn clean_inline(s: &str) -> String {
-    let tags = regex::Regex::new(r"<[^>]*>").unwrap();
+    static ANY_TAG: OnceLock<regex::Regex> = OnceLock::new();
+    let tags = ANY_TAG.get_or_init(|| regex::Regex::new(r"<[^>]*>").unwrap());
     decode_entities(&tags.replace_all(s, ""))
         .split_whitespace()
         .collect::<Vec<_>>()
