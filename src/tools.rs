@@ -600,12 +600,7 @@ pub fn git_context(dir: &Path) -> Option<String> {
         return None;
     }
     let run = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .ok()
+        git_output(dir, args, 10)
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default()
     };
