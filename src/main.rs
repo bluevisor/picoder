@@ -219,14 +219,23 @@ fn status_lines(cfg: &Config, ascii: bool) -> Vec<String> {
 
 fn load_project_context() -> Option<(Message, String)> {
     for name in ["PICODE.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
-        if let Ok(c) = std::fs::read_to_string(name) {
-            if !c.trim().is_empty() {
-                let body = api::truncate(c.trim(), 12000);
-                return Some((
-                    Message::system(format!("Project context from {name}:\n{body}")),
-                    name.to_string(),
-                ));
+        let content = match std::fs::File::open(name) {
+            Ok(f) => {
+                let mut r = std::io::BufReader::new(f.take(1_000_000)); // cap at 1 MB
+                let mut s = String::new();
+                match r.read_to_string(&mut s) {
+                    Ok(_) => s,
+                    Err(_) => continue,
+                }
             }
+            Err(_) => continue,
+        };
+        if !content.trim().is_empty() {
+            let body = api::truncate(content.trim(), 12000);
+            return Some((
+                Message::system(format!("Project context from {name}:\n{body}")),
+                name.to_string(),
+            ));
         }
     }
     None
