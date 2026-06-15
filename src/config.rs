@@ -324,6 +324,7 @@ impl Config {
             ConfigPatch::Permission(m) => self.permission = m.clone(),
             ConfigPatch::AutoCommit(b) => self.auto_commit = *b,
             ConfigPatch::ContextWindow(n) => self.context_window = (*n).max(1),
+            ConfigPatch::MaxToolCalls(n) => self.max_tool_calls = *n,
         }
     }
 
