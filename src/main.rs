@@ -17,7 +17,7 @@ mod ui;
 use agent::{UiEvent, WorkerCmd};
 use api::Message;
 use config::Config;
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 
 /// System prompt, built at runtime so picode honestly describes whatever host
 /// it's on (Pi Zero W → Jetson Nano). A host is treated as build-capable when
