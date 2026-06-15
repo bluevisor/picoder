@@ -2813,6 +2813,21 @@ pub fn setup_terminal() -> std::io::Result<Terminal<ratatui::backend::CrosstermB
     Ok(term)
 }
 
+/// Format max_tool_calls for display: 0 → "auto", else the number.
+fn setting_max_tool_calls(n: u32) -> String {
+    if n == 0 { "auto".to_string() } else { n.to_string() }
+}
+
+/// Parse user input for the max_tool_calls setting: "auto" → 0, number → u32.
+fn parse_max_tool_calls(s: &str) -> u32 {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        0
+    } else {
+        s.parse::<u32>().unwrap_or(0)
+    }
+}
+
 pub fn restore_terminal(console: bool) {
     use ratatui::crossterm::cursor::MoveTo;
     use ratatui::crossterm::terminal::{Clear, ClearType};
