@@ -1158,6 +1158,7 @@ impl App {
                 Config::persist_theme(THEMES[i]);
             }
             8 => self.mode = edit_with(self.settings.context_window.to_string()),
+            9 => self.mode = edit_with(setting_max_tool_calls(self.settings.max_tool_calls)),
             _ => {}
         }
     }
