@@ -243,6 +243,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 
 /// Most suggestions shown under the composer for a `/` prefix.
 const MAX_SUGGEST: usize = 8;
+/// Window within which a second Ctrl+C/Ctrl+D exits (Claude Code style).
+const DOUBLE_PRESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Rows of the `/config` panel, in display order.
 const SETTING_LABELS: &[&str] = &[
