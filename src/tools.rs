@@ -764,13 +764,26 @@ fn parse_ddg(html: &str) -> String {
             .build()
             .unwrap()
     };
-    let link_re = re(r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#);
-    let snip_re = re(r#"class="result__snippet"[^>]*>(.*?)</a>"#);
-    let snippets: Vec<String> = snip_re.captures_iter(html).map(|c| clean_inline(&c[1])).collect();
+    // Match DDG result links — look for uddg= redirect URLs (the stable
+    // structural element) and extract the anchor text as title.  This is
+    // more robust than depending on specific class names.
+    let link_re = re(r#"<a[^>]*href="[^"]*uddg=[^"]*"[^>]*>(.*?)</a>"#);
+    // For snippets, try any element whose class contains "snippet".
+    let snip_re = re(r#"class="[^"]*snippet[^"]*"[^>]*>(.*?)</(?:a|td|div|span)>"#);
+    let snippets: Vec<String> = snip_re
+        .captures_iter(html)
+        .map(|c| clean_inline(&c[1]))
+        .collect();
     let mut out = String::new();
     for (i, c) in link_re.captures_iter(html).take(8).enumerate() {
-        let title = clean_inline(&c[2]);
-        out.push_str(&format!("{}. {title}\n   {}\n", i + 1, resolve_ddg_url(&c[1])));
+        let title = clean_inline(&c[1]);
+        // Extract uddg= value from the full match.
+        let full = &c[0];
+        let href_start = full.find("uddg=").map(|p| p + 5).unwrap_or(0);
+        let href_rest = &full[href_start..];
+        let href_end = href_rest.find('"').unwrap_or(href_rest.len());
+        let encoded = &href_rest[..href_end];
+        out.push_str(&format!("{}. {title}\n   {}\n", i + 1, urldecode(encoded)));
         if let Some(s) = snippets.get(i) {
             if !s.is_empty() {
                 out.push_str(&format!("   {s}\n"));
@@ -778,7 +791,7 @@ fn parse_ddg(html: &str) -> String {
         }
     }
     if out.is_empty() {
-        "(no results)".into()
+        "(no results — DuckDuckGo may have changed its output format)".into()
     } else {
         truncate(&out, MAX_TOOL_OUTPUT)
     }
