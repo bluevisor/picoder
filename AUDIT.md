@@ -70,20 +70,20 @@ zero competitors do this.
 | 33 | Compaction summary loses image context | agent.rs:854-878 | |
 | 34 | / not showing suggestions while agent is processing | ui.rs | ✅ accepts Busy mode |
 
-## Week 3–4 Plan (next 10 items)
+## Week 3–4 Plan (completed ✅)
 
 | Seq | # | Item | Approach |
 |-----|---|------|----------|
-| 1 | 15 | Merge conflicts → silent commit failure | Surface `[commit skipped: merge conflict?]` in tool result |
+| 1 | 15 | Merge conflicts → silent commit failure | Surface `[commit skipped: {stderr}]` in tool result |
 | 2 | 18 | Esc 50ms delay feels sluggish | Drop deadline to 18ms (one frame + margin) |
 | 3 | 19 | html_to_text recompiles regex per call | Lift regexes into `OnceLock` statics |
-| 4 | 20 | Concurrent picode instances can corrupt memory.md | `flock` advisory lock before append, or document best-effort |
+| 4 | 20 | Concurrent picode instances can corrupt memory.md | Lockfile with `create_new` + exponential backoff |
 | 5 | 21 | edit_file Unicode normalization mismatch | NFC-normalize both old_text and file content before substring search |
-| 6 | 22 | Setup wizard has no validation of inputs | Validate URL starts with `http`, model/password non-empty; loop until valid |
+| 6 | 22 | Setup wizard has no validation of inputs | Validate URL starts with `http`, model non-empty; loop until valid |
 | 7 | 23 | Symlinks transparently followed on writes | Check `symlink_metadata` before writing; refuse symlink targets |
 | 8 | 24 | Transcript trimming (4000 lines) is silent | Push a dim notice before draining oldest lines |
-| 9 | 25 | No "↓ new messages" indicator when scrolled up | Show `▼` indicator in status bar when follow=false and new content arrives |
-| 10 | 26 | last_ctrl_c timer never expires | Clear `last_ctrl_c` after timeout expires; second press always quits |
+| 9 | 25 | No "↓ new messages" indicator when scrolled up | Show `↓ new` indicator in status bar when follow=false and new content arrives |
+| 10 | 26 | last_ctrl_c timer never expires | Clear `last_ctrl_c` after timeout expires; fresh first press |
 
 ## Missing Features (vs Competitors)
 
