@@ -939,7 +939,7 @@ fn parse_edits(v: Option<&Value>) -> Vec<tools::EditReq> {
 
 /// System prompt for a delegated sub-agent. Its whole job is one task; its
 /// final message becomes the report handed back to the parent.
-fn subagent_prompt() -> String {
+fn subagent_prompt(max: usize) -> String {
     let host = crate::sysinfo::host_descriptor();
     format!(
         "You are a sub-agent of picode, a terminal coding agent running ON {host}. You were \
