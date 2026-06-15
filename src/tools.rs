@@ -274,20 +274,7 @@ pub fn write_preview(path: &str, content: &str) -> (String, bool) {
     (crate::diff::unified(&old, content, 300), existed)
 }
 
-pub fn write_file(path: &str, content: &str) -> String {
-    let p = expand(path);
-    if let Some(dir) = p.parent() {
-        if !dir.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                return format!("ERROR: {e}");
-            }
-        }
-    }
-    match std::fs::write(&p, content) {
-        Ok(()) => format!("OK wrote {} ({} bytes)", p.display(), content.len()),
-        Err(e) => format!("ERROR: {e}"),
-    }
-}
+
 
 pub enum EditPreview {
     Ok { diff: String, new_content: String },
@@ -356,13 +343,7 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
     Ok(MultiEditPlan { diff, files })
 }
 
-pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
-    let p = expand(path);
-    let data = match std::fs::read_to_string(&p) {
-        Ok(d) => d,
-        Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
-    };
-    let n = data.matches(old_text).count();
+
     if n == 0 {
         return EditPreview::Err("ERROR: old_text not found.".into());
     }

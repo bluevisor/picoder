@@ -603,7 +603,14 @@ impl App {
     fn after_push(&mut self) {
         if self.transcript.len() > MAX_TRANSCRIPT {
             let drop = self.transcript.len() - MAX_TRANSCRIPT;
+            // Push a dim notice so the user knows lines were trimmed.
             self.transcript.drain(0..drop);
+            self.transcript.insert(0, TLine {
+                kind: Kind::Dim,
+                text: format!("(trimmed {drop} lines — transcript limit)"),
+                lead: true,
+                color: None,
+            });
         }
         self.follow = true;
     }
