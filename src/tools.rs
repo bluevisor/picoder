@@ -353,7 +353,7 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
                 e.path
             ));
         }
-        let updated = cur.replacen(&e.old_text, &e.new_text, 1);
+        let updated = cur.replacen(&old_nfc, &e.new_text, 1);
         current.insert(e.path.clone(), updated);
     }
     let mut diff = String::new();
