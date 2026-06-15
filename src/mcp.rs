@@ -113,13 +113,14 @@ pub struct Mcp {
 
 impl Mcp {
     pub fn disabled() -> Mcp {
-        Mcp { servers: Vec::new(), tools: Vec::new(), status: Vec::new() }
+        Mcp { servers: Vec::new(), tools: Vec::new(), status: Vec::new(), configs: BTreeMap::new() }
     }
 
     /// Spawn and initialize every configured server. Failures are recorded in
     /// `status` (and reported via `/mcp`) but never abort startup.
     pub fn launch(configs: &BTreeMap<String, McpServerConfig>) -> Mcp {
         let mut mcp = Mcp::disabled();
+        mcp.configs = configs.clone();
         for (name, cfg) in configs {
             match Self::start_one(name, cfg) {
                 Ok((server, mut tools)) => {
