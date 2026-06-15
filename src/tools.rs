@@ -411,15 +411,53 @@ pub fn apply_write(path: &str, content: &str) -> String {
 
 /// True if `dir` is inside a git work tree.
 pub fn in_git_repo(dir: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    git_cmd(dir, &["rev-parse", "--is-inside-work-tree"], 10)
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Run a git subprocess with a timeout. Returns the exit status, or an error
+/// (timeout or spawn failure). Stderr is captured so callers can inspect it.
+fn git_status(dir: &Path, args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::ExitStatus> {
+    git_cmd(dir, args, timeout_secs)
+}
+
+fn git_cmd(dir: &Path, args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::ExitStatus> {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(dir).args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    run_proc(&mut c, timeout_secs).map(|o| o.status)
+}
+
+/// Spawn a command, wait with timeout, kill the process group on timeout.
+/// Returns the captured Output (stdout + stderr) and the exit status.
+fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::process::Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let r = child.wait_with_output();
+        let _ = tx.send(r);
+    });
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(e),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {timeout_secs}s")))
+        }
+        Err(e) => Err(std::io::Error::from(e)),
+    }
 }
 
 /// Bump the patch version in `dir/Cargo.toml`. Returns the new version string,
