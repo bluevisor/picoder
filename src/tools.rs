@@ -691,33 +691,7 @@ pub fn web_search(http: &ureq::Agent, query: &str) -> String {
     parse_ddg(&body)
 }
 
-fn parse_ddg(html: &str) -> String {
-    let re = |p: &str| {
-        regex::RegexBuilder::new(p)
-            .case_insensitive(true)
-            .dot_matches_new_line(true)
-            .build()
-            .unwrap()
-    };
-    let link_re = re(r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#);
-    let snip_re = re(r#"class="result__snippet"[^>]*>(.*?)</a>"#);
-    let snippets: Vec<String> = snip_re.captures_iter(html).map(|c| clean_inline(&c[1])).collect();
-    let mut out = String::new();
-    for (i, c) in link_re.captures_iter(html).take(8).enumerate() {
-        let title = clean_inline(&c[2]);
-        out.push_str(&format!("{}. {title}\n   {}\n", i + 1, resolve_ddg_url(&c[1])));
-        if let Some(s) = snippets.get(i) {
-            if !s.is_empty() {
-                out.push_str(&format!("   {s}\n"));
-            }
-        }
-    }
-    if out.is_empty() {
-        "(no results)".into()
-    } else {
-        truncate(&out, MAX_TOOL_OUTPUT)
-    }
-}
+
 
 /// DDG result hrefs are redirects like `//duckduckgo.com/l/?uddg=<encoded>&…`;
 /// pull out and decode the real destination.
