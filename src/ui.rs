@@ -502,6 +502,9 @@ pub struct App {
     q_input: String,
     q_reply: Option<std::sync::mpsc::Sender<Option<String>>>,
     follow: bool,
+    /// True when new content was pushed while the user was scrolled up. Shows a
+    /// "↓ new" indicator in the status bar.
+    scrolled_up: bool,
     scroll: usize,
     max_top: usize,
     view_h: usize,
@@ -606,8 +609,7 @@ impl App {
             // Push a dim notice so the user knows lines were trimmed.
             self.transcript.drain(0..drop);
             self.transcript.insert(0, TLine {
-                kind: Kind::Dim,
-                text: format!("(trimmed {drop} lines — transcript limit)"),
+
                 lead: true,
                 color: None,
             });
