@@ -465,7 +465,7 @@ fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::proces
             let _ = rx.recv_timeout(Duration::from_millis(500));
             Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {timeout_secs}s")))
         }
-        Err(e) => Err(std::io::Error::from(e)),
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
     }
 }
 
