@@ -563,6 +563,7 @@ impl App {
             q_input: String::new(),
             q_reply: None,
             follow: true,
+            scrolled_up: false,
             scroll: 0,
             max_top: 0,
             view_h: 0,
