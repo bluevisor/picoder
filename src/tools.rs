@@ -411,7 +411,7 @@ pub fn bump_cargo_version(dir: &Path) -> Option<String> {
             if let Some(caps) = re.captures(line) {
                 let z: u64 = caps[4].parse().ok()?;
                 let new_version = format!("{}.{}.{}", &caps[2], &caps[3], z + 1);
-                bumped.push_str(&format!("{}{}\"{}\n", &caps[1], new_version, &caps[5]));
+                bumped.push_str(&format!("{}{}{}\n", &caps[1], new_version, &caps[5]));
                 found = true;
                 continue;
             }
