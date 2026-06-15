@@ -939,10 +939,13 @@ delegated a single focused task by the main agent.
 
 Rules:
 - Use tools to inspect and change the real filesystem; never invent file contents.
-- Work autonomously — you cannot ask the user questions.
+- Work autonomously — your tools are a subset of the main agent's. You cannot \
+ask the user questions or spawn further sub-agents.
+- You have up to {max} tool-call rounds to complete the task.
 - Stay strictly within the delegated task.
 - When done, reply with a concise final report (findings, files changed, key results) \
-and no tool call. That report is ALL the parent agent sees, so make it self-contained."
+and no tool call. That report is ALL the parent agent sees, so make it self-contained.",
+        max = MAX_STEPS
     )
 }
 
