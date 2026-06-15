@@ -441,17 +441,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     // model's raw path strings must be expanded the same way here.
     let mut paths: Vec<PathBuf> = paths.iter().map(|p| expand(p)).collect();
 
-    // Bump Cargo.toml version if present.
-    let cargo_toml = dir.join("Cargo.toml");
-    let version_bumped = if cargo_toml.exists() {
-        bump_cargo_version(dir)
-    } else {
-        None
-    };
-    if version_bumped.is_some() {
-        paths.push(cargo_toml.clone());
-    }
-
+    // Stage the edited files first, so we can check if there's anything to commit.
     let mut add = Command::new("git");
     add.arg("-C").arg(dir).arg("add").arg("--");
     for p in &paths {
@@ -460,6 +450,32 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     if add.stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) {
         return String::new();
     }
+
+    // Only bump Cargo.toml when the edited files actually changed.
+    let staged = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .map(|s| !s.success()) // --quiet exits 1 when there ARE differences
+        .unwrap_or(false);
+    if !staged {
+        return String::new(); // nothing changed
+    }
+
+    // Bump Cargo.toml version if present, and add it to the commit.
+    let cargo_toml = dir.join("Cargo.toml");
+    let version_bumped = if cargo_toml.exists() {
+        bump_cargo_version(dir)
+    } else {
+        None
+    };
+    if version_bumped.is_some() {
+        let mut add_cargo = Command::new("git");
+        add_cargo.arg("-C").arg(dir).arg("add").arg("--").arg(&cargo_toml);
+        add_cargo.stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
+    }
+
     // A fresh Pi may have no user.name/email; retry with a fallback identity
     // only if the first attempt fails (so configured identity is preserved).
     let run_commit = |ident: bool| {
@@ -468,10 +484,8 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         if ident {
             c.args(["-c", "user.name=picode", "-c", "user.email=picode@localhost"]);
         }
-        c.args(["commit", "--no-verify", "-m", message, "--"]);
-        for p in &paths {
-            c.arg(p);
-        }
+        // Commit all staged changes (the edited files + optional Cargo.toml bump).
+        c.args(["commit", "--no-verify", "-m", message]);
         c.stdout(Stdio::null()).stderr(Stdio::null()).status()
     };
     let committed = run_commit(false).map(|s| s.success()).unwrap_or(false)
