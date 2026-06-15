@@ -994,14 +994,45 @@ pub fn remember(note: &str) -> String {
         return format!("ERROR: {e}");
     }
     use std::io::Write;
+    let path = memory_path();
+    // Advisory lockfile to prevent concurrent instances from interleaving
+    // appends. create_new is atomic — only one process can own the lock at once.
+    let lock = path.with_extension("md.lock");
+    if let Err(e) = lock_acquire(&lock) {
+        return format!("ERROR: lock busy — another picode is writing memory: {e}");
+    }
     let res = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(memory_path())
+        .open(&path)
         .and_then(|mut f| writeln!(f, "- {note}"));
+    let _ = std::fs::remove_file(&lock);
     match res {
         Ok(()) => format!("OK remembered: {note}"),
         Err(e) => format!("ERROR: {e}"),
+    }
+}
+
+/// Acquire a lockfile with exponential backoff (up to ~500ms). Returns Ok(())
+/// or the last error from create_new.
+fn lock_acquire(lock_path: &std::path::Path) -> std::io::Result<()> {
+    let mut delay = std::time::Duration::from_millis(10);
+    loop {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(lock_path)
+        {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if delay > std::time::Duration::from_millis(200) {
+                    return Err(e);
+                }
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
