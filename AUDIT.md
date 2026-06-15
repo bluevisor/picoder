@@ -33,7 +33,7 @@ zero competitors do this.
 | 6 | bash() timeout TOCTOU race: kill targets potentially recycled PID | tools.rs:67-68 | ✅ kill-to-group eliminates race |
 | 7 | read_file loads entire file before truncating (OOM on large files) | tools.rs:193 | ✅ BufReader::take(1MB) |
 | 8 | No read timeout on streaming SSE body (hang on stalled server) | api.rs:295-340 | ✅ timeout_read(60s) |
-| 9 | Git subprocesses have no timeout (hang on NFS/credentials) | tools.rs:356-440 | |
+| 9 | Git subprocesses have no timeout (hang on NFS/credentials) | tools.rs:356-440 | ✅ run_proc helper with 10-30s timeouts |
 | 10 | web_fetch no per-byte progress timeout (slow-loris) | tools.rs:632-648 | |
 
 ## Medium Issues
@@ -41,7 +41,7 @@ zero competitors do this.
 | # | Issue | Location | Status |
 |---|-------|----------|--------|
 | 11 | Background job table never evicts entries (memory leak) | tools.rs:89-92 | ✅ evict finished at 64 |
-| 12 | /help lists only 7 of 13+ slash commands | ui.rs:1746 | |
+| 12 | /help lists only 7 of 13+ slash commands | ui.rs:1746 | ✅ all 13 commands listed |
 | 13 | One-shot discards reasoning/diff tokens (blank terminal) | main.rs:314 | ✅ prints reasoning+diffs |
 | 14 | Paste O(n²) performance; multiline flattened to single line | ui.rs:772-781 | ✅ bulk insert_str |
 | 15 | Merge conflicts cause silent commit failure | tools.rs:400-408 | ✅ stderr captured, surfaced to model |
@@ -61,11 +61,11 @@ zero competitors do this.
 | 24 | Transcript trimming (4000 lines) is silent | ui.rs:603-607 | ✅ notice inserted at top |
 | 25 | No "↓ new messages" indicator when scrolled up | ui.rs:1591-1601 | ✅ ↓ new in status bar |
 | 26 | last_ctrl_c timer never expires; 2nd press shows prompt again after 2s gap | ui.rs:1366-1376 | ✅ cleared after timeout, fresh first press |
-| 27 | Ctrl+D on non-empty composer does nothing | ui.rs:1398 | |
+| 27 | Ctrl+D on non-empty composer does nothing | ui.rs:1398 | ✅ Emacs-style delete-char |
 | 28 | Slash-suggestion ranking scans full history per keystroke | ui.rs:801-823 | |
 | 29 | final_text in one-shot can be stale (empty last reply) | main.rs:277-284 | |
 | 30 | --banner flag can swallow next positional as theme name | main.rs:108 | |
-| 31 | PICODE.md loading reads entire file before truncating | main.rs:222 | |
+| 31 | PICODE.md loading reads entire file before truncating | main.rs:222 | ✅ BufReader::take(1MB)
 | 32 | MCP server crashes have no recovery/restart logic | mcp.rs | |
 | 33 | Compaction summary loses image context | agent.rs:854-878 | |
 | 34 | / not showing suggestions while agent is processing | ui.rs | ✅ accepts Busy mode |
