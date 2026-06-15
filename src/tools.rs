@@ -511,16 +511,12 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
     for p in &paths {
         add.arg(p);
     }
-    if add.stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) {
+    if run_proc(&mut add, 10).map(|o| !o.status.success()).unwrap_or(true) {
         return String::new();
     }
 
     // Only bump Cargo.toml when the edited files actually changed.
-    let staged = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["diff", "--cached", "--quiet"])
-        .status()
+    let staged = git_status(dir, &["diff", "--cached", "--quiet"], 10)
         .map(|s| !s.success()) // --quiet exits 1 when there ARE differences
         .unwrap_or(false);
     if !staged {
