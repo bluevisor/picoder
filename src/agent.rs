@@ -12,7 +12,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-const MAX_STEPS: usize = 100;
 /// Fallback limit used when max_tool_calls is 0 ("auto"). High enough to let
 /// the model converge naturally; low enough to catch runaway loops.
 const AUTO_STEPS: usize = 500;
