@@ -434,13 +434,26 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
     out
 }
 
+/// Deferred banner colour so the logo reacts to `/theme` switches.
+#[derive(Clone, Copy)]
+enum BannerColor {
+    /// A fixed color (no palette reactivity).
+    Fixed(Color),
+    /// Rainbow art row: uses `palette.mono_banner` when set, else
+    /// the Apple rainbow at the given index.
+    Rainbow(usize),
+    /// Uses `palette.accent`.
+    Accent,
+}
+
 struct TLine {
     kind: Kind,
     text: String,
     /// First line of a block — shows the glyph; later lines align under it.
     lead: bool,
-    /// Optional per-line fg override (used by the rainbow banner).
-    color: Option<Color>,
+    /// Optional per-line fg override that resolves against the current palette.
+    /// Banner colors are deferred so theme switches update the logo in real time.
+    color: Option<BannerColor>,
 }
 
 enum Mode {
