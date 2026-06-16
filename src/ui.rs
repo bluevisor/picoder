@@ -1894,12 +1894,12 @@ impl App {
             let (kind, color) = match bl.role {
                 BRole::Art(i) => (
                     Kind::Banner,
-                    Some(self.palette.mono_banner.unwrap_or(rainbow[i % rainbow.len()])),
+                    Some(BannerColor::Rainbow(i)),
                 ),
                 BRole::Version => (Kind::Banner, None),
                 BRole::Tagline | BRole::Frame => (Kind::BannerDim, None),
                 // Non-bold accent: BannerDim base recolored to the accent.
-                BRole::Data => (Kind::BannerDim, Some(self.palette.accent)),
+                BRole::Data => (Kind::BannerDim, Some(BannerColor::Accent)),
             };
             self.transcript.push(TLine { kind, text: bl.text, lead: false, color });
         }
