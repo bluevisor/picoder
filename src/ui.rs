@@ -2663,7 +2663,7 @@ fn render_tline(
     // Highlight the user's own prompts with a full-width gray band so they
     // stand out when scrolling back through output.
     let bg = if kind == Kind::User {
-        Some(if g.rounded { p.user_bg } else { p.user_bg })
+        Some(p.user_bg)
     } else {
         None
     };
