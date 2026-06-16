@@ -1918,11 +1918,7 @@ impl App {
     /// A comfortable mid-gray for secondary text. True RGB over SSH (where ANSI
     /// gray can render as pure white); plain gray on the 16-color console.
     fn dim_text(&self) -> Color {
-        if self.ascii {
-            self.palette.secondary
-        } else {
-            self.palette.secondary
-        }
+        self.palette.secondary
     }
 
     // ----------------------------------------------------------- render -----
