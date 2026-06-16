@@ -323,10 +323,13 @@ impl Config {
                 self.provider = provider.clone();
                 self.base_url = base_url.clone();
                 self.model = model.clone();
+                // Swap to the new provider's saved key (or empty).
+                self.resolve_key();
             }
             ConfigPatch::BaseUrl(u) => self.base_url = u.clone(),
             ConfigPatch::ApiKey(k) => {
                 self.api_key = k.clone();
+                self.api_keys.insert(self.provider.clone(), k.clone());
                 self.key_from_env = false;
             }
             ConfigPatch::Thinking(b) => self.thinking = *b,
