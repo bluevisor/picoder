@@ -62,13 +62,6 @@ pub struct Config {
     /// persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
-
-    /// Resolve the effective API key for the current provider from the per-provider
-    /// map. Does NOT check env vars.
-    pub fn resolve_key(&mut self) {
-        self.api_key = self.api_keys.get(&self.provider).cloned().unwrap_or_default();
-        self.key_from_env = false;
-    }
 }
 
 fn default_true() -> bool {
