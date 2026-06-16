@@ -282,13 +282,39 @@ pub fn list_files(path: &str) -> String {
         Ok(e) => e,
         Err(e) => return format!("ERROR: {e}"),
     };
+    const MAX_ENTRIES: usize = 10_000;
     let mut names: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        names.push(if is_dir { format!("{name}/") } else { name });
+    let mut unreadable = 0u32;
+    for entry in entries {
+        match entry {
+            Ok(e) => {
+                let name = e.file_name().to_string_lossy().to_string();
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                names.push(if is_dir { format!("{name}/") } else { name });
+                if names.len() >= MAX_ENTRIES {
+                    names.push("... (directory listing truncated at 10 000 entries)".into());
+                    break;
+                }
+            }
+            Err(_) => {
+                if unreadable < 10 {
+                    names.push("(unreadable)".into());
+                }
+                unreadable += 1;
+            }
+        }
     }
-    names.sort();
+    if unreadable >= 10 {
+        names.push(format!("... (+{more} unreadable entries)", more = unreadable.saturating_sub(10)));
+    }
+    names.sort_by(|a, b| {
+        // Keep truncation/unreadable notes pinned to the bottom after sort.
+        match (a.starts_with("..."), b.starts_with("..."), a == "(unreadable)", b == "(unreadable)") {
+            (true, false, _, _) | (_, _, true, false) => std::cmp::Ordering::Greater,
+            (false, true, _, _) | (_, _, false, true) => std::cmp::Ordering::Less,
+            _ => a.cmp(b),
+        }
+    });
     if names.is_empty() {
         "(empty)".into()
     } else {

@@ -201,7 +201,10 @@ impl Config {
                     cfg.api_key = s.to_string();
                 }
                 if let Some(s) = v.get("theme").and_then(|x| x.as_str()) {
-                    cfg.theme = s.to_string();
+                    let s = s.to_string();
+                    // Validate; unknown theme names silently fall back to default
+                    // so a hand-edited config can't cause a broken UI.
+                    cfg.theme = if crate::ui::is_theme_name(&s) { s } else { default_theme() };
                 }
                 if let Some(n) = v.get("context_window").and_then(|x| x.as_u64()) {
                     cfg.context_window = n as u32;
