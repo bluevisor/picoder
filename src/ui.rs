@@ -183,7 +183,7 @@ const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macos"];
 
 fn palette_by_name(name: &str) -> Palette {
     match name {
-        "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
+        "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
         "msdos" | "dos" => MSDOS_PALETTE,
         "macos" | "macintosh" | "mac" => MACOS_PALETTE,
         _ => DEFAULT_PALETTE,
