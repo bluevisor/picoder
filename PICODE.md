@@ -79,7 +79,7 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - `/model` opens an interactive picker over the provider's model list —
   type to filter (handy for OpenRouter's hundreds), ↑/↓ + Enter to select;
   `/model <id|number>` still sets directly.
-- Slash commands: `/model /auto /reset /compact /config /mcp /memory /theme /init /clear /help /exit`.
+- Slash commands: `/model /auto /reset /compact /config /mcp /memory /theme /init /new /clear /help /exit`.
 - `/config`: interactive settings panel — provider preset (deepseek/openai/groq),
   base URL, model, API key (masked), thinking mode (DeepSeek-style
   `"thinking":{"type":"enabled"}` request field; off by default), default
