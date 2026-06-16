@@ -116,7 +116,7 @@ pub enum ConfigPatch {
 }
 
 fn default_theme() -> String {
-    "default".to_string()
+    "Default".to_string()
 }
 fn default_ctx() -> u32 {
     128_000

@@ -81,7 +81,7 @@ struct Palette {
 }
 
 const DEFAULT_PALETTE: Palette = Palette {
-    name: "default",
+    name: "Default",
     accent: Color::Cyan,
     assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
     assistant_glyph: Color::Green,
@@ -133,7 +133,7 @@ const APPLE2_PALETTE: Palette = Palette {
 
 // MS-DOS — light-gray text on black, C:\> prompt.
 const MSDOS_PALETTE: Palette = Palette {
-    name: "msdos",
+    name: "MSDOS",
     accent: Color::White,
     assistant: Color::Gray,
     assistant_glyph: Color::White,
@@ -260,12 +260,12 @@ const SGI_PALETTE: Palette = Palette {
     cursor: CursorKind::Block,
 };
 
-const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macOS", "SUN", "NeXT", "SGI"];
+const THEMES: &[&str] = &["Default", "Apple ][", "MSDOS", "macOS", "SUN", "NeXT", "SGI"];
 
 fn palette_by_name(name: &str) -> Palette {
     match name {
         "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
-        "msdos" | "dos" => MSDOS_PALETTE,
+        "MSDOS" | "msdos" | "dos" => MSDOS_PALETTE,
         "macOS" | "macos" | "macintosh" | "mac" => MACOS_PALETTE,
         "SUN" | "sun" | "solaris" | "sunos" => SUN_PALETTE,
         "NeXT" | "next" | "nextstep" => NEXTS_PALETTE,
@@ -277,7 +277,7 @@ fn palette_by_name(name: &str) -> Palette {
 /// Whether `name` is a known theme name (used by the CLI to avoid consuming
 /// the next argument after --banner as a theme if it's a task description).
 pub fn is_theme_name(name: &str) -> bool {
-    matches!(name, "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos" | "macOS" | "macos" | "macintosh" | "mac" | "SUN" | "sun" | "solaris" | "sunos" | "NeXT" | "next" | "nextstep" | "SGI" | "sgi" | "irix" | "indigo")
+    matches!(name, "Default" | "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "MSDOS" | "msdos" | "dos" | "macOS" | "macos" | "macintosh" | "mac" | "SUN" | "sun" | "solaris" | "sunos" | "NeXT" | "next" | "nextstep" | "SGI" | "sgi" | "irix" | "indigo")
 }
 
 /// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
@@ -1959,7 +1959,7 @@ impl App {
             "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
-            "  /theme [n]     open theme picker, or switch directly (default, Apple ][, msdos, macOS, SUN, NeXT, SGI)",
+            "  /theme [n]     open theme picker, or switch directly (Default, Apple ][, MSDOS, macOS, SUN, NeXT, SGI)",
             "  /init          summarize this project into PICODE.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
