@@ -636,6 +636,8 @@ pub struct App {
     pending: String,
     /// Messages typed while the agent was busy, sent in order as turns finish.
     queued: Vec<String>,
+    /// Suggested next prompt from the agent, shown as a dimmed hint.
+    suggestion: Option<String>,
     /// Highlighted row of the `/` command palette (clamped at use).
     suggest_idx: usize,
     /// State for Mode::Select (the /model list, etc.).
