@@ -24,7 +24,7 @@ use std::io::{IsTerminal, Read, Write};
 /// it has ≥4 cores or ≥2GB RAM (so the quad-core Jetson Nano, which can compile
 /// its own Rust, isn't told to avoid compiles); smaller hosts get a "keep it
 /// light" caution instead.
-fn system_prompt(auto_commit: bool) -> String {
+pub fn system_prompt(auto_commit: bool) -> String {
     let host = sysinfo::host_descriptor();
     let capable = sysinfo::cpu_cores() >= 4 || sysinfo::mem_total_mb().unwrap_or(512) >= 2048;
     let resource_rule = if !capable {

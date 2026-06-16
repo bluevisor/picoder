@@ -4,6 +4,7 @@
 use crate::api::{self, AccumCall, Message};
 use crate::config::{Config, ConfigPatch};
 use crate::mcp::Mcp;
+use crate::system_prompt;
 use crate::tools;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -142,6 +143,10 @@ pub fn spawn(
             mcp
         };
         let tools = api::tools_spec_with(mcp.tools());
+        // Estimate prompt tokens from the (possibly resumed) message list so
+        // auto-compaction triggers correctly on the first turn rather than
+        // starting from zero and never firing.
+        let est_prompt = estimate_tokens(&messages);
         let mut w = Worker {
             http: api::agent_http(),
             cfg,
@@ -152,7 +157,7 @@ pub fn spawn(
             ui,
             appr_rx,
             session,
-            last_prompt: 0,
+            last_prompt: est_prompt,
             quiet: false,
             pending_images: Vec::new(),
             mcp,
@@ -163,9 +168,12 @@ pub fn spawn(
             match cmd {
                 WorkerCmd::Quit => break,
                 WorkerCmd::Reset => {
+                    let old_len = w.messages.len();
                     w.messages.truncate(w.system_len);
                     w.last_prompt = 0;
-                    w.save_session();
+                    if w.messages.len() != old_len {
+                        w.save_session();
+                    }
                     let _ = w.ui.send(UiEvent::Notice("context cleared.".into()));
                     let _ = w.ui.send(UiEvent::Context(0));
                 }
@@ -181,7 +189,9 @@ pub fn spawn(
                 }
                 WorkerCmd::Compact => {
                     w.cancel.store(false, Ordering::Relaxed);
-                    w.compact();
+                    if w.compact() {
+                        w.save_session();
+                    }
                     let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::SetModel(m) => {
@@ -190,16 +200,7 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::ModelChanged(m.clone()));
                     let _ = w.ui.send(UiEvent::Notice(format!("model set to {m}")));
                 }
-                WorkerCmd::Patch(p) => {
-                    w.cfg.apply_patch(&p);
-                    Config::persist_patch(&p);
-                    // Provider presets also switch the model; reflect it.
-                    if let ConfigPatch::Provider { model, provider, .. } = &p {
-                        let _ = w.ui.send(UiEvent::ModelChanged(model.clone()));
-                        let _ = w.ui.send(UiEvent::Notice(format!("provider set to {provider}")));
-                        w.refresh_balance();
-                    }
-                }
+
                 WorkerCmd::ListModels => {
                     match api::list_models(&w.http, &w.cfg) {
                         Ok(ids) => {
@@ -283,6 +284,9 @@ impl Worker {
     }
 
     /// Auto-compact when the last prompt crossed 80% of the context window.
+    /// Does not save the session itself — the caller (User handler) saves
+    /// after the turn, avoiding a double-write when compaction runs right
+    /// before a new turn.
     fn maybe_auto_compact(&mut self) {
         let limit = self.cfg.context_window.max(1);
         if self.last_prompt as f64 >= 0.8 * limit as f64 {
@@ -297,12 +301,13 @@ impl Worker {
     /// Replace older turns with a model-written summary. Keeps the system
     /// prefix (prompt, memory, project context) and the most recent user
     /// exchange verbatim; everything in between is summarized with a plain
-    /// (tool-less) completion.
-    fn compact(&mut self) {
+    /// (tool-less) completion. Returns true when messages were compacted (the
+    /// caller should save the session) and false when there was nothing to do.
+    fn compact(&mut self) -> bool {
         let n = self.messages.len();
         if n <= self.system_len + 2 {
             let _ = self.ui.send(UiEvent::Notice("nothing to compact yet.".into()));
-            return;
+            return false;
         }
         // Keep the latest exchange (from the last user message on) verbatim —
         // unless it IS the whole conversation, then summarize everything.
@@ -315,7 +320,7 @@ impl Worker {
         let rendered = render_for_summary(&self.messages[self.system_len..tail_start]);
         if rendered.trim().is_empty() {
             let _ = self.ui.send(UiEvent::Notice("nothing to compact yet.".into()));
-            return;
+            return false;
         }
         let _ = self.ui.send(UiEvent::Notice("compacting context…".into()));
         let req = vec![
@@ -344,7 +349,6 @@ impl Worker {
                 });
                 new.extend_from_slice(&self.messages[tail_start..]);
                 self.messages = new;
-                self.save_session();
                 // Rough size estimate so the UI's ctx bar drops right away.
                 let est = estimate_tokens(&self.messages);
                 self.last_prompt = est;
@@ -353,12 +357,15 @@ impl Worker {
                     "context compacted: {n} → {} messages.",
                     self.messages.len()
                 )));
+                true
             }
             Ok(_) => {
                 let _ = self.ui.send(UiEvent::Error("compaction failed: empty summary.".into()));
+                false
             }
             Err(e) => {
                 let _ = self.ui.send(UiEvent::Error(format!("compaction failed: {e}")));
+                false
             }
         }
     }

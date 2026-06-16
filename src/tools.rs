@@ -165,6 +165,9 @@ pub fn bash_background(command: &str, cwd: &Path) -> String {
 
 /// Output produced since the last bash_output call, plus run status.
 pub fn bash_output(id: u64) -> String {
+    if id > u32::MAX as u64 {
+        return format!("ERROR: invalid job id {id} (max {})", u32::MAX);
+    }
     let mut map = jobs().lock().unwrap();
     let Some(job) = map.get_mut(&(id as u32)) else {
         return format!("ERROR: no background job {id}");
@@ -183,6 +186,9 @@ pub fn bash_output(id: u64) -> String {
 }
 
 pub fn bash_kill(id: u64) -> String {
+    if id > u32::MAX as u64 {
+        return format!("ERROR: invalid job id {id} (max {})", u32::MAX);
+    }
     let map = jobs().lock().unwrap();
     let Some(job) = map.get(&(id as u32)) else {
         return format!("ERROR: no background job {id}");
@@ -203,19 +209,46 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let p = expand(path);
     // Open and read only up to READ_FILE_LIMIT bytes to avoid OOM on huge files.
     const READ_FILE_LIMIT: usize = 1_000_000; // 1 MB
-    let content = match std::fs::File::open(&p) {
-        Ok(f) => {
-            let mut buf = String::new();
-            match std::io::BufReader::new(f)
-                .take(READ_FILE_LIMIT as u64)
-                .read_to_string(&mut buf)
-            {
-                Ok(_) => buf,
-                Err(e) => return format!("ERROR: read failed: {e}"),
-            }
-        }
+    let mut file = match std::fs::File::open(&p) {
+        Ok(f) => f,
         Err(e) => return format!("ERROR: {e}"),
     };
+    // Read raw bytes first: if the file is binary (null bytes or invalid
+    // UTF-8), return a hex dump instead of garbled text.
+    let mut raw = Vec::new();
+    if let Err(e) = std::io::Read::by_ref(&mut file)
+        .take(READ_FILE_LIMIT as u64)
+        .read_to_end(&mut raw)
+    {
+        return format!("ERROR: read failed: {e}");
+    }
+    let is_binary = raw.iter().any(|&b| b == 0);
+    let content = match String::from_utf8(raw) {
+        Ok(s) => s,
+        Err(_) => {
+            // Binary: return a hex dump of the first 512 bytes.
+            let preview = &raw[..raw.len().min(512)];
+            let hex: String = preview
+                .chunks(16)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let off = format!("{:08x}", i * 16);
+                    let bytes: String = chunk.iter().map(|b| format!(" {b:02x}")).collect();
+                    let ascii: String = chunk
+                        .iter()
+                        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                        .collect();
+                    format!("{off} {bytes: <49} |{ascii}|\n")
+                })
+                .collect();
+            return format!(
+                "Binary file ({} bytes total, hex dump of first {} bytes):\n{hex}",
+                raw.len(),
+                preview.len()
+            );
+        }
+    };
+    let truncated_read = is_binary || content.len() >= READ_FILE_LIMIT;
     let truncated_read = content.len() >= READ_FILE_LIMIT;
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let (slice, off) = match (start, end) {
@@ -342,6 +375,14 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
         let cur = current.get(&e.path).unwrap();
         let old_nfc: String = unicode_normalization::UnicodeNormalization::nfc(e.old_text.chars())
             .collect();
+        // Refuse no-op edits (old == new). They'd succeed but make no change
+        // and still trigger a git commit — a wasted checkpoint.
+        if old_nfc == e.new_text {
+            return Err(format!(
+                "ERROR: edit {}: old_text and new_text are identical (no change)",
+                i + 1
+            ));
+        }
         let n = cur.matches(&old_nfc).count();
         if n == 0 {
             return Err(format!("ERROR: edit {}: old_text not found in {}", i + 1, e.path));
@@ -387,6 +428,10 @@ pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
         .collect::<String>();
     let old_nfc = unicode_normalization::UnicodeNormalization::nfc(old_text.chars())
         .collect::<String>();
+    // Refuse no-op edits.
+    if old_nfc == new_text {
+        return EditPreview::Err("ERROR: old_text and new_text are identical (no change).".into());
+    }
     let n = data_nfc.matches(&old_nfc).count();
     if n == 0 {
         return EditPreview::Err("ERROR: old_text not found.".into());
