@@ -179,7 +179,7 @@ const MACOS_PALETTE: Palette = Palette {
     cursor: CursorKind::Reverse,
 };
 
-const THEMES: &[&str] = &["default", "apple2", "msdos", "macos"];
+const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macos"];
 
 fn palette_by_name(name: &str) -> Palette {
     match name {
