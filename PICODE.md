@@ -103,7 +103,7 @@ rustup target add arm-unknown-linux-musleabihf
 rustup target add armv7-unknown-linux-musleabihf
 rustup target add aarch64-unknown-linux-musl
 
-./build.sh           # build both targets under target/<triple>/release/picode
+./build.sh           # build all three targets under target/<triple>/release/picode
 ./build.sh deploy    # build + install the right binary per host in PICODE_HOSTS
 PICODE_HOSTS="pi@a pi@b" ./build.sh deploy   # custom deploy targets
 PI=user@host ./build.sh deploy               # install to a single host instead
