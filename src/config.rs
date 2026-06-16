@@ -23,8 +23,13 @@ pub struct Config {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    /// Effective API key for the current provider (resolved from api_keys or env;
+    /// NOT persisted directly — api_keys is the persistent store).
     #[serde(default)]
     pub api_key: String,
+    /// Per-provider API keys persisted to disk. Keyed by provider name.
+    #[serde(default)]
+    pub api_keys: BTreeMap<String, String>,
     #[serde(default = "default_theme")]
     pub theme: String,
     /// Model context window, for the ctx usage bar.
@@ -53,9 +58,17 @@ pub struct Config {
     /// Max tool-call rounds per turn. 0 means "auto" (an internal safe limit).
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: u32,
-    /// True when the key came from the environment; we never persist it then.
+    /// True when the current provider's key came from the environment; we never
+    /// persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
+
+    /// Resolve the effective API key for the current provider from the per-provider
+    /// map. Does NOT check env vars.
+    pub fn resolve_key(&mut self) {
+        self.api_key = self.api_keys.get(&self.provider).cloned().unwrap_or_default();
+        self.key_from_env = false;
+    }
 }
 
 fn default_true() -> bool {
@@ -129,6 +142,7 @@ impl Default for Config {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-pro".into(),
             api_key: String::new(),
+            api_keys: BTreeMap::new(),
             theme: default_theme(),
             context_window: default_ctx(),
             price_in: default_price_in(),
@@ -197,8 +211,20 @@ impl Config {
                 if let Some(s) = v.get("model").and_then(|x| x.as_str()) {
                     cfg.model = s.to_string();
                 }
+                // New-style per-provider keys (api_keys object).
+                if let Some(map) = v.get("api_keys").and_then(|x| x.as_object()) {
+                    for (k, val) in map {
+                        if let Some(s) = val.as_str() {
+                            cfg.api_keys.insert(k.clone(), s.to_string());
+                        }
+                    }
+                }
+                // Legacy single api_key field — use as fallback for the current
+                // provider if no per-provider entry exists.
                 if let Some(s) = v.get("api_key").and_then(|x| x.as_str()) {
-                    cfg.api_key = s.to_string();
+                    if !cfg.api_keys.contains_key(&cfg.provider) {
+                        cfg.api_keys.insert(cfg.provider.clone(), s.to_string());
+                    }
                 }
                 if let Some(s) = v.get("theme").and_then(|x| x.as_str()) {
                     let s = s.to_string();
@@ -234,6 +260,8 @@ impl Config {
                 }
             }
         }
+        // Resolve the effective key from the per-provider map.
+        cfg.resolve_key();
         cfg
     }
 
@@ -258,16 +286,26 @@ impl Config {
         let dir = config_dir();
         std::fs::create_dir_all(&dir).context("create config dir")?;
         let mut on_disk = self.clone();
-        if self.key_from_env {
-            on_disk.api_key = String::new();
+        // Update the per-provider map with the current effective key (unless env-sourced).
+        if !self.key_from_env && !self.api_key.is_empty() {
+            on_disk.api_keys.insert(self.provider.clone(), self.api_key.clone());
         }
         let mut json = serde_json::json!({
             "provider": on_disk.provider,
             "base_url": on_disk.base_url,
             "model": on_disk.model,
-            "api_key": on_disk.api_key,
             "theme": on_disk.theme,
         });
+        // Write per-provider keys (the canonical store). Also write the legacy
+        // api_key field with the current provider's key for older picode readers.
+        if !on_disk.api_keys.is_empty() {
+            json["api_keys"] = serde_json::to_value(&on_disk.api_keys).unwrap_or_default();
+            if let Some(k) = on_disk.api_keys.get(&on_disk.provider) {
+                if !self.key_from_env {
+                    json["api_key"] = serde_json::json!(k);
+                }
+            }
+        }
         // Preserve user customizations across model/theme rewrites; only
         // non-default values are written, keeping the common file minimal.
         if !on_disk.mcp_servers.is_empty() {
@@ -458,6 +496,7 @@ pub fn run_setup() -> Result<Config> {
     cfg.model = model;
     if !key.is_empty() {
         cfg.api_key = key;
+        cfg.api_keys.insert(cfg.provider.clone(), key);
         cfg.key_from_env = false;
     }
     cfg.save()?;
