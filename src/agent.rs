@@ -228,6 +228,23 @@ pub fn spawn(
                     }
                     let _ = w.ui.send(UiEvent::TurnDone);
                 }
+                WorkerCmd::Patch(p) => {
+                    w.cfg.apply_patch(&p);
+                    Config::persist_patch(&p);
+                    // Rebuild the system prompt when auto_commit toggles, so the
+                    // model's git-instructions stay in sync with the live config.
+                    if matches!(&p, ConfigPatch::AutoCommit(_)) {
+                        if !w.messages.is_empty() {
+                            w.messages[0] = Message::system(system_prompt(w.cfg.auto_commit));
+                        }
+                    }
+                    // Provider presets also switch the model; reflect it.
+                    if let ConfigPatch::Provider { model, provider, .. } = &p {
+                        let _ = w.ui.send(UiEvent::ModelChanged(model.clone()));
+                        let _ = w.ui.send(UiEvent::Notice(format!("provider set to {provider}")));
+                        w.refresh_balance();
+                    }
+                }
                 WorkerCmd::User { text, images } => {
                     w.cancel.store(false, Ordering::Relaxed);
                     w.maybe_auto_compact();
