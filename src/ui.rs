@@ -1867,6 +1867,7 @@ impl App {
 
     /// Run a slash command or send a user message to the worker.
     fn dispatch(&mut self, text: String, h: &Handles) {
+        self.suggestion = None;
         if let Some(cmd) = text.strip_prefix('/') {
             self.run_command(cmd.trim(), h);
             return;
