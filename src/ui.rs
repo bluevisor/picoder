@@ -971,6 +971,7 @@ impl App {
         if c.is_control() {
             return;
         }
+        self.suggestion = None;
         let byte = self.byte_at(self.cursor);
         self.input.insert(byte, c);
         self.cursor += 1;
