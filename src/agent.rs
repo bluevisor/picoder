@@ -260,16 +260,32 @@ pub fn spawn(
                     w.refresh_balance(); // reflect spend after the turn
                     let _ = w.ui.send(UiEvent::TurnDone);
                     // Fire a cheap follow-up suggestion call in the background.
+                    // Uses its own cancel flag so a mid-turn Esc in the next turn
+                    // doesn't interrupt it.
                     if !w.quiet {
                         let suggest_ui = w.ui.clone();
                         let suggest_http = w.http.clone();
                         let suggest_cfg = w.cfg.clone();
-                        let mut suggest_msgs = w.messages.clone();
-                        let cancel_flag = w.cancel.clone();
+                        // Only send the last few turns (system prefix + ~6 most recent
+                        // messages), plus the suggestion prompt as a user message.
+                        let mut suggest_msgs: Vec<Message> = w.messages[..w.system_len]
+                            .iter()
+                            .cloned()
+                            .collect();
+                        let tail = w.messages[w.system_len..]
+                            .iter()
+                            .rev()
+                            .take(6)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        suggest_msgs.extend(tail.into_iter().rev());
+                        suggest_msgs.push(Message::user(
+                            "Based on the conversation above, suggest ONE short follow-up \
+                             prompt the user might want to ask next. Reply with ONLY the \
+                             prompt text, no other words, no quotes, no explanation.",
+                        ));
+                        let cancel_flag = std::sync::atomic::AtomicBool::new(false);
                         std::thread::spawn(move || {
-                            suggest_msgs.push(Message::system(
-                                "Based on the conversation, suggest ONE short follow-up prompt the user might want to ask next. Reply with ONLY the prompt text, no other words, no quotes, no explanation."
-                            ));
                             match api::chat_plain(&suggest_http, &suggest_cfg, &suggest_msgs, &cancel_flag) {
                                 Ok(text) => {
                                     let text = text.trim().trim_matches('"').trim();
