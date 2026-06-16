@@ -155,12 +155,37 @@ const MSDOS_PALETTE: Palette = Palette {
     cursor: CursorKind::Block,
 };
 
-const THEMES: &[&str] = &["default", "apple2", "msdos"];
+// macOS — modern full-color terminal, macOS system palette on dark background.
+const MACOS_PALETTE: Palette = Palette {
+    name: "macos",
+    accent: Color::Rgb(0, 122, 255),          // macOS system blue
+    assistant: Color::White,
+    assistant_glyph: Color::Rgb(100, 210, 255), // light blue
+    reasoning: Color::Rgb(142, 142, 147),       // macOS system gray
+    tool: Color::Rgb(255, 149, 0),            // macOS orange
+    tool_result: Color::Rgb(174, 174, 178),     // macOS light gray
+    notice: Color::Rgb(152, 152, 157),
+    code: Color::Rgb(90, 200, 245),           // macOS teal
+    heading: Color::White,
+    diff_add: Color::Rgb(52, 199, 89),        // macOS green
+    diff_del: Color::Rgb(255, 59, 48),        // macOS red
+    diff_ctx: Color::Rgb(99, 99, 102),
+    error: Color::Rgb(255, 69, 58),           // bright macOS red
+    mono_banner: Some(Color::Rgb(0, 122, 255)), // blue Apple logo
+    chrome: Color::Rgb(72, 72, 74),
+    secondary: Color::Rgb(152, 152, 157),
+    user_bg: Color::Rgb(44, 44, 46),          // macOS dark elevated bg
+    prompt: Some("~ "),
+    cursor: CursorKind::Reverse,
+};
+
+const THEMES: &[&str] = &["default", "apple2", "msdos", "macos"];
 
 fn palette_by_name(name: &str) -> Palette {
     match name {
         "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
         "msdos" | "dos" => MSDOS_PALETTE,
+        "macos" | "macintosh" | "mac" => MACOS_PALETTE,
         _ => DEFAULT_PALETTE,
     }
 }
@@ -168,7 +193,7 @@ fn palette_by_name(name: &str) -> Palette {
 /// Whether `name` is a known theme name (used by the CLI to avoid consuming
 /// the next argument after --banner as a theme if it's a task description).
 pub fn is_theme_name(name: &str) -> bool {
-    matches!(name, "default" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos")
+    matches!(name, "default" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos" | "macos" | "macintosh" | "mac")
 }
 
 /// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
