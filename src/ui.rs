@@ -1853,6 +1853,7 @@ impl App {
 
     /// Pull the trimmed composer text (recording it in history), or None if empty.
     fn take_input(&mut self) -> Option<String> {
+        self.suggestion = None;
         let text = self.input.trim().to_string();
         self.input.clear();
         self.cursor = 0;
