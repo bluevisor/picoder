@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn expand(path: &str) -> PathBuf {
     let raw = if let Some(rest) = path.strip_prefix("~/") {
@@ -75,7 +75,7 @@ fn deny_symlink(p: &Path, path: &str, verb: &str) -> Option<String> {
 
 // ----------------------------------------------------------------- bash -----
 
-pub fn bash(command: &str, timeout: u64, cwd: &Path) -> String {
+pub fn bash(command: &str, timeout: u64, cwd: &Path, cancel: &AtomicBool) -> String {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(command)
@@ -83,7 +83,7 @@ pub fn bash(command: &str, timeout: u64, cwd: &Path) -> String {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Own process group so we can kill the whole tree on timeout.
+    // Own process group so we can kill the whole tree on timeout or interrupt.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -98,32 +98,51 @@ pub fn bash(command: &str, timeout: u64, cwd: &Path) -> String {
     std::thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());
     });
-    match rx.recv_timeout(Duration::from_secs(timeout.max(1))) {
-        Ok(Ok(output)) => {
-            let mut out = String::new();
-            out.push_str(&String::from_utf8_lossy(&output.stdout));
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.trim().is_empty() {
-                if !out.is_empty() {
-                    out.push('\n');
+    // Poll on a short interval so an Esc (cancel) interrupts a long-running
+    // command instead of blocking the worker until the timeout elapses.
+    let deadline = Instant::now() + Duration::from_secs(timeout.max(1));
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(output)) => {
+                let mut out = String::new();
+                out.push_str(&String::from_utf8_lossy(&output.stdout));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.trim().is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str("[stderr]\n");
+                    out.push_str(&stderr);
                 }
-                out.push_str("[stderr]\n");
-                out.push_str(&stderr);
+                let code = output.status.code().unwrap_or(-1);
+                out = out.trim_end().to_string();
+                out.push_str(&format!("\n[exit {code}]"));
+                return truncate(out.trim(), MAX_TOOL_OUTPUT);
             }
-            let code = output.status.code().unwrap_or(-1);
-            out = out.trim_end().to_string();
-            out.push_str(&format!("\n[exit {code}]"));
-            truncate(out.trim(), MAX_TOOL_OUTPUT)
+            Ok(Err(e)) => return format!("ERROR: {e}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Negative pid = kill whole process group (sh + grandchildren).
+                // Routed through `sh -c` to match bash_kill (a bare
+                // `Command::new("kill")` mis-targets the group in some sandboxes).
+                let kill = |pid: u32| {
+                    let _ = Command::new("sh").arg("-c").arg(format!("kill -KILL -{pid}")).status();
+                };
+                if cancel.load(Ordering::Relaxed) {
+                    kill(pid);
+                    let _ = rx.recv_timeout(Duration::from_millis(500));
+                    return "ERROR: interrupted by user".to_string();
+                }
+                if Instant::now() >= deadline {
+                    kill(pid);
+                    // Give the waiter thread a moment to reap the killed child.
+                    let _ = rx.recv_timeout(Duration::from_millis(500));
+                    return format!("ERROR: command timed out after {timeout}s");
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return "ERROR: shell waiter disconnected".to_string();
+            }
         }
-        Ok(Err(e)) => format!("ERROR: {e}"),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            // Negative pid = kill whole process group (sh + grandchildren).
-            let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
-            // Give the waiter thread a moment to reap the killed child.
-            let _ = rx.recv_timeout(Duration::from_millis(500));
-            format!("ERROR: command timed out after {timeout}s")
-        }
-        Err(e) => format!("ERROR: {e}"),
     }
 }
 
@@ -767,6 +786,31 @@ pub fn git_status_line(dir: &Path, sep: &str) -> Option<String> {
         format!("{changed} changed")
     };
     Some(format!("{branch}{sep}{state}"))
+}
+
+/// Current branch name and whether the working tree is dirty, for the UI title.
+/// `None` when `dir` is not inside a git repo.
+pub fn git_head(dir: &Path) -> Option<(String, bool)> {
+    if !in_git_repo(dir) {
+        return None;
+    }
+    let branch = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let dirty = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    Some((branch, dirty))
 }
 
 // ----------------------------------------------------------- grep/glob ------
@@ -1486,6 +1530,33 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(bash_output(id).contains("[exited"), "job should be dead");
         assert!(bash_output(999).starts_with("ERROR"));
+    }
+
+    #[test]
+    fn bash_cancel_interrupts_long_command() {
+        // A long sleep must be killed within ~poll interval of the cancel flag
+        // flipping (the Esc-interrupt path), not run to completion.
+        let cwd = std::env::temp_dir();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            c2.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        let out = bash("sleep 30", 30, &cwd, &cancel);
+        let elapsed = start.elapsed();
+        assert!(out.contains("interrupted by user"), "got: {out}");
+        assert!(elapsed < Duration::from_secs(3), "took too long: {elapsed:?}");
+    }
+
+    #[test]
+    fn bash_runs_without_cancel() {
+        let cwd = std::env::temp_dir();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let out = bash("echo hi", 10, &cwd, &cancel);
+        assert!(out.contains("hi"), "got: {out}");
+        assert!(out.contains("[exit 0]"), "got: {out}");
     }
 
     #[test]

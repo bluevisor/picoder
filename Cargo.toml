@@ -1,6 +1,6 @@
 [package]
 name = "picode"
-version = "0.2.134"
+version = "0.2.135"
 edition = "2021"
 description = "A tiny full-screen agentic coding CLI for the Raspberry Pi Zero W"
 
@@ -27,14 +27,14 @@ lto = true
 codegen-units = 1
 strip = true
 
-# Fast on-device iteration build for the Jetson Nano. Thin LTO + parallel
-# codegen-units cut incremental rebuilds ~40% vs release's fat LTO/codegen-units=1
-# (measured ~2m30s -> ~1m25s on a Nano 2GB), at negligible runtime cost. Runtime
-# tuning (target-cpu=cortex-a57, opt-level=3) still comes from .cargo/config.toml
-# for the native gnu triple, so this matches release on speed while building
-# faster. Build with `cargo build --profile jetson`; binary lands at
-# target/jetson/picode. Use the release profile for the canonical installed binary.
-[profile.jetson]
+# Fast on-device iteration build for the Jetson AGX Orin. Thin LTO + parallel
+# codegen-units cut incremental rebuilds ~40% vs release's fat LTO/codegen-units=1,
+# at negligible runtime cost. Runtime tuning (target-cpu=cortex-a78, opt-level=3)
+# still comes from .cargo/config.toml for the native gnu triple, so this matches
+# release on speed while building faster. Build with `cargo build --profile orin`;
+# binary lands at target/orin/picode. Use the release profile for the canonical
+# installed binary.
+[profile.orin]
 inherits = "release"
 lto = "thin"
 codegen-units = 16

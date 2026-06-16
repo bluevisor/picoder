@@ -460,6 +460,8 @@ fn banner_lines(w: usize, ascii: bool, status: &[String]) -> Vec<BLine> {
     let art_pad = " ".repeat(w.saturating_sub(artw) / 2);
 
     let mut out = Vec::new();
+    // Breathing room between the box title (working path) and the logo.
+    out.push(BLine { text: String::new(), role: BRole::Frame });
     for (i, l) in art.iter().enumerate() {
         out.push(BLine { text: format!("{art_pad}{l}"), role: BRole::Art(i) });
     }
@@ -625,6 +627,27 @@ pub struct UiConfig {
     pub settings: Config,
 }
 
+/// The current working directory as a display string, with `$HOME` collapsed to
+/// `~`. Falls back to `picode` if the cwd can't be read.
+fn cwd_label() -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return "picode".to_string(),
+    };
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            if let Ok(rest) = cwd.strip_prefix(&home) {
+                return if rest.as_os_str().is_empty() {
+                    "~".to_string()
+                } else {
+                    format!("~/{}", rest.display())
+                };
+            }
+        }
+    }
+    cwd.display().to_string()
+}
+
 pub struct App {
     transcript: Vec<TLine>,
     live: String,
@@ -660,7 +683,6 @@ pub struct App {
     spinner: usize,
     spin_counter: usize,
     model_info: String,
-    cwd: String,
     last_models: Vec<String>,
     should_quit: bool,
     esc_deadline: Option<Instant>,
@@ -699,14 +721,18 @@ pub struct App {
     sess_completion: u64,
     balance: Option<String>,
     settings: Config,
+    /// Current working directory shown in the output box title, with $HOME
+    /// collapsed to `~`. Computed once at startup (picode never chdirs).
+    cwd_label: String,
+    /// Cached `(branch, dirty)` for the title's git indicator. `None` outside a
+    /// repo. Refreshed on a throttle (see `git_checked_at`) since the agent's
+    /// edits/auto-commits change the dirty state mid-session.
+    git_head: Option<(String, bool)>,
+    git_checked_at: Option<Instant>,
 }
 
 impl App {
     pub fn new(cfg: UiConfig, history: Vec<String>) -> App {
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "~".into());
         let hist_idx = history.len();
         let mut app = App {
             transcript: Vec::new(),
@@ -734,7 +760,6 @@ impl App {
             spinner: 0,
             spin_counter: 0,
             model_info: cfg.model,
-            cwd,
             last_models: Vec::new(),
             should_quit: false,
             esc_deadline: None,
@@ -759,13 +784,32 @@ impl App {
             sess_completion: 0,
             balance: None,
             settings: cfg.settings,
+            cwd_label: cwd_label(),
+            git_head: None,
+            git_checked_at: None,
         };
+        app.refresh_git_head();
         app.rebuild_cmd_uses();
         app
     }
 
     pub fn history(&self) -> &[String] {
         &self.history
+    }
+
+    /// Recompute the cached git branch/dirty state for the title, at most once
+    /// every 2s. Spawning `git status` runs on the UI thread, so the throttle
+    /// keeps it off the hot render path while still reflecting edits/commits.
+    fn refresh_git_head(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.git_checked_at {
+            if now.duration_since(last) < Duration::from_secs(2) {
+                return;
+            }
+        }
+        self.git_checked_at = Some(now);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        self.git_head = crate::tools::git_head(&cwd);
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
@@ -2218,9 +2262,23 @@ impl App {
     }
 
     fn render_output(&mut self, f: &mut Frame, area: Rect) {
-        let title = Line::from(vec![
-            Span::styled(" picode ", Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)),
-        ]);
+        self.refresh_git_head();
+        let mut title_spans = vec![
+            Span::styled(format!(" {} ", self.cwd_label), Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)),
+        ];
+        if let Some((branch, dirty)) = self.git_head.clone() {
+            let dot = if self.ascii || self.single_width { "*" } else { "●" };
+            let dot_color = if dirty { self.palette.code } else { self.palette.diff_add };
+            title_spans.push(Span::styled(
+                format!("{branch} "),
+                Style::default().fg(self.palette.secondary),
+            ));
+            title_spans.push(Span::styled(
+                format!("{dot} "),
+                Style::default().fg(dot_color),
+            ));
+        }
+        let title = Line::from(title_spans);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(self.border_type())
@@ -2635,7 +2693,7 @@ impl App {
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::styled(text, Style::default().fg(color)),
             Span::styled("  (shift+tab/ctrl+p to cycle)", Style::default().fg(self.dim_text())),
-            Span::styled(format!("   {}", self.cwd), Style::default().fg(self.dim_text())),
+            Span::styled(format!("   picode v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(self.dim_text())),
         ];
         if self.scrolled_up {
             spans.push(Span::styled(
@@ -2685,25 +2743,41 @@ fn pad1(r: Rect) -> Rect {
     Rect { x: r.x + 1, width: r.width.saturating_sub(2), ..r }
 }
 
-/// A solid mini progress bar (green→yellow→red as it fills).
-fn bar(frac: f64, width: usize, chrome: Color) -> Vec<Span<'static>> {
+/// A solid mini progress bar (green→yellow→red as it fills). The empty track is
+/// a dimmed shade of the same hue as the fill, so the bar reads as one element.
+fn bar(frac: f64, width: usize, _chrome: Color) -> Vec<Span<'static>> {
     let frac = frac.clamp(0.0, 1.0);
     let filled = (frac * width as f64).round() as usize;
     let fill = if frac < 0.8 {
-        Color::Green
+        Color::Rgb(40, 200, 90)
     } else if frac < 0.95 {
-        Color::Yellow
+        Color::Rgb(220, 190, 50)
     } else {
-        Color::Red
+        Color::Rgb(220, 70, 70)
     };
+    // Same hue, ~22% brightness — a dim track that matches the fill's color.
+    let track = scale_rgb(fill, 0.22);
     let mut v = Vec::new();
     if filled > 0 {
         v.push(Span::styled(" ".repeat(filled), Style::default().bg(fill)));
     }
     if filled < width {
-        v.push(Span::styled(" ".repeat(width - filled), Style::default().bg(chrome)));
+        v.push(Span::styled(" ".repeat(width - filled), Style::default().bg(track)));
     }
     v
+}
+
+/// Scale an RGB color's brightness by `factor` (0.0–1.0), preserving hue.
+/// Non-RGB colors are returned unchanged.
+fn scale_rgb(c: Color, factor: f64) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f64 * factor) as u8,
+            (g as f64 * factor) as u8,
+            (b as f64 * factor) as u8,
+        ),
+        other => other,
+    }
 }
 
 fn humanize(n: u64) -> String {

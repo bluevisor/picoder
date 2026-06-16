@@ -119,7 +119,8 @@ fn default_theme() -> String {
     "Default".to_string()
 }
 fn default_ctx() -> u32 {
-    128_000
+    // Matches the default model, DeepSeek v4 Pro (1M-token context window).
+    1_000_000
 }
 fn default_price_in() -> f64 {
     0.27

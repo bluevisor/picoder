@@ -779,7 +779,7 @@ impl Worker {
                 let r = if background {
                     tools::bash_background(cmd, &cwd)
                 } else {
-                    tools::bash(cmd, timeout, &cwd)
+                    tools::bash(cmd, timeout, &cwd, &self.cancel)
                 };
                 self.result_event(&r);
                 r

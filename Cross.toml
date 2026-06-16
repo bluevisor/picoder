@@ -1,0 +1,5 @@
+# cross runs builds inside a container; by default it does not forward RUSTFLAGS.
+# The release workflow sets RUSTFLAGS for the CPU-tuned Jetson musl builds, so
+# pass it through. Harmless for the other targets (RUSTFLAGS is unset there).
+[build.env]
+passthrough = ["RUSTFLAGS"]
