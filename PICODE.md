@@ -13,7 +13,7 @@ cannot compile Rust** — see "Building" below.
 ```
 Cargo.toml            deps + release + jetson profiles (static musl, size-optimized)
 .cargo/config.toml    cross-linkers for ARMv6/ARMv7/aarch64 musl + aarch64 gnu (Jetson)
-build.sh              cross-compile (and `build.sh deploy` to install on the Pis)
+build.sh              cross-compile (+ deploy/pull to sync with Pis)
 src/
   main.rs             CLI args, first-run setup, one-shot mode (+ --output), session/context wiring
   config.rs           ~/.config/picode/config.json (incl. mcp_servers), setup wizard, session paths
