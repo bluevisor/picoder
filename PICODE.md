@@ -69,7 +69,7 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   modified keys (e.g. Option+Backspace) are reported unambiguously instead of
   being flattened to a bare Backspace by terminals like Warp.
 - ASCII fallback + clear-on-exit for the Pi's framebuffer console (`TERM=linux`).
-- Launch banner: Apple-rainbow PICODE block art + live status (MEM, WiFi SSID + IP).
+- Launch banner: rainbow-color PICODE logo + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `default`, `apple2` (green phosphor, `] ▒`),
   `msdos` (gray, `C:\>`); persisted in config. Theme sets colors, prompt, cursor.
 - `/model` opens an interactive picker over the provider's model list —
@@ -93,8 +93,8 @@ musl gcc as linker, so no extra toolchain is needed beyond
 
 ```
 # one-time toolchain setup:
-brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
-brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
+brew install messense/macOS-cross-toolchains/arm-unknown-linux-musleabihf
+brew install messense/macOS-cross-toolchains/aarch64-unknown-linux-musl
 rustup target add arm-unknown-linux-musleabihf
 rustup target add aarch64-unknown-linux-musl
 
