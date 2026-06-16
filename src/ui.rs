@@ -707,6 +707,7 @@ impl App {
             hist_idx,
             pending: String::new(),
             queued: Vec::new(),
+            suggestion: None,
             suggest_idx: 0,
             picker: None,
             mode: Mode::Idle,
