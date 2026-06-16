@@ -1624,7 +1624,17 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Tab => self.complete(),
+            KeyCode::Tab => {
+                if self.input.is_empty() {
+                    if let Some(ref s) = self.suggestion {
+                        self.input = s.clone();
+                        self.cursor = self.char_len();
+                        self.suggestion = None;
+                        return;
+                    }
+                }
+                self.complete()
+            }
             KeyCode::Char('u') if ctrl => {
                 let byte = self.byte_at(self.cursor);
                 self.input.replace_range(0..byte, "");
