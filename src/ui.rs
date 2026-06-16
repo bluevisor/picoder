@@ -1359,6 +1359,7 @@ impl App {
             3 => {
                 if !val.is_empty() {
                     self.settings.api_key = val.clone();
+                    self.settings.api_keys.insert(self.settings.provider.clone(), val.clone());
                     self.settings.key_from_env = false;
                     let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
                 }
