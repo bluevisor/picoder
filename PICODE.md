@@ -100,6 +100,7 @@ musl gcc as linker, so no extra toolchain is needed beyond
 brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
 brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
 rustup target add arm-unknown-linux-musleabihf
+rustup target add armv7-unknown-linux-musleabihf
 rustup target add aarch64-unknown-linux-musl
 
 ./build.sh           # build both targets under target/<triple>/release/picode
