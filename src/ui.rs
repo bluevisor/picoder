@@ -948,6 +948,7 @@ impl App {
 
     pub fn on_paste(&mut self, s: String) {
         if matches!(self.mode, Mode::Idle | Mode::Busy) {
+            self.suggestion = None;
             let mut filtered = String::with_capacity(s.len());
             for c in s.chars() {
                 if c == '\n' || c == '\r' || c == '\t' {
