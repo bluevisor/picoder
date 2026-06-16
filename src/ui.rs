@@ -1858,7 +1858,7 @@ impl App {
             "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
-            "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos)",
+            "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos, macos)",
             "  /init          summarize this project into PICODE.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
@@ -2412,7 +2412,7 @@ impl App {
         spans.push(sep());
         spans.push(Span::styled("ctx ", gray));
         let frac = self.last_prompt_tokens as f64 / self.ctx_limit as f64;
-        spans.extend(bar(frac, 8));
+        spans.extend(bar(frac, 8, self.dim_text()));
         spans.push(Span::styled(
             format!(" {}%", (frac.clamp(0.0, 1.0) * 100.0).round() as u32),
             gray,
