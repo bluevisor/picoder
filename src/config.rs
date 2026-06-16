@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One MCP server entry from config.json (`mcp_servers`). Spawned over stdio.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -161,6 +161,29 @@ pub fn config_path() -> PathBuf {
 
 pub fn memory_path() -> PathBuf {
     config_dir().join("memory.md")
+}
+
+/// Write `data` to `path` atomically: write a sibling temp file, fsync it, then
+/// rename over the target. A power loss mid-write (common on a Pi running off an
+/// SD card) then leaves either the intact old file or the complete new one —
+/// never the truncated mix a bare `fs::write` can produce. The temp name is
+/// per-process so two picode instances don't clobber each other's temp file.
+pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 pub fn history_path() -> PathBuf {
@@ -326,7 +349,7 @@ impl Config {
             json["max_tool_calls"] = serde_json::json!(on_disk.max_tool_calls);
         }
         let path = config_path();
-        std::fs::write(&path, serde_json::to_string_pretty(&json)?)
+        atomic_write(&path, serde_json::to_string_pretty(&json)?.as_bytes())
             .context("write config")?;
         set_private(&path);
         Ok(())
@@ -435,6 +458,27 @@ mod tests {
         }
         // Unknown/custom providers get only the explicit override.
         assert_eq!(key_env_vars("my-llm-box"), &["PICODE_API_KEY"]);
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join("picode_atomic_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"old contents").unwrap();
+        atomic_write(&path, b"new contents").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new contents");
+        // The per-process temp file must not survive a successful write.
+        let leftover = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp."));
+        assert!(!leftover, "atomic_write left a temp file behind");
+        // Writing to a brand-new path works too.
+        let fresh = dir.join("fresh.json");
+        atomic_write(&fresh, b"{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "{}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

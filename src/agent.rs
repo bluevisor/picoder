@@ -2,7 +2,7 @@
 //! the blocking model/tool loop, talking to the UI thread over channels.
 
 use crate::api::{self, AccumCall, Message};
-use crate::config::{Config, ConfigPatch};
+use crate::config::{atomic_write, Config, ConfigPatch};
 use crate::mcp::Mcp;
 use crate::system_prompt;
 use crate::tools;
@@ -320,7 +320,9 @@ impl Worker {
             })
             .collect();
         if let Ok(json) = serde_json::to_string(&slim) {
-            let _ = std::fs::write(path, json);
+            // Atomic: a power loss mid-rewrite must not corrupt the session that
+            // `--continue` depends on — leave the previous turn's file intact.
+            let _ = atomic_write(path, json.as_bytes());
         }
     }
 

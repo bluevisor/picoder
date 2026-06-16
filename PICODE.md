@@ -154,3 +154,24 @@ Each server is spawned over stdio at launch; its tools appear as
 - **Config/environment-driven integration tests**. MCP handshake and web_search
   tests currently `#[ignore]` because they need a live server; a `PICODE_TEST=1`
   gate would run them in CI with a containerized MCP stub.
+
+## Performance / safety notes
+
+- **Transcript render cache** (`ui.rs`). `ensure_display_cache` renders the
+  static (non-`live`) transcript into `disp_cache` once and reuses it until the
+  content (`tver`, bumped via `dirty()`/`set_palette`) or terminal width
+  changes; each frame clones only the visible window. This avoids re-wrapping
+  thousands of lines per streamed token on a single-core Pi.
+- **Atomic state writes** (`config::atomic_write`). `config.json` and session
+  files are written to a per-process temp file, fsync'd, then renamed over the
+  target, so a power loss on the SD card never leaves a truncated file.
+- **Symmetric symlink refusal** (`tools::deny_symlink`). `read`/`list` refuse
+  symlinked paths just like `write`/`edit`; `expand` lexically collapses
+  `.`/`..` so an approved path is the path actually used.
+
+## CI
+
+`.github/workflows/ci.yml` runs `cargo test` on the host (hard gate) plus a
+`cross build --release` for all three deploy targets (ARMv6 / ARMv7 / aarch64),
+so a broken cross-compile is caught in CI rather than at deploy time. Clippy and
+`cargo fmt --check` run advisory-only until the tree is clean.

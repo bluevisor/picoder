@@ -678,6 +678,17 @@ pub struct App {
     glyphs: Glyphs,
     ascii: bool,
     palette: Palette,
+    /// Cached rendered lines for the static (non-`live`) transcript. Rebuilding
+    /// this for every frame meant re-wrapping thousands of lines per streamed
+    /// token — the dominant cost on a single-core Pi. We rebuild only when the
+    /// transcript content (`tver`) or terminal `width` actually changes, and
+    /// each frame clones just the visible window.
+    disp_cache: Vec<Line<'static>>,
+    disp_cache_width: usize,
+    disp_cache_tver: u64,
+    /// Bumped on every transcript-content or palette change to invalidate
+    /// `disp_cache`. (`single_width`/`glyphs` are fixed at construction.)
+    tver: u64,
     // Claude-style status data:
     perm: std::sync::Arc<std::sync::atomic::AtomicU8>,
     ctx_limit: u32,
@@ -735,6 +746,10 @@ impl App {
             glyphs: if cfg.ascii { GLYPHS_A } else { GLYPHS_U },
             ascii: cfg.ascii,
             palette: palette_by_name(&cfg.theme),
+            disp_cache: Vec::new(),
+            disp_cache_width: usize::MAX,
+            disp_cache_tver: u64::MAX,
+            tver: 0,
             perm: cfg.perm,
             ctx_limit: cfg.ctx_limit.max(1),
             price_in: cfg.price_in,
@@ -760,7 +775,21 @@ impl App {
         self.after_push();
     }
 
+    /// Invalidate the transcript render cache. Call after any change to
+    /// `transcript` content or `palette`.
+    fn dirty(&mut self) {
+        self.tver = self.tver.wrapping_add(1);
+    }
+
+    /// Swap the active palette and invalidate the render cache (cached lines
+    /// carry the old theme's colors).
+    fn set_palette(&mut self, p: Palette) {
+        self.palette = p;
+        self.dirty();
+    }
+
     fn after_push(&mut self) {
+        self.dirty();
         if self.transcript.len() > MAX_TRANSCRIPT {
             let drop = self.transcript.len() - MAX_TRANSCRIPT;
             // Push a dim notice so the user knows lines were trimmed.
@@ -850,6 +879,7 @@ impl App {
                     };
                     self.transcript.push(TLine { kind, text: ln.to_string(), lead: true, color: None });
                 }
+                self.dirty();
                 self.follow = true;
             }
             UiEvent::ToolResult { ok, preview } => {
@@ -1111,7 +1141,7 @@ impl App {
             }
             Mode::ThemeSelect { prev, .. } => {
                 // Cancel the picker, restoring the theme we started with.
-                self.palette = palette_by_name(&prev.clone());
+                self.set_palette(palette_by_name(&prev.clone()));
                 self.mode = Mode::Idle;
             }
             Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
@@ -1232,14 +1262,14 @@ impl App {
     /// Live-preview the theme at `idx` (applies the palette so the whole UI
     /// updates) while keeping the picker open.
     fn preview_theme(&mut self, idx: usize, prev: String) {
-        self.palette = palette_by_name(THEMES[idx]);
+        self.set_palette(palette_by_name(THEMES[idx]));
         self.mode = Mode::ThemeSelect { cursor: idx, prev };
     }
 
     /// Commit the theme at `idx`: persist it and close the picker.
     fn commit_theme(&mut self, idx: usize) {
         let name = THEMES[idx];
-        self.palette = palette_by_name(name);
+        self.set_palette(palette_by_name(name));
         crate::config::Config::persist_theme(name);
         self.push(Kind::Notice, format!("theme set to {name}"));
         self.mode = Mode::Idle;
@@ -1340,7 +1370,7 @@ impl App {
                     .position(|t| *t == self.palette.name)
                     .map(|i| cycle(i, THEMES.len()))
                     .unwrap_or(0);
-                self.palette = palette_by_name(THEMES[i]);
+                self.set_palette(palette_by_name(THEMES[i]));
                 self.settings.theme = THEMES[i].to_string();
                 Config::persist_theme(THEMES[i]);
             }
@@ -1484,7 +1514,7 @@ impl App {
             }
             KeyCode::Enter => self.commit_theme(cursor),
             KeyCode::Esc => {
-                self.palette = palette_by_name(&prev);
+                self.set_palette(palette_by_name(&prev));
                 self.mode = Mode::Idle;
             }
             _ => {}
@@ -1893,7 +1923,10 @@ impl App {
         match name {
             "exit" | "quit" | "q" => self.should_quit = true,
             "help" | "h" => self.show_help(),
-            "clear" => self.transcript.clear(),
+            "clear" => {
+                self.transcript.clear();
+                self.dirty();
+            }
             "auto" => {
                 let on = self.perm() != crate::agent::PERM_AUTO;
                 self.perm.store(
@@ -1954,7 +1987,7 @@ impl App {
                         _ => arg,
                     };
                     let p = palette_by_name(name);
-                    self.palette = p;
+                    self.set_palette(p);
                     crate::config::Config::persist_theme(p.name);
                     self.push(Kind::Notice, format!("theme set to {}", p.name));
                 }
@@ -2019,6 +2052,7 @@ impl App {
 
     fn push_dim(&mut self, text: String) {
         self.transcript.push(TLine { kind: Kind::BannerDim, text, lead: false, color: None });
+        self.dirty();
     }
 
     pub fn welcome(&mut self) {
@@ -2196,21 +2230,48 @@ impl App {
         f.render_widget(block, area);
 
         let width = inner.width as usize;
-        let lines = self.build_display(width);
-        let total = lines.len();
+        self.ensure_display_cache(width);
+        // The live tail (streaming reply / reasoning) is small and changes every
+        // token, so it's rendered fresh each frame and never cached.
+        let live = self.build_live_lines(width);
+        let total = self.disp_cache.len() + live.len();
         self.view_h = inner.height as usize;
         self.max_top = total.saturating_sub(self.view_h);
         let top = if self.follow { self.max_top } else { self.scroll.min(self.max_top) };
         self.scroll = top;
-        let visible: Vec<Line> = lines.into_iter().skip(top).take(self.view_h).collect();
+        // Clone only the visible window (≤ view_h lines) instead of the whole
+        // transcript: the static lines are already rendered in disp_cache.
+        let mut visible: Vec<Line> = Vec::with_capacity(self.view_h);
+        for ln in self.disp_cache.iter().skip(top).take(self.view_h) {
+            visible.push(ln.clone());
+        }
+        let remaining = self.view_h.saturating_sub(visible.len());
+        if remaining > 0 {
+            let live_skip = top.saturating_sub(self.disp_cache.len());
+            for ln in live.into_iter().skip(live_skip).take(remaining) {
+                visible.push(ln);
+            }
+        }
         f.render_widget(Paragraph::new(visible), inner);
     }
 
-    fn build_display(&self, width: usize) -> Vec<Line<'static>> {
+    /// Rebuild `disp_cache` only when the transcript content (`tver`) or the
+    /// terminal `width` changed since the last build.
+    fn ensure_display_cache(&mut self, width: usize) {
+        if self.disp_cache_width == width && self.disp_cache_tver == self.tver {
+            return;
+        }
         let mut out: Vec<Line<'static>> = Vec::new();
         for t in &self.transcript {
             render_tline(&mut out, t.kind, &t.text, t.lead, t.color, width, self.glyphs, &self.palette, self.single_width);
         }
+        self.disp_cache = out;
+        self.disp_cache_width = width;
+        self.disp_cache_tver = self.tver;
+    }
+
+    fn build_live_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let mut out: Vec<Line<'static>> = Vec::new();
         if !self.live.is_empty() {
             for (i, ln) in self.live.split('\n').enumerate() {
                 render_tline(&mut out, Kind::Assistant, ln, i == 0, None, width, self.glyphs, &self.palette, self.single_width);

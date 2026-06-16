@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Hard gate: the code compiles and every unit test passes on the host.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --verbose
+      - name: Test
+        run: cargo test --bins --locked --verbose
+      # Lint and format are advisory: the tree isn't fully rustfmt/clippy-clean
+      # yet, and clippy lints drift between toolchain versions. Surface them
+      # without failing the build.
+      - name: Clippy (advisory)
+        run: cargo clippy --bins || true
+      - name: Format check (advisory)
+        run: cargo fmt --check || true
+
+  # Prove the three deploy targets still cross-compile. The Pi can't build Rust
+  # itself, so a broken cross-build is only ever discovered at deploy time
+  # without this — exactly the regression class this job guards against.
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - arm-unknown-linux-musleabihf   # Pi Zero W (ARMv6)
+          - armv7-unknown-linux-musleabihf # Pi 2/3/4 (ARMv7)
+          - aarch64-unknown-linux-musl     # Pi 5 / 64-bit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Cross build (release)
+        run: cross build --release --locked --target ${{ matrix.target }}

@@ -14,16 +14,63 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 fn expand(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
+    let raw = if let Some(rest) = path.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(home).join(rest),
+            Err(_) => PathBuf::from(path),
         }
     } else if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
+        match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(home),
+            Err(_) => PathBuf::from(path),
+        }
+    } else {
+        PathBuf::from(path)
+    };
+    normalize(&raw)
+}
+
+/// Collapse `.` and `..` lexically (without touching the filesystem, so it works
+/// for paths that don't exist yet). This doesn't sandbox — a coding agent
+/// legitimately reads files all over the box — but it turns a sneaky
+/// `~/../../etc/x` into the plain `/etc/x` it really means, so the path the user
+/// approves is the path that's used.
+fn normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => match out.components().next_back() {
+                // Pop a real directory name…
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // …but never climb above the filesystem root.
+                Some(Component::RootDir) => {}
+                // At a relative start, keep the `..` (can't resolve it lexically).
+                _ => out.push(".."),
+            },
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
         }
     }
-    PathBuf::from(path)
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
+/// Refuse to operate through a symlink: a symlinked path could point outside the
+/// intended target. Reads and writes both go through this so the guard is
+/// symmetric. Returns `Some(error)` to short-circuit, `None` to proceed.
+fn deny_symlink(p: &Path, path: &str, verb: &str) -> Option<String> {
+    match std::fs::symlink_metadata(p) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Some(format!("DENIED: {path} is a symlink; {verb} the real path instead."))
+        }
+        _ => None,
+    }
 }
 
 // ----------------------------------------------------------------- bash -----
@@ -207,6 +254,9 @@ pub fn bash_kill(id: u64) -> String {
 
 pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let p = expand(path);
+    if let Some(err) = deny_symlink(&p, path, "read") {
+        return err;
+    }
     // Open and read only up to READ_FILE_LIMIT bytes to avoid OOM on huge files.
     const READ_FILE_LIMIT: usize = 1_000_000; // 1 MB
     let mut file = match std::fs::File::open(&p) {
@@ -278,6 +328,9 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
 
 pub fn list_files(path: &str) -> String {
     let p = expand(if path.is_empty() { "." } else { path });
+    if let Some(err) = deny_symlink(&p, path, "list") {
+        return err;
+    }
     let entries = match std::fs::read_dir(&p) {
         Ok(e) => e,
         Err(e) => return format!("ERROR: {e}"),
@@ -336,10 +389,8 @@ pub fn write_file(path: &str, content: &str) -> String {
     let p = expand(path);
     // Refuse to follow symlinks: writing through a symlink could overwrite an
     // unexpected target outside the working directory.
-    if let Ok(meta) = std::fs::symlink_metadata(&p) {
-        if meta.file_type().is_symlink() {
-            return format!("DENIED: {path} is a symlink; write to the real path instead.");
-        }
+    if let Some(err) = deny_symlink(&p, path, "write to") {
+        return err;
     }
     if let Some(dir) = p.parent() {
         if !dir.as_os_str().is_empty() {
@@ -437,10 +488,8 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
 pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
     let p = expand(path);
     // Refuse to write through symlinks.
-    if let Ok(meta) = std::fs::symlink_metadata(&p) {
-        if meta.file_type().is_symlink() {
-            return EditPreview::Err(format!("DENIED: {path} is a symlink; edit the real path instead."));
-        }
+    if let Some(err) = deny_symlink(&p, path, "edit") {
+        return EditPreview::Err(err);
     }
     let data = match std::fs::read_to_string(&p) {
         Ok(d) => d,
@@ -1437,6 +1486,54 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(bash_output(id).contains("[exited"), "job should be dead");
         assert!(bash_output(999).starts_with("ERROR"));
+    }
+
+    #[test]
+    fn normalize_collapses_dot_segments() {
+        assert_eq!(normalize(Path::new("a/b/../c")), Path::new("a/c"));
+        assert_eq!(normalize(Path::new("./a/./b")), Path::new("a/b"));
+        assert_eq!(normalize(Path::new("/etc/../etc/passwd")), Path::new("/etc/passwd"));
+        // `..` past the start is preserved (can't pop a non-name component).
+        assert_eq!(normalize(Path::new("../x")), Path::new("../x"));
+        // An absolute root is never climbed past.
+        assert_eq!(normalize(Path::new("/../x")), Path::new("/x"));
+        // Empty / all-dot paths normalize to ".".
+        assert_eq!(normalize(Path::new("")), Path::new("."));
+        assert_eq!(normalize(Path::new("a/..")), Path::new("."));
+    }
+
+    #[test]
+    fn expand_resolves_tilde_and_dots() {
+        std::env::set_var("HOME", "/home/pi");
+        // The sneaky traversal resolves to the plain path it really means.
+        assert_eq!(expand("~/../../etc/passwd"), PathBuf::from("/etc/passwd"));
+        assert_eq!(expand("~/notes.md"), PathBuf::from("/home/pi/notes.md"));
+        assert_eq!(expand("~"), PathBuf::from("/home/pi"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn file_tools_refuse_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join("picode_symlink_test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("real.txt");
+        std::fs::write(&target, "secret\n").unwrap();
+        let link = dir.join("link.txt");
+        symlink(&target, &link).unwrap();
+        let lp = link.to_string_lossy();
+        // Reads, writes, and edits through the symlink are all refused.
+        assert!(read_file(&lp, None, None).starts_with("DENIED"));
+        assert!(write_file(&lp, "x").starts_with("DENIED"));
+        assert!(matches!(
+            edit_preview(&lp, "secret", "x"),
+            EditPreview::Err(e) if e.starts_with("DENIED")
+        ));
+        assert!(list_files(&dir.to_string_lossy()).contains("link.txt"));
+        // The real path still works.
+        assert!(read_file(&target.to_string_lossy(), None, None).contains("secret"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

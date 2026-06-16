@@ -19,6 +19,12 @@ dependencies.
 - **Git auto-checkpoint** — every successful edit is committed to the
   working-directory repo (`auto_commit`, on by default), so each change is
   restorable; recent git history is fed into context as a clue.
+- **Crash-safe state** — `config.json` and session transcripts are written
+  atomically (temp file → fsync → rename), so a power loss on the Pi's SD card
+  leaves the old or new file intact, never a truncated one.
+- **Symlink-safe file tools** — `read` / `list` / `write` / `edit` all refuse
+  symlinked paths, and paths are lexically normalized so the path you approve is
+  the path that's used.
 - **Sub-agents** — the `task` tool delegates a self-contained job to a fresh
   agent with its own context and the same tools; only its report comes back.
 - **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
@@ -77,6 +83,17 @@ Deploy targets are configurable via the `PICODE_HOSTS` env var (space-separated
 your shell profile to make it permanent. `deploy` queries each host's `uname -m`
 and installs the matching ~2.5 MB static binary to `~/.local/bin/picode`.
 
+## Testing / CI
+
+```sh
+cargo test          # host unit tests
+cargo test -- --ignored   # also runs the live MCP / web tests
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the host test suite plus a
+`cross build --release` for all three deploy targets, so a broken cross-compile
+is caught in CI instead of at deploy time.
+
 ## Configuration
 
 On first run, picode walks you through provider, model, and API key. State lives
@@ -129,6 +146,11 @@ HTTP + tool loop. The **UI thread** renders with ratatui and exchanges user
 input / approvals over mpsc channels; the worker streams back tokens, tool
 events, diffs, and approval requests. This keeps the UI responsive and lets
 `Esc` interrupt a turn mid-flight.
+
+The transcript render is cached: the static (already-printed) lines are wrapped
+once and reused until their content or the terminal width changes, so streaming
+a reply doesn't re-wrap the whole backlog every token — the difference is
+visible on a single-core Pi.
 
 See [`PICODE.md`](PICODE.md) for the per-file source map and deeper notes.
 
