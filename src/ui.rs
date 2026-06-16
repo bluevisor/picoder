@@ -106,7 +106,7 @@ const DEFAULT_PALETTE: Palette = Palette {
 // Apple ][ — authentic green-phosphor CRT (P31, Monitor II / Monitor ///).
 const APPLE2_GREEN: Color = Color::Rgb(51, 255, 51);
 const APPLE2_PALETTE: Palette = Palette {
-    name: "apple2",
+    name: "Apple ][",
     accent: APPLE2_GREEN,
     assistant: APPLE2_GREEN,
     assistant_glyph: Color::Rgb(100, 255, 100),
