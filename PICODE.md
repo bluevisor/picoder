@@ -72,8 +72,10 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   being flattened to a bare Backspace by terminals like Warp.
 - ASCII fallback + clear-on-exit for the Pi's framebuffer console (`TERM=linux`).
 - Launch banner: rainbow-color PICODE logo + live status (MEM, WiFi SSID + IP).
-- Themes (`/theme`, numbered picker): `default`, `apple2` (green phosphor, `] ▒`),
-  `msdos` (gray, `C:\>`); persisted in config. Theme sets colors, prompt, cursor.
+- Themes (`/theme`, numbered picker): `Default`, `Apple ][` (green phosphor, `] ▒`),
+  `MSDOS` (gray, `C:\>`), `macOS` (dark mode system colors, `~ `),
+  `SUN` (amber/gold, `sun% `), `NeXT` (platinum monochrome, `NeXT>`),
+  `SGI` (indigo/teal IRIX, `irix# `); persisted in config. Theme sets colors, prompt, cursor.
 - `/model` opens an interactive picker over the provider's model list —
   type to filter (handy for OpenRouter's hundreds), ↑/↓ + Enter to select;
   `/model <id|number>` still sets directly.
