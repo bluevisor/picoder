@@ -436,6 +436,7 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
 
 /// Deferred banner colour so the logo reacts to `/theme` switches.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum BannerColor {
     /// A fixed color (no palette reactivity).
     Fixed(Color),
