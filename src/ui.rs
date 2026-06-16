@@ -1872,7 +1872,7 @@ impl App {
             "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
-            "  /theme [n]     open theme picker, or switch directly (default, apple2, msdos, macos)",
+            "  /theme [n]     open theme picker, or switch directly (default, Apple ][, msdos, macos)",
             "  /init          summarize this project into PICODE.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
