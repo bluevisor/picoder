@@ -1889,7 +1889,6 @@ impl App {
     /// bordered SYSTEM panel of status lines.
     pub fn banner(&mut self, width: u16, status: Vec<String>) {
         let w = (width as usize).saturating_sub(4).max(8);
-        let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
         for bl in banner_lines(w, self.ascii, &status) {
             let (kind, color) = match bl.role {
                 BRole::Art(i) => (
