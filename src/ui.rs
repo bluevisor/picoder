@@ -179,13 +179,97 @@ const MACOS_PALETTE: Palette = Palette {
     cursor: CursorKind::Reverse,
 };
 
-const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macos"];
+// ── Sun Microsystems ───────────────────────────────────────────────
+// Warm amber/gold palette inspired by Sun workstations and the Sun
+// logo's amber diamond. Dark brown-black background with golden-hour
+// amber accents, purple secondary, and a Solaris C-shell prompt.
+const SUN_PALETTE: Palette = Palette {
+    name: "SUN",
+    accent: Color::Rgb(255, 183, 0),             // golden amber (#FFB700)
+    assistant: Color::Rgb(238, 232, 213),         // warm Solaris paper-white
+    assistant_glyph: Color::Rgb(255, 183, 0),    // amber
+    reasoning: Color::Rgb(139, 119, 80),          // muted bronze
+    tool: Color::Rgb(186, 85, 211),              // Sun purple (#BA55D3)
+    tool_result: Color::Rgb(160, 140, 100),       // warm sand
+    notice: Color::Rgb(160, 140, 100),
+    code: Color::Rgb(255, 200, 80),              // bright amber
+    heading: Color::Rgb(238, 232, 213),
+    diff_add: Color::Rgb(100, 200, 100),          // soft green (CRT-friendly)
+    diff_del: Color::Rgb(220, 100, 60),           // warm rust red
+    diff_ctx: Color::Rgb(100, 80, 50),
+    error: Color::Rgb(255, 120, 70),             // amber-red
+    mono_banner: Some(Color::Rgb(255, 183, 0)),  // golden amber
+    chrome: Color::Rgb(100, 80, 50),              // dark bronze
+    secondary: Color::Rgb(160, 140, 100),
+    user_bg: Color::Rgb(40, 30, 15),             // warm dark brown
+    prompt: Some("sun% "),                        // Solaris C-shell prompt
+    cursor: CursorKind::Block,
+};
+
+// ── NeXT ────────────────────────────────────────────────────────────
+// Stark monochrome palette inspired by NeXTSTEP's platinum/black UI.
+// High-contrast architectural minimalism: crisp whites, clean grays,
+// and the distinctive NeXT workspace style.
+const NEXTS_PALETTE: Palette = Palette {
+    name: "NeXT",
+    accent: Color::White,                        // pure architectural white
+    assistant: Color::Rgb(220, 220, 220),         // bright platinum
+    assistant_glyph: Color::White,               // crisp white
+    reasoning: Color::Rgb(100, 100, 100),         // medium gray
+    tool: Color::Rgb(180, 180, 180),              // light platinum
+    tool_result: Color::Rgb(130, 130, 130),       // mid gray
+    notice: Color::Rgb(130, 130, 130),
+    code: Color::Rgb(200, 200, 200),              // bright code
+    heading: Color::White,
+    diff_add: Color::Rgb(180, 180, 180),          // monochrome diff
+    diff_del: Color::Rgb(80, 80, 80),             // dimmed delete
+    diff_ctx: Color::Rgb(60, 60, 60),
+    error: Color::Rgb(255, 255, 255),             // white on error (NeXT style)
+    mono_banner: Some(Color::White),             // pure white
+    chrome: Color::Rgb(80, 80, 80),               // architectural gray
+    secondary: Color::Rgb(120, 120, 120),
+    user_bg: Color::Rgb(40, 40, 40),              // dark slate
+    prompt: Some("NeXT> "),                       // NeXTSTEP workspace
+    cursor: CursorKind::Reverse,
+};
+
+// ── SGI (Silicon Graphics) ─────────────────────────────────────────
+// Deep indigo/teal palette inspired by IRIX and the SGI Indigo
+// workstation. Blue-purple dark bg with IRIX teal window-manager
+// accents and the iconic IRIX root prompt.
+const SGI_PALETTE: Palette = Palette {
+    name: "SGI",
+    accent: Color::Rgb(0, 191, 165),              // teal 400 (#00BFA5) — IRIX 4Dwm
+    assistant: Color::Rgb(224, 240, 240),         // cool white
+    assistant_glyph: Color::Rgb(0, 191, 165),    // teal
+    reasoning: Color::Rgb(80, 100, 120),          // muted slate-blue
+    tool: Color::Rgb(100, 140, 220),              // SGI blue
+    tool_result: Color::Rgb(100, 130, 145),       // muted teal
+    notice: Color::Rgb(100, 130, 145),
+    code: Color::Rgb(120, 220, 200),              // bright teal
+    heading: Color::Rgb(224, 240, 240),
+    diff_add: Color::Rgb(60, 200, 140),           // teal-green
+    diff_del: Color::Rgb(200, 80, 100),           // magenta-red
+    diff_ctx: Color::Rgb(50, 70, 90),
+    error: Color::Rgb(255, 100, 120),             // bright red
+    mono_banner: Some(Color::Rgb(0, 191, 165)),   // teal
+    chrome: Color::Rgb(50, 70, 90),               // deep slate
+    secondary: Color::Rgb(100, 130, 145),
+    user_bg: Color::Rgb(20, 30, 50),              // deep indigo
+    prompt: Some("irix# "),                       // IRIX root prompt
+    cursor: CursorKind::Block,
+};
+
+const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macos", "SUN", "NeXT", "SGI"];
 
 fn palette_by_name(name: &str) -> Palette {
     match name {
         "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
         "msdos" | "dos" => MSDOS_PALETTE,
         "macos" | "macintosh" | "mac" => MACOS_PALETTE,
+        "SUN" | "sun" | "solaris" | "sunos" => SUN_PALETTE,
+        "NeXT" | "next" | "nextstep" => NEXTS_PALETTE,
+        "SGI" | "sgi" | "irix" | "indigo" => SGI_PALETTE,
         _ => DEFAULT_PALETTE,
     }
 }
@@ -193,7 +277,7 @@ fn palette_by_name(name: &str) -> Palette {
 /// Whether `name` is a known theme name (used by the CLI to avoid consuming
 /// the next argument after --banner as a theme if it's a task description).
 pub fn is_theme_name(name: &str) -> bool {
-    matches!(name, "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos" | "macos" | "macintosh" | "mac")
+    matches!(name, "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos" | "macos" | "macintosh" | "mac" | "SUN" | "sun" | "solaris" | "sunos" | "NeXT" | "next" | "nextstep" | "SGI" | "sgi" | "irix" | "indigo")
 }
 
 /// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
@@ -1872,7 +1956,7 @@ impl App {
             "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
-            "  /theme [n]     open theme picker, or switch directly (default, Apple ][, msdos, macos)",
+            "  /theme [n]     open theme picker, or switch directly (default, Apple ][, msdos, macos, SUN, NeXT, SGI)",
             "  /init          summarize this project into PICODE.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
