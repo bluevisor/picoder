@@ -259,6 +259,28 @@ pub fn spawn(
                     w.save_session();
                     w.refresh_balance(); // reflect spend after the turn
                     let _ = w.ui.send(UiEvent::TurnDone);
+                    // Fire a cheap follow-up suggestion call in the background.
+                    if !w.quiet {
+                        let suggest_ui = w.ui.clone();
+                        let suggest_http = w.http.clone();
+                        let suggest_cfg = w.cfg.clone();
+                        let mut suggest_msgs = w.messages.clone();
+                        let cancel_flag = w.cancel.clone();
+                        std::thread::spawn(move || {
+                            suggest_msgs.push(Message::system(
+                                "Based on the conversation, suggest ONE short follow-up prompt the user might want to ask next. Reply with ONLY the prompt text, no other words, no quotes, no explanation."
+                            ));
+                            match api::chat_plain(&suggest_http, &suggest_cfg, &suggest_msgs, &cancel_flag) {
+                                Ok(text) => {
+                                    let text = text.trim().trim_matches('"').trim();
+                                    if !text.is_empty() && text.len() < 200 {
+                                        let _ = suggest_ui.send(UiEvent::Suggestion(text.to_string()));
+                                    }
+                                }
+                                Err(_) => {} // silently skip on error
+                            }
+                        });
+                    }
                 }
             }
         }
