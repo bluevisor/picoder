@@ -157,7 +157,7 @@ const MSDOS_PALETTE: Palette = Palette {
 
 // macOS — actual macOS Terminal.app dark mode palette.
 const MACOS_PALETTE: Palette = Palette {
-    name: "macos",
+    name: "macOS",
     accent: Color::Rgb(10, 132, 255),            // systemBlue dark (#0A84FF)
     assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
     assistant_glyph: Color::Rgb(100, 210, 255),  // lightSystemBlue
@@ -260,13 +260,13 @@ const SGI_PALETTE: Palette = Palette {
     cursor: CursorKind::Block,
 };
 
-const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macos", "SUN", "NeXT", "SGI"];
+const THEMES: &[&str] = &["default", "Apple ][", "msdos", "macOS", "SUN", "NeXT", "SGI"];
 
 fn palette_by_name(name: &str) -> Palette {
     match name {
         "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
         "msdos" | "dos" => MSDOS_PALETTE,
-        "macos" | "macintosh" | "mac" => MACOS_PALETTE,
+        "macOS" | "macos" | "macintosh" | "mac" => MACOS_PALETTE,
         "SUN" | "sun" | "solaris" | "sunos" => SUN_PALETTE,
         "NeXT" | "next" | "nextstep" => NEXTS_PALETTE,
         "SGI" | "sgi" | "irix" | "indigo" => SGI_PALETTE,
@@ -277,7 +277,7 @@ fn palette_by_name(name: &str) -> Palette {
 /// Whether `name` is a known theme name (used by the CLI to avoid consuming
 /// the next argument after --banner as a theme if it's a task description).
 pub fn is_theme_name(name: &str) -> bool {
-    matches!(name, "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos" | "macos" | "macintosh" | "mac" | "SUN" | "sun" | "solaris" | "sunos" | "NeXT" | "next" | "nextstep" | "SGI" | "sgi" | "irix" | "indigo")
+    matches!(name, "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "msdos" | "dos" | "macOS" | "macos" | "macintosh" | "mac" | "SUN" | "sun" | "solaris" | "sunos" | "NeXT" | "next" | "nextstep" | "SGI" | "sgi" | "irix" | "indigo")
 }
 
 /// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
@@ -1956,7 +1956,7 @@ impl App {
             "  /config        settings: provider, model, key, thinking, permissions, …",
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
-            "  /theme [n]     open theme picker, or switch directly (default, Apple ][, msdos, macos, SUN, NeXT, SGI)",
+            "  /theme [n]     open theme picker, or switch directly (default, Apple ][, msdos, macOS, SUN, NeXT, SGI)",
             "  /init          summarize this project into PICODE.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
