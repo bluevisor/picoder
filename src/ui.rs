@@ -94,25 +94,27 @@ const DEFAULT_PALETTE: Palette = Palette {
     cursor: CursorKind::Reverse,
 };
 
-// Apple ][ — green phosphor on black.
+// Apple ][ — authentic green-phosphor CRT (P31, Monitor II / Monitor ///).
 const APPLE2_GREEN: Color = Color::Rgb(51, 255, 51);
 const APPLE2_PALETTE: Palette = Palette {
     name: "apple2",
     accent: APPLE2_GREEN,
     assistant: APPLE2_GREEN,
-    assistant_glyph: APPLE2_GREEN,
-    reasoning: Color::Rgb(0, 140, 0),
+    assistant_glyph: Color::Rgb(100, 255, 100),
+    reasoning: Color::Rgb(0, 130, 0),
     tool: APPLE2_GREEN,
-    tool_result: Color::Rgb(0, 190, 0),
-    notice: Color::Rgb(0, 190, 0),
+    tool_result: Color::Rgb(0, 160, 0),
+    notice: Color::Rgb(0, 155, 0),
     code: Color::Rgb(140, 255, 140),
     heading: APPLE2_GREEN,
-    diff_add: Color::Rgb(140, 255, 140),
-    diff_del: Color::Rgb(0, 140, 0),
-    diff_ctx: Color::Rgb(0, 110, 0),
-    error: Color::Rgb(255, 90, 90),
-    // Keep the rainbow Apple logo (period-correct) even on the green theme.
-    mono_banner: None,
+    diff_add: Color::Rgb(110, 255, 110),
+    diff_del: Color::Rgb(0, 100, 0),
+    diff_ctx: Color::Rgb(0, 70, 0),
+    // On a green-phosphor CRT there is no red; errors were signalled by
+    // inverse video or the bell. We use a near-white green that stands out.
+    error: Color::Rgb(200, 255, 200),
+    // The Apple II text screen was strictly monochrome — green all the way.
+    mono_banner: Some(APPLE2_GREEN),
     prompt: Some("] "),
     cursor: CursorKind::Block,
 };
