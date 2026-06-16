@@ -495,7 +495,7 @@ pub fn run_setup() -> Result<Config> {
     cfg.base_url = base;
     cfg.model = model;
     if !key.is_empty() {
-        cfg.api_key = key;
+        cfg.api_key = key.clone();
         cfg.api_keys.insert(cfg.provider.clone(), key);
         cfg.key_from_env = false;
     }
