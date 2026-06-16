@@ -1295,6 +1295,8 @@ impl App {
                 let (p, b, m) = PROVIDERS[i];
                 self.settings.provider = p.to_string();
                 self.settings.base_url = b.to_string();
+                // Swap to the new provider's saved API key.
+                self.settings.resolve_key();
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Provider {
                     provider: p.to_string(),
                     base_url: b.to_string(),
