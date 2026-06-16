@@ -222,7 +222,6 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     {
         return format!("ERROR: read failed: {e}");
     }
-    let is_binary = raw.iter().any(|&b| b == 0);
     let content = match String::from_utf8(raw) {
         Ok(s) => s,
         Err(e) => {
