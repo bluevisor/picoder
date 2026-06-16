@@ -141,3 +141,16 @@ MCP servers are optional and configured by hand in `config.json`:
 
 Each server is spawned over stdio at launch; its tools appear as
 `mcp__filesystem__<tool>`. `/model` and `/theme` rewrites preserve the block.
+
+## Roadmap / wishlist
+
+- **ui.rs split** (~3100 lines → submodules). A clean split would extract:
+  `ui/banner.rs` (banner rendering, ~300 lines), `ui/panels.rs` (config picker,
+  model picker, theme picker, `/` palette — ~800 lines), `ui/transcript.rs`
+  (~400 lines), and `ui/palette.rs` (Palette + THEMES, ~150 lines). Each
+  submodule depends on ratatui/crossterm; they'd be `pub(crate)` re-exported by
+  `ui.rs` so the rest of the crate sees no change.
+
+- **Config/environment-driven integration tests**. MCP handshake and web_search
+  tests currently `#[ignore]` because they need a live server; a `PICODE_TEST=1`
+  gate would run them in CI with a containerized MCP stub.
