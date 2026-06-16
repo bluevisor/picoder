@@ -48,6 +48,8 @@ pub enum UiEvent {
     Notice(String),
     Error(String),
     TurnDone,
+    /// A suggested follow-up prompt generated after the turn completes.
+    Suggestion(String),
 }
 
 /// UI → Worker control messages (processed between turns).
