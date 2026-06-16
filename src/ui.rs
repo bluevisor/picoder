@@ -2461,9 +2461,15 @@ impl App {
             }
             if empty && r == 0 {
                 let hint = if matches!(self.mode, Mode::Busy) {
-                    "  type to queue the next message"
+                    "  type to queue the next message".to_string()
+                } else if let Some(ref s) = self.suggestion {
+                    if self.ascii {
+                        format!("  [{}] (Tab)", s)
+                    } else {
+                        format!("  {}  (Tab to accept)", s)
+                    }
                 } else {
-                    "  describe a task · @file to attach · /help"
+                    "  describe a task · @file to attach · /help".to_string()
                 };
                 spans.push(Span::styled(hint, Style::default().fg(self.dim_text())));
             }
