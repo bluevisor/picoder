@@ -1031,6 +1031,7 @@ fn parse_ddg(html: &str) -> String {
 
 /// DDG result hrefs are redirects like `//duckduckgo.com/l/?uddg=<encoded>&…`;
 /// pull out and decode the real destination.
+#[cfg(test)]
 fn resolve_ddg_url(href: &str) -> String {
     if let Some(pos) = href.find("uddg=") {
         let rest = &href[pos + 5..];
