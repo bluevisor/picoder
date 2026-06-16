@@ -83,14 +83,14 @@ struct Palette {
 const DEFAULT_PALETTE: Palette = Palette {
     name: "default",
     accent: Color::Cyan,
-    assistant: Color::White,
+    assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
     assistant_glyph: Color::Green,
     reasoning: Color::DarkGray,
     tool: Color::Blue,
     tool_result: Color::Rgb(150, 150, 150),
     notice: Color::Rgb(150, 150, 150),
     code: Color::Yellow,
-    heading: Color::White,
+    heading: Color::Rgb(242, 242, 247),           // near white
     diff_add: Color::Green,
     diff_del: Color::Red,
     diff_ctx: Color::DarkGray,
@@ -142,7 +142,7 @@ const MSDOS_PALETTE: Palette = Palette {
     tool_result: Color::Gray,
     notice: Color::Gray,
     code: Color::LightGreen,
-    heading: Color::White,
+    heading: Color::Rgb(242, 242, 247),           // near white
     diff_add: Color::Green,
     diff_del: Color::Red,
     diff_ctx: Color::DarkGray,
@@ -155,25 +155,25 @@ const MSDOS_PALETTE: Palette = Palette {
     cursor: CursorKind::Block,
 };
 
-// macOS — modern full-color terminal, macOS system palette on dark background.
+// macOS — actual macOS Terminal.app dark mode palette.
 const MACOS_PALETTE: Palette = Palette {
     name: "macos",
-    accent: Color::Rgb(0, 122, 255),          // macOS system blue
-    assistant: Color::White,
-    assistant_glyph: Color::Rgb(100, 210, 255), // light blue
-    reasoning: Color::Rgb(142, 142, 147),       // macOS system gray
-    tool: Color::Rgb(255, 149, 0),            // macOS orange
-    tool_result: Color::Rgb(174, 174, 178),     // macOS light gray
-    notice: Color::Rgb(152, 152, 157),
-    code: Color::Rgb(90, 200, 245),           // macOS teal
-    heading: Color::White,
-    diff_add: Color::Rgb(52, 199, 89),        // macOS green
-    diff_del: Color::Rgb(255, 59, 48),        // macOS red
-    diff_ctx: Color::Rgb(99, 99, 102),
-    error: Color::Rgb(255, 69, 58),           // bright macOS red
-    mono_banner: Some(Color::Rgb(0, 122, 255)), // blue Apple logo
-    chrome: Color::Rgb(72, 72, 74),
-    secondary: Color::Rgb(152, 152, 157),
+    accent: Color::Rgb(10, 132, 255),            // systemBlue dark (#0A84FF)
+    assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
+    assistant_glyph: Color::Rgb(100, 210, 255),  // lightSystemBlue
+    reasoning: Color::Rgb(142, 142, 147),         // systemGray
+    tool: Color::Rgb(255, 159, 10),              // systemOrange dark (#FF9F0A)
+    tool_result: Color::Rgb(174, 174, 178),       // systemGray2
+    notice: Color::Rgb(152, 152, 157),            // systemGray3
+    code: Color::Rgb(100, 210, 255),              // systemTeal dark (#64D2FF)
+    heading: Color::Rgb(242, 242, 247),           // near white
+    diff_add: Color::Rgb(48, 209, 88),            // systemGreen dark (#30D158)
+    diff_del: Color::Rgb(255, 69, 58),            // systemRed dark (#FF453A)
+    diff_ctx: Color::Rgb(99, 99, 102),            // systemGray4
+    error: Color::Rgb(255, 69, 58),               // systemRed dark
+    mono_banner: Some(Color::Rgb(10, 132, 255)),  // systemBlue dark
+    chrome: Color::Rgb(72, 72, 74),               // systemGray5
+    secondary: Color::Rgb(152, 152, 157),          // systemGray3
     user_bg: Color::Rgb(44, 44, 46),          // macOS dark elevated bg
     prompt: Some("~ "),
     cursor: CursorKind::Reverse,
@@ -2685,7 +2685,7 @@ fn render_tline(
     kind: Kind,
     text: &str,
     lead: bool,
-    color: Option<Color>,
+    color: Option<BannerColor>,
     width: usize,
     g: Glyphs,
     p: &Palette,
