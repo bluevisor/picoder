@@ -2475,7 +2475,7 @@ fn pad1(r: Rect) -> Rect {
 }
 
 /// A solid mini progress bar (green→yellow→red as it fills).
-fn bar(frac: f64, width: usize) -> Vec<Span<'static>> {
+fn bar(frac: f64, width: usize, chrome: Color) -> Vec<Span<'static>> {
     let frac = frac.clamp(0.0, 1.0);
     let filled = (frac * width as f64).round() as usize;
     let fill = if frac < 0.8 {
@@ -2490,7 +2490,7 @@ fn bar(frac: f64, width: usize) -> Vec<Span<'static>> {
         v.push(Span::styled(" ".repeat(filled), Style::default().bg(fill)));
     }
     if filled < width {
-        v.push(Span::styled(" ".repeat(width - filled), Style::default().bg(Color::DarkGray)));
+        v.push(Span::styled(" ".repeat(width - filled), Style::default().bg(chrome)));
     }
     v
 }
