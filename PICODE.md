@@ -11,8 +11,8 @@ cannot compile Rust** — see "Building" below.
 ## Layout
 
 ```
-Cargo.toml            deps + release profile (static musl, size-optimized)
-.cargo/config.toml    cross-linker for arm-unknown-linux-musleabihf
+Cargo.toml            deps + release + jetson profiles (static musl, size-optimized)
+.cargo/config.toml    cross-linkers for ARMv6/ARMv7/aarch64 musl + aarch64 gnu (Jetson)
 build.sh              cross-compile (and `build.sh deploy` to install on the Pis)
 src/
   main.rs             CLI args, first-run setup, one-shot mode (+ --output), session/context wiring
@@ -24,6 +24,8 @@ src/
   mcp.rs              stdio MCP client: spawn servers, JSON-RPC handshake, tools/list + tools/call
   ui.rs               ratatui full-screen TUI: transcript, composer, status bar
   diff.rs             unified diff for edit/write previews
+  askpass.rs          sudo password support: askpass helper + in-TUI masked prompt
+  sysinfo.rs          /proc & /sys probes: board model, WiFi SSID, IP, RAM, cores
 ```
 
 ## Architecture
