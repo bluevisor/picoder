@@ -2695,7 +2695,13 @@ fn render_tline(
     let text = &*clean_text(text, single_width);
     let (indent, glyph) = layout(kind, g);
     let (mut base, mut glyph_style) = colors(kind, p);
-    if let Some(c) = color {
+    if let Some(bc) = color {
+        let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
+        let c = match bc {
+            BannerColor::Fixed(c) => c,
+            BannerColor::Rainbow(i) => p.mono_banner.unwrap_or(rainbow[i % rainbow.len()]),
+            BannerColor::Accent => p.accent,
+        };
         base = base.fg(c);
     }
     // Highlight the user's own prompts with a full-width gray band so they
