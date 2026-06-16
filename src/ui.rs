@@ -85,7 +85,7 @@ const DEFAULT_PALETTE: Palette = Palette {
     accent: Color::Cyan,
     assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
     assistant_glyph: Color::Green,
-    reasoning: Color::DarkGray,
+    reasoning: Color::Rgb(140, 140, 150),          // dim gray, readable on dark bg
     tool: Color::Blue,
     tool_result: Color::Rgb(150, 150, 150),
     notice: Color::Rgb(150, 150, 150),
