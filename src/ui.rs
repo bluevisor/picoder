@@ -69,6 +69,12 @@ struct Palette {
     diff_ctx: Color,
     error: Color,
     mono_banner: Option<Color>,
+    /// UI chrome: borders, rules, separators.
+    chrome: Color,
+    /// Secondary / dimmed text (hints, status values, picker dim).
+    secondary: Color,
+    /// Background for user messages (a subtle band).
+    user_bg: Color,
     /// Theme-specific composer prompt (else the default glyph set's prompt).
     prompt: Option<&'static str>,
     cursor: CursorKind,
@@ -90,6 +96,9 @@ const DEFAULT_PALETTE: Palette = Palette {
     diff_ctx: Color::DarkGray,
     error: Color::Red,
     mono_banner: None,
+    chrome: Color::DarkGray,
+    secondary: Color::Rgb(140, 140, 140),
+    user_bg: Color::Rgb(48, 48, 48),
     prompt: None,
     cursor: CursorKind::Reverse,
 };
@@ -115,6 +124,9 @@ const APPLE2_PALETTE: Palette = Palette {
     error: Color::Rgb(200, 255, 200),
     // The Apple II text screen was strictly monochrome — green all the way.
     mono_banner: Some(APPLE2_GREEN),
+    chrome: Color::Rgb(0, 120, 0),
+    secondary: Color::Rgb(0, 155, 0),
+    user_bg: Color::Rgb(0, 30, 0),
     prompt: Some("] "),
     cursor: CursorKind::Block,
 };
@@ -136,6 +148,9 @@ const MSDOS_PALETTE: Palette = Palette {
     diff_ctx: Color::DarkGray,
     error: Color::LightRed,
     mono_banner: Some(Color::White),
+    chrome: Color::DarkGray,
+    secondary: Color::Gray,
+    user_bg: Color::DarkGray,
     prompt: Some("C:\\> "),
     cursor: CursorKind::Block,
 };
@@ -1860,7 +1875,7 @@ impl App {
 
     pub fn welcome(&mut self) {
         let model = self.model_info.clone();
-        self.push(Kind::Notice, format!("picode ({model}) — type a task, or /help for commands"));
+        self.push(Kind::Notice, format!("picode ({model}) — theme: {} · type a task, or /help for commands", self.palette.name));
     }
 
     pub fn note(&mut self, s: String) {
@@ -1904,9 +1919,9 @@ impl App {
     /// gray can render as pure white); plain gray on the 16-color console.
     fn dim_text(&self) -> Color {
         if self.ascii {
-            Color::Gray
+            self.palette.secondary
         } else {
-            Color::Rgb(140, 140, 140)
+            self.palette.secondary
         }
     }
 
@@ -2019,7 +2034,7 @@ impl App {
         let ch = if self.ascii { "-" } else { "─" };
         let line = ch.repeat(area.width as usize);
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(line, Style::default().fg(Color::DarkGray)))),
+            Paragraph::new(Line::from(Span::styled(line, Style::default().fg(self.palette.chrome)))),
             area,
         );
     }
@@ -2031,7 +2046,7 @@ impl App {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(self.border_type())
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(Style::default().fg(self.palette.chrome))
             .title(title);
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -2298,10 +2313,11 @@ impl App {
             let prefix = if r == 0 { Span::styled(prompt, accent) } else { Span::raw(cont.clone()) };
             let row: Vec<char> = chars.iter().skip(r * w).take(w).cloned().collect();
             let mut spans = vec![prefix];
+            let text_style = Style::default().fg(self.palette.accent);
             if r == cur_row && cursor != CursorKind::Caret {
                 let before: String = row.iter().take(cur_col).collect();
                 let after: String = row.iter().skip(cur_col + 1).collect();
-                spans.push(Span::raw(before));
+                spans.push(Span::styled(before, text_style));
                 match cursor {
                     CursorKind::Block => spans.push(Span::styled(block, accent)),
                     _ => {
@@ -2309,9 +2325,9 @@ impl App {
                         spans.push(Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)));
                     }
                 }
-                spans.push(Span::raw(after));
+                spans.push(Span::styled(after, text_style));
             } else {
-                spans.push(Span::raw(row.iter().collect::<String>()));
+                spans.push(Span::styled(row.iter().collect::<String>(), text_style));
             }
             if empty && r == 0 {
                 let hint = if matches!(self.mode, Mode::Busy) {
@@ -2355,7 +2371,7 @@ impl App {
     /// Status line 1: model · session usage/cost · context bar · balance.
     fn render_status1(&self, f: &mut Frame, area: Rect) {
         let gray = Style::default().fg(self.dim_text());
-        let sep = || Span::styled(if self.ascii { "  |  " } else { "  │  " }, Style::default().fg(Color::DarkGray));
+        let sep = || Span::styled(if self.ascii { "  |  " } else { "  │  " }, Style::default().fg(self.palette.chrome));
         let mut spans = vec![Span::styled(
             self.model_info.clone(),
             Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD),
@@ -2651,7 +2667,7 @@ fn render_tline(
     // Highlight the user's own prompts with a full-width gray band so they
     // stand out when scrolling back through output.
     let bg = if kind == Kind::User {
-        Some(if g.rounded { Color::Rgb(48, 48, 48) } else { Color::DarkGray })
+        Some(if g.rounded { p.user_bg } else { p.user_bg })
     } else {
         None
     };
