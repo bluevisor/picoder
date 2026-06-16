@@ -348,6 +348,13 @@ impl Config {
         let _ = disk.save();
     }
 
+    /// Resolve the effective API key for the current provider from the per-provider
+    /// map. Does NOT check env vars.
+    pub fn resolve_key(&mut self) {
+        self.api_key = self.api_keys.get(&self.provider).cloned().unwrap_or_default();
+        self.key_from_env = false;
+    }
+
     pub fn apply_patch(&mut self, p: &ConfigPatch) {
         match p {
             ConfigPatch::Provider { provider, base_url, model } => {
