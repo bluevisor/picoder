@@ -933,6 +933,12 @@ impl App {
                     self.dispatch(text, h);
                 }
             }
+            UiEvent::Suggestion(s) => {
+                // Only keep if the user hasn't started typing.
+                if self.input.is_empty() {
+                    self.suggestion = Some(s);
+                }
+            }
         }
     }
 
