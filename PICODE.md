@@ -93,8 +93,8 @@ musl gcc as linker, so no extra toolchain is needed beyond
 
 ```
 # one-time toolchain setup:
-brew install messense/macOS-cross-toolchains/arm-unknown-linux-musleabihf
-brew install messense/macOS-cross-toolchains/aarch64-unknown-linux-musl
+brew install messense/macos-cross-toolchains/arm-unknown-linux-musleabihf
+brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
 rustup target add arm-unknown-linux-musleabihf
 rustup target add aarch64-unknown-linux-musl
 
