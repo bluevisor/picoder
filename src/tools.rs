@@ -225,8 +225,9 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let is_binary = raw.iter().any(|&b| b == 0);
     let content = match String::from_utf8(raw) {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) => {
             // Binary: return a hex dump of the first 512 bytes.
+            let raw = e.into_bytes();
             let preview = &raw[..raw.len().min(512)];
             let hex: String = preview
                 .chunks(16)
@@ -248,7 +249,6 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
             );
         }
     };
-    let truncated_read = is_binary || content.len() >= READ_FILE_LIMIT;
     let truncated_read = content.len() >= READ_FILE_LIMIT;
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let (slice, off) = match (start, end) {
