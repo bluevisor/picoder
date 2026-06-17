@@ -2,7 +2,7 @@
 //! transcript line rendering, and terminal-width queries.
 
 use super::palette::{self, Palette};
-use super::types::{BannerColor, Glyphs, Kind, TLine, is_16color_terminal};
+use super::types::{BannerColor, Glyphs, Kind, is_16color_terminal};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
