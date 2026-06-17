@@ -14,23 +14,31 @@ dependencies.
 ## Features
 
 - **Agentic tool loop** — `bash` (with timeout, or detached `background` jobs +
-  `bash_output` / `bash_kill`), `read` / `write` / `edit` / `list`, `multi_edit`
-  (a batch of edits across files in one approval), `grep` (regex), `glob`,
-  `web_fetch`, `web_search`, `todo` (a visible plan), `ask_user`, `view_image`,
-  and `remember` / `recall` memory.
+  `bash_output` / `bash_kill`), `read_file` / `write_file` / `edit_file` /
+  `list_files`, `multi_edit` (a batch of edits across files in one approval),
+  `grep` (regex), `glob`, `web_fetch`, `web_search`, `todo` (a visible plan),
+  `ask_user`, `view_image`, and `remember` / `recall` memory. A `max_tool_calls`
+  budget (default 100, editable in `/config`) caps a single turn's tool calls.
 - **Git auto-checkpoint** — every successful edit is committed to the
   working-directory repo (`auto_commit`, on by default), so each change is
   restorable; recent git history is fed into context as a clue.
 - **Crash-safe state** — `config.json` and session transcripts are written
   atomically (temp file → fsync → rename), so a power loss on the Pi's SD card
   leaves the old or new file intact, never a truncated one.
-- **Symlink-safe file tools** — `read` / `list` / `write` / `edit` all refuse
-  symlinked paths, and paths are lexically normalized so the path you approve is
-  the path that's used.
+- **Symlink-safe file tools** — `read_file` / `list_files` / `write_file` /
+  `edit_file` all refuse symlinked paths, and paths are lexically normalized so
+  the path you approve is the path that's used.
 - **Sub-agents** — the `task` tool delegates a self-contained job to a fresh
   agent with its own context and the same tools; only its report comes back.
 - **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
   at start; their tools show up as `mcp__<server>__<tool>` (`/mcp` lists them).
+- **Subscription login** — `/login <anthropic|openai|google>` runs a browser
+  OAuth 2.0 (PKCE) flow and authenticates with your Claude Pro/Max, ChatGPT, or
+  Gemini account instead of a pay-as-you-go API key. Tokens persist to
+  `config.json` (mode `0600`) and refresh automatically on resume; `auth_mode`
+  (`api` / `sub`, in `/config`) selects which to send. The OAuth client ids are
+  hand-rolled with zero extra crates; Google needs your own client id/secret via
+  `PICODE_OAUTH_GOOGLE_CLIENT_ID` / `_CLIENT_SECRET`.
 - **Images** — `@image.png` attaches as a base64 data URI and `view_image`
   loads one from disk, sent as OpenAI multimodal content parts.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
@@ -42,7 +50,8 @@ dependencies.
   that send as turns finish.
 - **One-shot `--output`** — `picode "task" -o out.md` writes the final reply to
   disk after the run.
-- **Permission modes** (`Shift+Tab`) — *ask* / *bypass* / *plan* (read-only).
+- **Permission modes** (`Shift+Tab` / `Ctrl+P` to cycle) — *ask* / *bypass* /
+  *plan* (read-only).
 - **Context files** — auto-loads `PICODE.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md` from the working directory.
 - **Sessions** — persisted per working directory; resume with `picode --continue`.
@@ -53,9 +62,11 @@ dependencies.
 - **Status bar** — model · session tokens + $ cost · context-window bar ·
   account balance.
 - **Settings panel** (`/config`) — provider preset, base URL, model, API key,
-  thinking mode, default permission mode, auto-commit, theme, and context
-  window, edited in-TUI; changes apply live and persist to `config.json`.
-- **Themes** (`/theme`) — `default`, `apple2` (green phosphor), `msdos`.
+  auth mode, thinking mode, default permission mode, auto-commit, theme, context
+  window, and max tool calls, edited in-TUI; changes apply live and persist to
+  `config.json`.
+- **Themes** (`/theme`) — `Default`, `Apple ][` (green phosphor), `MSDOS`,
+  `macOS`, `SUN`, `NeXT`, and `SGI`.
 - **Tuned for the Pi framebuffer console** — ASCII fallback and clear-on-exit
   under `TERM=linux`, plus a launch banner with live MEM / Wi-Fi / IP.
 
@@ -102,7 +113,8 @@ On first run, picode walks you through provider, model, and API key. State lives
 in `~/.config/picode/`:
 
 ```
-config.json   provider / model / key (+ optional mcp_servers)
+config.json   provider / model / key, auth_mode, oauth tokens (0600),
+              max_tool_calls (+ optional mcp_servers)
 memory.md     remember/recall store
 history       composer history
 sessions/     per-directory session transcripts
@@ -121,20 +133,41 @@ tools appear as `mcp__<server>__<tool>`:
 }
 ```
 
+## Commands
+
+Type `/` in the composer for the ranked palette, or `/help` for the full list.
+
+| Command | Action |
+| --- | --- |
+| `/model [id\|n]` | open the model picker, or set directly by id/number |
+| `/login <provider>` | sign in to a subscription (anthropic, openai, google) |
+| `/config` | settings panel (provider, model, key, auth, thinking, …) |
+| `/compact` | summarize older turns to free context (auto at 80%) |
+| `/reset` | clear conversation context |
+| `/new` | delete the session and start fresh |
+| `/auto` | toggle bypass-permissions |
+| `/mcp` | list configured MCP servers and their tools |
+| `/memory` | show persistent memory |
+| `/theme [n]` | open the theme picker, or switch directly |
+| `/init` | summarize this project into `PICODE.md` |
+| `/clear` | clear the screen transcript |
+| `/help` · `/exit` | show help · quit |
+
 ## Keyboard
 
 | Key | Action |
 | --- | --- |
 | `Enter` | send |
-| `Shift+Tab` | cycle permission mode |
+| `Shift+Tab` / `Ctrl+P` | cycle permission mode |
 | `↑` / `↓` | history |
 | `Alt`/`Ctrl`/`Cmd + ←/→` | word / line motion |
 | `Option`/`Alt + Backspace` | delete word backward |
 | `Option`/`Alt + Delete` | delete word forward |
 | `Tab` | autocomplete commands / paths |
 | `PgUp` / `PgDn` | scroll transcript |
+| `Ctrl+L` | redraw screen |
 | `Esc` | interrupt turn / clear line |
-| `Ctrl+C` | quit |
+| `Ctrl+C` | quit (press twice) |
 
 picode enables the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
 when the terminal supports it, so modified keys are reported unambiguously.
