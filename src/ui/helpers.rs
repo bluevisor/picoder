@@ -4,7 +4,7 @@
 use super::palette::{self, Palette};
 use super::types::{BannerColor, Glyphs, Kind, is_16color_terminal};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 pub fn perm_name(p: u8) -> &'static str {
