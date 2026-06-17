@@ -2,7 +2,7 @@
 //! assembled into lines with roles so the TUI and `--banner` flag can
 //! render the same layout identically.
 
-use super::palette::{self, Palette};
+use super::palette::{self};
 use super::types::{BannerColor, Kind, TLine};
 use ratatui::style::Color;
 
