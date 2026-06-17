@@ -1110,6 +1110,30 @@ impl App {
 
 
 
+    fn set_busy(&mut self) {
+        self.mode = Mode::Busy;
+        self.busy_since = Some(Instant::now());
+    }
+
+    fn clear_busy(&mut self) {
+        self.mode = Mode::Idle;
+        self.busy_since = None;
+    }
+
+    fn dispatch(&mut self, text: String, h: &Handles) {
+        if self.mode == Mode::Busy {
+            self.queued.push(text);
+            return;
+        }
+        if let Some(cmd) = text.strip_prefix('/') {
+            self.run_command(cmd, h);
+            return;
+        }
+        self.set_busy();
+        let (task_text, images) = self.prepare_message(text);
+        let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
+    }
+
     fn prepare_message(&self, text: String) -> (String, Vec<String>) {
         let (task_text, _attached) = expand_attachments(&text);
         let (images, _img_names) = extract_images(&text);
