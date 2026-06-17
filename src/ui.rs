@@ -313,15 +313,15 @@ const GLYPHS_A: Glyphs = Glyphs {
 };
 
 /// Choose a glyph set. ASCII for dumb terminals, or when forced via
-/// PICODE_ASCII=1; Unicode otherwise (or forced via PICODE_UNICODE=1).
+/// PICODER_ASCII=1; Unicode otherwise (or forced via PICODER_UNICODE=1).
 /// TERM=linux stays Unicode: the framebuffer console renders the glyphs we
-/// use at single-cell width (set PICODE_ASCII=1 on consoles whose font
+/// use at single-cell width (set PICODER_ASCII=1 on consoles whose font
 /// doesn't cover them).
 pub fn detect_ascii() -> bool {
-    if std::env::var("PICODE_UNICODE").is_ok() {
+    if std::env::var("PICODER_UNICODE").is_ok() {
         return false;
     }
-    if std::env::var("PICODE_ASCII").is_ok() {
+    if std::env::var("PICODER_ASCII").is_ok() {
         return true;
     }
     match std::env::var("TERM").as_deref() {
@@ -369,10 +369,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "list MCP servers and their tools"),
     ("/memory", "show persistent memory"),
     ("/theme", "open the theme picker"),
-    ("/init", "summarize this project into PICODE.md"),
+    ("/init", "summarize this project into PICODER.md"),
     ("/clear", "clear the screen transcript"),
     ("/help", "show help"),
-    ("/exit", "quit picode"),
+    ("/exit", "quit picoder"),
 ];
 
 /// Most suggestions shown under the composer for a `/` prefix.
@@ -395,40 +395,48 @@ const SETTING_LABELS: &[&str] = &[
     "max tool calls",
 ];
 
-/// Heavy block-letter "PICODE" for capable terminals.
-const ART_UNICODE: [&str; 6] = [
-    "██████░ ██░ ██████░ ██████░ ██████░ ███████░",
-    "██░░░██░██░██░░░░░░██░░░░██░██░░░██░██░░░░░░",
-    "██████░░██░██░     ██░   ██░██░  ██░█████░  ",
-    "██░░░░░ ██░██░     ██░   ██░██░  ██░██░░░░  ",
-    "██░     ██░░██████░░██████░░██████░░███████░",
-    "░░░     ░░░ ░░░░░░░ ░░░░░░░ ░░░░░░░ ░░░░░░░░",
-];
-
-/// 6x4 ASCII glyphs (P I C O D E), assembled at runtime to guarantee alignment.
-const ART_GLYPHS: [[&str; 6]; 6] = [
+/// 6x4 block glyphs (P I C O D E R), assembled at runtime so the heavy and
+/// ASCII logos stay aligned and adding a letter is a one-line change.
+const ART_GLYPHS: [[&str; 6]; 7] = [
     ["####", "#  #", "####", "#   ", "#   ", "#   "], // P
-    ["####", " ## ", " ## ", " ## ", "####", "####"], // I
-    ["####", "#   ", "#   ", "#   ", "####", "####"], // C
-    ["####", "#  #", "#  #", "#  #", "####", "####"], // O
-    ["### ", "#  #", "#  #", "#  #", "### ", "### "], // D
-    ["####", "#   ", "### ", "#   ", "####", "####"], // E
+    ["####", " ## ", " ## ", " ## ", " ## ", "####"], // I
+    ["####", "#   ", "#   ", "#   ", "#   ", "####"], // C
+    ["####", "#  #", "#  #", "#  #", "#  #", "####"], // O
+    ["### ", "#  #", "#  #", "#  #", "#  #", "### "], // D
+    ["####", "#   ", "### ", "#   ", "#   ", "####"], // E
+    ["####", "#  #", "####", "# # ", "#  #", "#  #"], // R
 ];
 
-fn ascii_art() -> Vec<String> {
+/// Render the glyph table at a row, mapping `#`→`fill`. `double` widens each
+/// cell to two columns for the heavy Unicode logo.
+fn art_glyphs(fill: char, double: bool) -> Vec<String> {
     (0..6)
-        .map(|r| ART_GLYPHS.iter().map(|g| g[r]).collect::<Vec<_>>().join(" "))
+        .map(|r| {
+            ART_GLYPHS
+                .iter()
+                .map(|g| {
+                    g[r]
+                        .chars()
+                        .map(|c| {
+                            let cell = if c == '#' { fill } else { ' ' };
+                            if double { format!("{cell}{cell}") } else { cell.to_string() }
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(if double { "  " } else { " " })
+        })
         .collect()
 }
 
-/// Pick the widest PICODE art that fits in `w` columns.
+/// Pick the widest PICODER art that fits in `w` columns.
 fn banner_art(w: usize, ascii: bool) -> Vec<String> {
-    if !ascii && w >= 46 {
-        ART_UNICODE.iter().map(|s| s.to_string()).collect()
-    } else if w >= 31 {
-        ascii_art()
+    if !ascii && w >= 68 {
+        art_glyphs('█', true)
+    } else if w >= 34 {
+        art_glyphs(if ascii { '#' } else { '█' }, false)
     } else {
-        vec!["P I C O D E".to_string()]
+        vec!["P I C O D E R".to_string()]
     }
 }
 
@@ -468,7 +476,7 @@ fn banner_lines(w: usize, ascii: bool, status: &[String]) -> Vec<BLine> {
         out.push(BLine { text: format!("{art_pad}{l}"), role: BRole::Art(i) });
     }
     out.push(BLine { text: String::new(), role: BRole::Frame });
-    out.push(BLine { text: center(&format!("picode v{}", env!("CARGO_PKG_VERSION"))), role: BRole::Version });
+    out.push(BLine { text: center(&format!("picoder v{}", env!("CARGO_PKG_VERSION"))), role: BRole::Version });
     out.push(BLine { text: center(TAGLINE), role: BRole::Tagline });
     out.push(BLine { text: String::new(), role: BRole::Frame });
 
@@ -632,11 +640,11 @@ pub struct UiConfig {
 }
 
 /// The current working directory as a display string, with `$HOME` collapsed to
-/// `~`. Falls back to `picode` if the cwd can't be read.
+/// `~`. Falls back to `picoder` if the cwd can't be read.
 fn cwd_label() -> String {
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
-        Err(_) => return "picode".to_string(),
+        Err(_) => return "picoder".to_string(),
     };
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
@@ -726,7 +734,7 @@ pub struct App {
     balance: Option<String>,
     settings: Config,
     /// Current working directory shown in the output box title, with $HOME
-    /// collapsed to `~`. Computed once at startup (picode never chdirs).
+    /// collapsed to `~`. Computed once at startup (picoder never chdirs).
     cwd_label: String,
     /// Cached `(branch, dirty)` for the title's git indicator. `None` outside a
     /// repo. Refreshed on a throttle (see `git_checked_at`) since the agent's
@@ -2096,7 +2104,7 @@ impl App {
                 }
             }
             "init" => {
-                let prompt = "Explore the current project directory (list_files, then read key files like README, Cargo.toml, package.json, pyproject.toml, Makefile, etc.) and write a concise PICODE.md summarizing: what this project is, its structure, and how to build/run/test it. Keep it short and accurate.";
+                let prompt = "Explore the current project directory (list_files, then read key files like README, Cargo.toml, package.json, pyproject.toml, Makefile, etc.) and write a concise PICODER.md summarizing: what this project is, its structure, and how to build/run/test it. Keep it short and accurate.";
                 self.push(Kind::User, "/init".to_string());
                 let _ = h.cmd_tx.send(WorkerCmd::User { text: prompt.to_string(), images: Vec::new() });
                 self.mode = Mode::Busy;
@@ -2119,10 +2127,10 @@ impl App {
             "  /mcp           list configured MCP servers and their tools",
             "  /memory        show persistent memory",
             "  /theme [n]     open theme picker, or switch directly (Default, Apple ][, MSDOS, macOS, SUN, NeXT, SGI)",
-            "  /init          summarize this project into PICODE.md",
+            "  /init          summarize this project into PICODER.md",
             "  /clear         clear the screen transcript",
             "  /help          show this help",
-            "  /exit          quit picode",
+            "  /exit          quit picoder",
             "input: @path attaches a file | Tab autocompletes commands & paths",
             "       typing while the agent works queues the message; Enter queues it",
             "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-L redraw | Ctrl-C twice to quit",
@@ -2132,7 +2140,7 @@ impl App {
         }
     }
 
-    /// A boot-screen banner: a PICODE block-art logo, version + tagline, and a
+    /// A boot-screen banner: a PICODER block-art logo, version + tagline, and a
     /// bordered SYSTEM panel of status lines.
     pub fn banner(&mut self, width: u16, status: Vec<String>) {
         let w = (width as usize).saturating_sub(4).max(8);
@@ -2160,7 +2168,7 @@ impl App {
 
     pub fn welcome(&mut self) {
         let model = self.model_info.clone();
-        self.push(Kind::Notice, format!("picode ({model}) — theme: {} · type a task, or /help for commands", self.palette.name));
+        self.push(Kind::Notice, format!("picoder ({model}) — theme: {} · type a task, or /help for commands", self.palette.name));
     }
 
     pub fn note(&mut self, s: String) {
@@ -2760,7 +2768,7 @@ impl App {
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::styled(text, Style::default().fg(color)),
             Span::styled("  (shift+tab/ctrl+p to cycle)", Style::default().fg(self.dim_text())),
-            Span::styled(format!("   picode v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(self.dim_text())),
+            Span::styled(format!("   picoder v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(self.dim_text())),
         ];
         if self.scrolled_up {
             spans.push(Span::styled(

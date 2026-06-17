@@ -173,7 +173,7 @@ impl Mcp {
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name":"picode","version":env!("CARGO_PKG_VERSION")}
+                "clientInfo": {"name":"picoder","version":env!("CARGO_PKG_VERSION")}
             }),
             INIT_TIMEOUT,
             None,
@@ -344,7 +344,7 @@ for line in sys.stdin:
 "#;
 
     fn mini_config() -> BTreeMap<String, McpServerConfig> {
-        let path = std::env::temp_dir().join("picode_mini_mcp.py");
+        let path = std::env::temp_dir().join("picoder_mini_mcp.py");
         std::fs::write(&path, MINI_SERVER).unwrap();
         let mut m = BTreeMap::new();
         m.insert(

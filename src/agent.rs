@@ -782,7 +782,7 @@ impl Worker {
         if self.perm.load(Ordering::Relaxed) == PERM_PLAN
             && matches!(name, "bash" | "write_file" | "edit_file" | "multi_edit" | "bash_kill")
         {
-            let r = "[plan mode] Not executed. picode is in read-only plan mode — \
+            let r = "[plan mode] Not executed. picoder is in read-only plan mode — \
                      describe the change you'd make; the user will switch off plan mode to apply it."
                 .to_string();
             self.result_event(&r);
@@ -1001,7 +1001,7 @@ impl Worker {
                 // auto-approve is on. Plan mode can't tell read from write, so
                 // it blocks them all.
                 if self.perm.load(Ordering::Relaxed) == PERM_PLAN {
-                    let r = "[plan mode] Not executed. picode is in read-only plan mode — \
+                    let r = "[plan mode] Not executed. picoder is in read-only plan mode — \
                              MCP tools may have side effects."
                         .to_string();
                     self.result_event(&r);
@@ -1033,7 +1033,7 @@ impl Worker {
         }
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let owned: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
-        tools::git_autocommit(&cwd, &owned, &format!("picode: {summary}"))
+        tools::git_autocommit(&cwd, &owned, &format!("picoder: {summary}"))
     }
 
     fn result_event(&self, result: &str) {
@@ -1143,7 +1143,7 @@ fn parse_edits(v: Option<&Value>) -> Vec<tools::EditReq> {
 fn subagent_prompt(max: usize) -> String {
     let host = crate::sysinfo::host_descriptor();
     format!(
-        "You are a sub-agent of picode, a terminal coding agent running ON {host}. You were \
+        "You are a sub-agent of picoder, a terminal coding agent running ON {host}. You were \
 delegated a single focused task by the main agent.
 
 Rules:

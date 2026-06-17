@@ -1,6 +1,6 @@
-# picode Audit Report
+# picoder Audit Report
 
-A comprehensive audit comparing picode to Codex CLI, Claude Code, and Agy,
+A comprehensive audit comparing picoder to Codex CLI, Claude Code, and Agy,
 and identifying concrete bugs, rough edges, and missing features.
 
 Items marked ✅ were fixed in weeks 1–2. Items marked → are in the week 3–4
@@ -8,9 +8,9 @@ plan (next 10). Items without badges are still pending.
 
 ## Feature Comparison
 
-picode's 20 built-in tools are competitive. Unique features no competitor has:
+picoder's 20 built-in tools are competitive. Unique features no competitor has:
 `multi_edit` (atomic batched edits), `todo` (visible plan), `remember`/`recall`,
-auto-load of all 4 project file formats (PICODE.md/AGENTS.md/CLAUDE.md/GEMINI.md),
+auto-load of all 4 project file formats (PICODER.md/AGENTS.md/CLAUDE.md/GEMINI.md),
 apple-rainbow launch banner with WiFi/IP, `/config` interactive settings panel,
 ASCII fallback for Linux framebuffer console, account balance display, sudo
 askpass bridge. Runs on a Pi Zero W (512MB RAM) with a 2.5MB static binary —
@@ -49,7 +49,7 @@ zero competitors do this.
 | 17 | task tool advertised to sub-agents but always fails | agent.rs:503-536 | ✅ stripped from sub-agent tools |
 | 18 | Esc 50ms delay in composer feels sluggish | ui.rs:1373 | ✅ 18ms deadline |
 | 19 | html_to_text regex compiled from scratch every call | tools.rs:663-678 | ✅ OnceLock statics |
-| 20 | Concurrent picode instances can corrupt memory.md | tools.rs:858-870 | ✅ lockfile with create_new + backoff |
+| 20 | Concurrent picoder instances can corrupt memory.md | tools.rs:858-870 | ✅ lockfile with create_new + backoff |
 | 21 | edit_file Unicode normalization mismatch | tools.rs:261-273 | ✅ NFC normalize before match |
 | 22 | Setup wizard has no validation of inputs | config.rs:384-423 | ✅ URL starts-with-http check, model non-empty loop |
 | 23 | Symlinks transparently followed on writes | tools.rs:246-259 | ✅ symlink_metadata check + DENIED |
@@ -65,7 +65,7 @@ zero competitors do this.
 | 28 | Slash-suggestion ranking scans full history per keystroke | ui.rs:801-823 | ✅ cached cmd_uses HashMap |
 | 29 | final_text in one-shot can be stale (empty last reply) | main.rs:277-284 | ✅ captured on ResetLive before clear |
 | 30 | --banner flag can swallow next positional as theme name | main.rs:108 | ✅ is_theme_name guard |
-| 31 | PICODE.md loading reads entire file before truncating | main.rs:222 | ✅ BufReader::take(1MB) |
+| 31 | PICODER.md loading reads entire file before truncating | main.rs:222 | ✅ BufReader::take(1MB) |
 | 32 | MCP server crashes have no recovery/restart logic | mcp.rs | ✅ restart-on-call + status update |
 | 33 | Compaction summary loses image context | agent.rs:854-878 | ✅ image count + filenames in render_for_summary |
 | 34 | / not showing suggestions while agent is processing | ui.rs | ✅ accepts Busy mode |
@@ -77,7 +77,7 @@ zero competitors do this.
 | 1 | 15 | Merge conflicts → silent commit failure | Surface `[commit skipped: {stderr}]` in tool result |
 | 2 | 18 | Esc 50ms delay feels sluggish | Drop deadline to 18ms (one frame + margin) |
 | 3 | 19 | html_to_text recompiles regex per call | Lift regexes into `OnceLock` statics |
-| 4 | 20 | Concurrent picode instances can corrupt memory.md | Lockfile with `create_new` + exponential backoff |
+| 4 | 20 | Concurrent picoder instances can corrupt memory.md | Lockfile with `create_new` + exponential backoff |
 | 5 | 21 | edit_file Unicode normalization mismatch | NFC-normalize both old_text and file content before substring search |
 | 6 | 22 | Setup wizard has no validation of inputs | Validate URL starts with `http`, model non-empty; loop until valid |
 | 7 | 23 | Symlinks transparently followed on writes | Check `symlink_metadata` before writing; refuse symlink targets |

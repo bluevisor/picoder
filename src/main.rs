@@ -1,4 +1,4 @@
-//! picode — a tiny full-screen agentic coding CLI for the Raspberry Pi Zero W.
+//! picoder — a tiny full-screen agentic coding CLI for the Raspberry Pi Zero W.
 //!
 //! Pure static binary (rustls TLS, no system deps). Talks to any
 //! OpenAI-compatible chat API; defaults to DeepSeek. Codex/Claude-Code-style
@@ -20,7 +20,7 @@ use api::Message;
 use config::Config;
 use std::io::{IsTerminal, Read, Write};
 
-/// System prompt, built at runtime so picode honestly describes whatever host
+/// System prompt, built at runtime so picoder honestly describes whatever host
 /// it's on (Pi Zero W → Jetson Nano). A host is treated as build-capable when
 /// it has ≥4 cores or ≥2GB RAM (so the quad-core Jetson Nano, which can compile
 /// its own Rust, isn't told to avoid compiles); smaller hosts get a "keep it
@@ -43,7 +43,7 @@ state with `git revert`/`git checkout` if an edit was wrong. Don't commit manual
         ""
     };
     format!(
-        "You are picode, a terminal coding agent running ON {host}. You help with \
+        "You are picoder, a terminal coding agent running ON {host}. You help with \
 software tasks using tools.
 
 Rules:
@@ -56,31 +56,31 @@ edit_file; use write_file for new files; use multi_edit to change several files 
     )
 }
 
-const HELP: &str = "picode — tiny agentic coding CLI (Rust, for the Pi Zero W)
+const HELP: &str = "picoder — tiny agentic coding CLI (Rust, for the Pi Zero W)
 
 usage:
-  picode                 interactive full-screen TUI
-  picode \"do a thing\"     one-shot task, then exit
-  picode --continue      resume this directory's last session (alias: -c)
-  picode --auto ...      auto-approve tool calls
-  picode --output FILE   one-shot: also write the final reply to FILE (alias: -o)
-  picode --config        set up provider + API key
-  picode model [id]      list models, or set the model
-  picode --banner        print the launch banner (debug) and exit
-  picode -h | --help     this help
-  picode --version
+  picoder                 interactive full-screen TUI
+  picoder \"do a thing\"     one-shot task, then exit
+  picoder --continue      resume this directory's last session (alias: -c)
+  picoder --auto ...      auto-approve tool calls
+  picoder --output FILE   one-shot: also write the final reply to FILE (alias: -o)
+  picoder --config        set up provider + API key
+  picoder model [id]      list models, or set the model
+  picoder --banner        print the launch banner (debug) and exit
+  picoder -h | --help     this help
+  picoder --version
 
 in the TUI: @path attaches a file · Tab autocompletes commands/paths
 
-config: ~/.config/picode/config.json  (key also via PICODE_API_KEY, or the
+config: ~/.config/picoder/config.json  (key also via PICODER_API_KEY, or the
         configured provider's var, e.g. DEEPSEEK_API_KEY / OPENAI_API_KEY)
-auto-loads PICODE.md / AGENTS.md / CLAUDE.md from the working directory";
+auto-loads PICODER.md / AGENTS.md / CLAUDE.md from the working directory";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     // Internal: invoked by sudo as the SUDO_ASKPASS helper. Talks to the running
-    // picode over the given socket and prints the password; never starts the TUI.
+    // picoder over the given socket and prints the password; never starts the TUI.
     if let Some(pos) = args.iter().position(|a| a == "--askpass") {
         let sock = args.get(pos + 1).cloned().unwrap_or_default();
         let prompt = args.get(pos + 2).cloned().unwrap_or_else(|| "[sudo] password:".into());
@@ -92,7 +92,7 @@ fn main() {
         return;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("picode {}", env!("CARGO_PKG_VERSION"));
+        println!("picoder {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     if args.iter().any(|a| a == "--config" || a == "--setup") {
@@ -153,7 +153,7 @@ fn main() {
             }
         }
         if cfg.api_key.is_empty() {
-            eprintln!("Run: picode --config");
+            eprintln!("Run: picoder --config");
             return;
         }
     }
@@ -161,12 +161,12 @@ fn main() {
     if !args.is_empty() {
         let (messages, _) = build_context(cont, &cfg);
         // Only persist a one-shot turn when explicitly continuing a session,
-        // so a stray `picode "x"` can't clobber a richer interactive session.
+        // so a stray `picoder "x"` can't clobber a richer interactive session.
         let session = cont.then(config::session_path);
         run_oneshot(cfg, messages, session, args.join(" "), output);
     } else {
         if output.is_some() {
-            eprintln!("--output only applies to one-shot mode (picode \"task\" -o file)");
+            eprintln!("--output only applies to one-shot mode (picoder \"task\" -o file)");
             return;
         }
         let (messages, notes) = build_context(cont, &cfg);
@@ -232,7 +232,7 @@ fn status_lines(cfg: &Config, ascii: bool) -> Vec<String> {
 }
 
 fn load_project_context() -> Option<(Message, String)> {
-    for name in ["PICODE.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
+    for name in ["PICODER.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
         let content = match std::fs::File::open(name) {
             Ok(f) => {
                 let mut r = std::io::BufReader::new(f.take(1_000_000)); // cap at 1 MB
@@ -462,7 +462,7 @@ fn model_subcommand(cfg: &Config, arg: Option<String>) {
         return;
     }
     if cfg.api_key.is_empty() {
-        eprintln!("No API key. Run: picode --config");
+        eprintln!("No API key. Run: picoder --config");
         return;
     }
     match api::list_models(&http, cfg) {

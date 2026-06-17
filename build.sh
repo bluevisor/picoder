@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# picode build tool. Usage:
+# picoder build tool. Usage:
 #   ./build.sh           cross-compile for the Pi Zero W (ARMv6, static musl)
-#   ./build.sh deploy    build + install + sync source to every host in PICODE_HOSTS
-#   ./build.sh pull      copy a Pi's ~/picode source back to the Mac (recover
+#   ./build.sh deploy    build + install + sync source to every host in PICODER_HOSTS
+#   ./build.sh pull      copy a Pi's ~/picoder source back to the Mac (recover
 #                        on-device self-edits before rebuilding)
 #
 # Deploy targets are configurable — no IPs are hardcoded in the logic:
-#   PICODE_HOSTS   space-separated list of user@host (default below)
-#   PI=user@host   target a single host (overrides PICODE_HOSTS, used by pull too)
+#   PICODER_HOSTS   space-separated list of user@host (default below)
+#   PI=user@host   target a single host (overrides PICODER_HOSTS, used by pull too)
 # Examples:
-#   PICODE_HOSTS="pi@10.1.2.3 pi@10.1.2.4" ./build.sh deploy
+#   PICODER_HOSTS="pi@10.1.2.3 pi@10.1.2.4" ./build.sh deploy
 #   PI=bluevisor@10.0.0.128 ./build.sh deploy
-# You can also export PICODE_HOSTS in your shell profile to set it permanently.
+# You can also export PICODER_HOSTS in your shell profile to set it permanently.
 set -eo pipefail
 
 CMD="${1:-build}"
 
 # Default deploy targets. Each host gets the binary matching its architecture
-# (Pi Zero W = ARMv6, Pi 5 = aarch64). Override with PICODE_HOSTS, or PI=... for
+# (Pi Zero W = ARMv6, Pi 5 = aarch64). Override with PICODER_HOSTS, or PI=... for
 # a single host.
 DEFAULT_HOSTS="bluevisor@10.0.0.216 bluevisor@10.0.0.128"
-read -r -a PIS <<<"${PICODE_HOSTS:-$DEFAULT_HOSTS}"
+read -r -a PIS <<<"${PICODER_HOSTS:-$DEFAULT_HOSTS}"
 if [[ -n "${PI:-}" ]]; then
   PIS=("$PI")
 fi
 if [[ ${#PIS[@]} -eq 0 ]]; then
-  echo "!! no deploy hosts — set PICODE_HOSTS or PI" >&2
+  echo "!! no deploy hosts — set PICODER_HOSTS or PI" >&2
   exit 1
 fi
 # pull is inherently single-host: use PI if given, else the last configured host.
@@ -37,13 +37,13 @@ cd "$(dirname "$0")"
 if [[ "$CMD" == "pull" ]]; then
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
-  echo ">> pulling $PULL_PI:~/picode -> $TMP ..."
-  ssh "$PULL_PI" 'cd ~/picode && tar czf - --exclude target --exclude ".git" .' \
+  echo ">> pulling $PULL_PI:~/picoder -> $TMP ..."
+  ssh "$PULL_PI" 'cd ~/picoder && tar czf - --exclude target --exclude ".git" .' \
     | tar xzf - -C "$TMP"
 
   # Program source we own; build.sh is handled separately (see below) to avoid
   # overwriting this script while it runs.
-  FILES=(src Cargo.toml Cargo.lock .cargo PICODE.md)
+  FILES=(src Cargo.toml Cargo.lock .cargo PICODER.md)
 
   echo ">> changes (Pi vs Mac):"
   changed=0
@@ -67,9 +67,9 @@ if [[ "$CMD" == "pull" ]]; then
     exit 0
   fi
 
-  BAK="/tmp/picode-mac-src-backup-$(date +%Y%m%d-%H%M%S)"
+  BAK="/tmp/picoder-mac-src-backup-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$BAK"
-  cp -R src Cargo.toml Cargo.lock .cargo PICODE.md "$BAK"/ 2>/dev/null || true
+  cp -R src Cargo.toml Cargo.lock .cargo PICODER.md "$BAK"/ 2>/dev/null || true
   echo ">> backed up current Mac source to $BAK"
 
   for f in "${FILES[@]}"; do
@@ -129,7 +129,7 @@ if [[ "$CMD" != "deploy" ]]; then
   build_target "$TARGET_ARMV7"
   build_target "$TARGET_ARM64"
   for t in "$TARGET_ARMV6" "$TARGET_ARMV7" "$TARGET_ARM64"; do
-    file "target/$t/release/picode"
+    file "target/$t/release/picoder"
   done
   exit 0
 fi
@@ -143,24 +143,24 @@ for P in "${PIS[@]}"; do
     continue
   fi
   build_target "$t"
-  BIN="target/$t/release/picode"
+  BIN="target/$t/release/picoder"
   echo ">> deploying to $P ($arch -> $t)..."
-  scp -q "$BIN" "$P:/tmp/picode.new"
+  scp -q "$BIN" "$P:/tmp/picoder.new"
   ssh "$P" '
     set -e
     mkdir -p ~/.local/bin
-    if [ -f ~/.local/bin/picode ] && ! [ -f ~/.local/bin/picode-py ]; then
-      cp ~/.local/bin/picode ~/.local/bin/picode-py
-      echo "   backed up Python picode -> picode-py"
+    if [ -f ~/.local/bin/picoder ] && ! [ -f ~/.local/bin/picoder-py ]; then
+      cp ~/.local/bin/picoder ~/.local/bin/picoder-py
+      echo "   backed up Python picoder -> picoder-py"
     fi
-    mv /tmp/picode.new ~/.local/bin/picode
-    chmod +x ~/.local/bin/picode
-    echo "   installed: $(~/.local/bin/picode --version)"
+    mv /tmp/picoder.new ~/.local/bin/picoder
+    chmod +x ~/.local/bin/picoder
+    echo "   installed: $(~/.local/bin/picoder --version)"
   '
-  # Keep a self-editable source copy on the Pi in sync (~/picode).
-  echo ">> syncing source to $P:~/picode..."
+  # Keep a self-editable source copy on the Pi in sync (~/picoder).
+  echo ">> syncing source to $P:~/picoder..."
   COPYFILE_DISABLE=1 tar czf - --exclude target --exclude .git \
-    Cargo.toml Cargo.lock .cargo build.sh PICODE.md src \
-    | ssh "$P" 'mkdir -p ~/picode && tar xzf - -C ~/picode && find ~/picode -name "._*" -delete'
+    Cargo.toml Cargo.lock .cargo build.sh PICODER.md src \
+    | ssh "$P" 'mkdir -p ~/picoder && tar xzf - -C ~/picoder && find ~/picoder -name "._*" -delete'
   echo "   synced source"
 done

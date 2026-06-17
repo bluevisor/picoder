@@ -75,8 +75,8 @@ jobs:
           ASSET: ${{ matrix.asset }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "refusing non-version tag: $TAG" >&2; exit 1 ;; esac
-          NAME="picode-${TAG}-${ASSET}.tar.gz"
-          tar -C "target/${TARGET}/release" -czf "$NAME" picode
+          NAME="picoder-${TAG}-${ASSET}.tar.gz"
+          tar -C "target/${TARGET}/release" -czf "$NAME" picoder
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: Upload to release
@@ -118,8 +118,8 @@ jobs:
           ASSET: ${{ matrix.asset }}
         run: |
           case "$TAG" in v[0-9]*) ;; *) echo "refusing non-version tag: $TAG" >&2; exit 1 ;; esac
-          NAME="picode-${TAG}-${ASSET}.tar.gz"
-          tar -C "target/${TARGET}/release" -czf "$NAME" picode
+          NAME="picoder-${TAG}-${ASSET}.tar.gz"
+          tar -C "target/${TARGET}/release" -czf "$NAME" picoder
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: Upload to release

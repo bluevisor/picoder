@@ -104,7 +104,7 @@ pub fn agent_http() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(20))
         .timeout_read(std::time::Duration::from_secs(60))
-        .user_agent("picode/0.1")
+        .user_agent("picoder/0.1")
         .build()
 }
 
@@ -180,7 +180,7 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"pattern":{"type":"string"}},
             "required":["pattern"]
         })),
-        tool("remember","Persist a one-line note into long-term memory (~/.config/picode/memory.md), available across sessions.", serde_json::json!({
+        tool("remember","Persist a one-line note into long-term memory (~/.config/picoder/memory.md), available across sessions.", serde_json::json!({
             "type":"object",
             "properties":{"note":{"type":"string"}},
             "required":["note"]

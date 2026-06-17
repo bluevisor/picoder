@@ -3,10 +3,10 @@
 //! The agent runs bash commands with no usable terminal for input — the TUI owns
 //! the tty in raw mode — so `sudo` can't prompt for a password the normal way
 //! (on the framebuffer console it can't reach a tty at all). Instead we register
-//! an askpass helper, which is picode itself re-invoked as
-//! `picode --askpass <socket>`, plus a `sudo` shim on PATH that forces
+//! an askpass helper, which is picoder itself re-invoked as
+//! `picoder --askpass <socket>`, plus a `sudo` shim on PATH that forces
 //! `sudo -A`. When sudo needs a password it runs the helper; the helper connects
-//! back to the running picode over a private Unix socket; picode pops a masked
+//! back to the running picoder over a private Unix socket; picoder pops a masked
 //! in-TUI prompt and returns what the user types.
 //!
 //! The password is only ever held in memory and handed straight to the local
@@ -21,8 +21,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 
-/// `picode --askpass <sock> [prompt...]`: the helper sudo executes. It connects
-/// to the running picode, hands over the prompt sudo gave us, reads the password
+/// `picoder --askpass <sock> [prompt...]`: the helper sudo executes. It connects
+/// to the running picoder, hands over the prompt sudo gave us, reads the password
 /// back, and prints it on stdout for sudo. Returns the process exit code —
 /// non-zero on any failure or user cancel, so sudo aborts rather than trying a
 /// blank password.
@@ -72,7 +72,7 @@ pub fn setup(ui: Sender<UiEvent>) {
     };
     let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
 
-    // askpass helper: re-exec picode in --askpass mode, forwarding sudo's prompt.
+    // askpass helper: re-exec picoder in --askpass mode, forwarding sudo's prompt.
     let askpass = dir.join("askpass.sh");
     let script = format!(
         "#!/bin/sh\nexec '{}' --askpass '{}' \"$@\"\n",

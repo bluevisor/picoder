@@ -1,11 +1,11 @@
 [package]
-name = "picode"
+name = "picoder"
 version = "0.2.135"
 edition = "2021"
 description = "A tiny full-screen agentic coding CLI for the Raspberry Pi Zero W"
 
 [[bin]]
-name = "picode"
+name = "picoder"
 path = "src/main.rs"
 
 [dependencies]
@@ -32,7 +32,7 @@ strip = true
 # at negligible runtime cost. Runtime tuning (target-cpu=cortex-a78, opt-level=3)
 # still comes from .cargo/config.toml for the native gnu triple, so this matches
 # release on speed while building faster. Build with `cargo build --profile orin`;
-# binary lands at target/orin/picode. Use the release profile for the canonical
+# binary lands at target/orin/picoder. Use the release profile for the canonical
 # installed binary.
 [profile.orin]
 inherits = "release"

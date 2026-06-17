@@ -1,6 +1,6 @@
 //! Configuration: provider/base_url/model/api_key, loaded from
-//! ~/.config/picode/config.json and overridable by env. Compatible with the
-//! previous Python picode config so existing keys/memory carry over.
+//! ~/.config/picoder/config.json and overridable by env. Compatible with the
+//! previous Python picoder config so existing keys/memory carry over.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -137,16 +137,16 @@ pub const PROVIDERS: &[(&str, &str, &str)] = &[
 /// Env vars that may supply the API key for `provider`, highest priority
 /// first — only the configured provider's key is ever picked up, so a machine
 /// with several providers' keys exported can't hand the wrong one to this
-/// one. PICODE_API_KEY is the explicit universal override and always wins.
+/// one. PICODER_API_KEY is the explicit universal override and always wins.
 fn key_env_vars(provider: &str) -> &'static [&'static str] {
     match provider {
-        "deepseek" => &["PICODE_API_KEY", "DEEPSEEK_API_KEY"],
-        "openai" => &["PICODE_API_KEY", "OPENAI_API_KEY"],
-        "anthropic" => &["PICODE_API_KEY", "ANTHROPIC_API_KEY"],
-        "groq" => &["PICODE_API_KEY", "GROQ_API_KEY"],
-        "openrouter" => &["PICODE_API_KEY", "OPENROUTER_API_KEY"],
-        "google" => &["PICODE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
-        _ => &["PICODE_API_KEY"],
+        "deepseek" => &["PICODER_API_KEY", "DEEPSEEK_API_KEY"],
+        "openai" => &["PICODER_API_KEY", "OPENAI_API_KEY"],
+        "anthropic" => &["PICODER_API_KEY", "ANTHROPIC_API_KEY"],
+        "groq" => &["PICODER_API_KEY", "GROQ_API_KEY"],
+        "openrouter" => &["PICODER_API_KEY", "OPENROUTER_API_KEY"],
+        "google" => &["PICODER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        _ => &["PICODER_API_KEY"],
     }
 }
 
@@ -220,7 +220,7 @@ impl Default for Config {
 
 pub fn config_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config").join("picode")
+    PathBuf::from(home).join(".config").join("picoder")
 }
 
 pub fn config_path() -> PathBuf {
@@ -235,7 +235,7 @@ pub fn memory_path() -> PathBuf {
 /// rename over the target. A power loss mid-write (common on a Pi running off an
 /// SD card) then leaves either the intact old file or the complete new one —
 /// never the truncated mix a bare `fs::write` can produce. The temp name is
-/// per-process so two picode instances don't clobber each other's temp file.
+/// per-process so two picoder instances don't clobber each other's temp file.
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp.{}", std::process::id()));
@@ -361,7 +361,7 @@ impl Config {
 
     pub fn load() -> Config {
         let mut cfg = Self::load_disk();
-        // First match wins, so PICODE_API_KEY (listed first) overrides the
+        // First match wins, so PICODER_API_KEY (listed first) overrides the
         // provider-specific var.
         for var in key_env_vars(&cfg.provider) {
             if let Ok(k) = std::env::var(var) {
@@ -398,7 +398,7 @@ impl Config {
             "theme": on_disk.theme,
         });
         // Write per-provider keys (the canonical store). Also write the legacy
-        // api_key field with the current provider's key for older picode readers.
+        // api_key field with the current provider's key for older picoder readers.
         if !on_disk.api_keys.is_empty() {
             json["api_keys"] = serde_json::to_value(&on_disk.api_keys).unwrap_or_default();
             if let Some(k) = on_disk.api_keys.get(&on_disk.provider) {
@@ -591,7 +591,7 @@ mod tests {
         // can supply the key — never another provider's.
         for (name, _, _) in PROVIDERS {
             let vars = key_env_vars(name);
-            assert_eq!(vars[0], "PICODE_API_KEY", "{name}: override must win");
+            assert_eq!(vars[0], "PICODER_API_KEY", "{name}: override must win");
             for v in &vars[1..] {
                 let prov_upper = name.to_uppercase();
                 assert!(
@@ -601,12 +601,12 @@ mod tests {
             }
         }
         // Unknown/custom providers get only the explicit override.
-        assert_eq!(key_env_vars("my-llm-box"), &["PICODE_API_KEY"]);
+        assert_eq!(key_env_vars("my-llm-box"), &["PICODER_API_KEY"]);
     }
 
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join("picode_atomic_test");
+        let dir = std::env::temp_dir().join("picoder_atomic_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.json");
         std::fs::write(&path, b"old contents").unwrap();
@@ -637,7 +637,7 @@ fn set_private(_path: &std::path::Path) {}
 /// Interactive first-run setup, executed before the TUI starts (cooked stdin).
 pub fn run_setup() -> Result<Config> {
     let mut cfg = Config::load();
-    println!("\x1b[1mpicode setup\x1b[0m");
+    println!("\x1b[1mpicoder setup\x1b[0m");
     println!("Provider:");
     for (i, (name, _, _)) in PROVIDERS.iter().enumerate() {
         let default = if i == 0 { " (default)" } else { "" };

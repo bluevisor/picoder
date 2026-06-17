@@ -690,7 +690,7 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         let mut c = Command::new("git");
         c.arg("-C").arg(dir);
         if ident {
-            c.args(["-c", "user.name=picode", "-c", "user.email=picode@localhost"]);
+            c.args(["-c", "user.name=picoder", "-c", "user.email=picoder@localhost"]);
         }
         // Commit all staged changes (the edited files + optional Cargo.toml bump).
         c.args(["commit", "--no-verify", "-m", message]);
@@ -1067,7 +1067,7 @@ pub fn web_search(http: &ureq::Agent, query: &str) -> String {
     let resp = http
         .get(&url)
         .timeout(Duration::from_secs(30))
-        .set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) picode/0.1")
+        .set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) picoder/0.1")
         .call();
     let resp = match resp {
         Ok(r) => r,
@@ -1226,7 +1226,7 @@ pub fn remember(note: &str) -> String {
     // appends. create_new is atomic — only one process can own the lock at once.
     let lock = path.with_extension("md.lock");
     if let Err(e) = lock_acquire(&lock) {
-        return format!("ERROR: lock busy — another picode is writing memory: {e}");
+        return format!("ERROR: lock busy — another picoder is writing memory: {e}");
     }
     let res = std::fs::OpenOptions::new()
         .create(true)
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn multi_edit_composes_same_file() {
-        let dir = std::env::temp_dir().join("picode_multi_edit_test");
+        let dir = std::env::temp_dir().join("picoder_multi_edit_test");
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
         let b = dir.join("b.txt");
@@ -1386,7 +1386,7 @@ mod tests {
 
     #[test]
     fn multi_edit_aborts_on_missing_match() {
-        let dir = std::env::temp_dir().join("picode_multi_edit_abort");
+        let dir = std::env::temp_dir().join("picoder_multi_edit_abort");
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
         std::fs::write(&a, "keep me\n").unwrap();
@@ -1402,7 +1402,7 @@ mod tests {
 
     #[test]
     fn git_autocommit_checkpoints_edit() {
-        let dir = std::env::temp_dir().join("picode_git_test");
+        let dir = std::env::temp_dir().join("picoder_git_test");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -1416,10 +1416,10 @@ mod tests {
         assert!(in_git_repo(&dir));
         let f = dir.join("x.txt");
         std::fs::write(&f, "hi\n").unwrap();
-        let note = git_autocommit(&dir, &[f.to_string_lossy().into()], "picode: write x.txt");
+        let note = git_autocommit(&dir, &[f.to_string_lossy().into()], "picoder: write x.txt");
         assert!(note.contains("committed"), "got: {note:?}");
         // A second call with no change commits nothing.
-        let note2 = git_autocommit(&dir, &[f.to_string_lossy().into()], "picode: noop");
+        let note2 = git_autocommit(&dir, &[f.to_string_lossy().into()], "picoder: noop");
         assert!(note2.is_empty(), "got: {note2:?}");
         let log = git(&["log", "--oneline"]);
         assert!(String::from_utf8_lossy(&log.stdout).contains("write x.txt"));
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn bump_cargo_version_increments_patch() {
-        let dir = std::env::temp_dir().join("picode_bump_test");
+        let dir = std::env::temp_dir().join("picoder_bump_test");
         std::fs::create_dir_all(&dir).unwrap();
         let toml = dir.join("Cargo.toml");
         std::fs::write(&toml, "[package]\nname = \"t\"\nversion = \"3.14.159\"\nedition = \"2021\"\n").unwrap();
@@ -1444,7 +1444,7 @@ mod tests {
 
     #[test]
     fn bump_cargo_version_no_cargo_toml() {
-        let dir = std::env::temp_dir().join("picode_bump_nocargo");
+        let dir = std::env::temp_dir().join("picoder_bump_nocargo");
         std::fs::create_dir_all(&dir).unwrap();
         assert!(bump_cargo_version(&dir).is_none());
         std::fs::remove_dir_all(&dir).ok();
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn git_autocommit_bumps_version() {
-        let dir = std::env::temp_dir().join("picode_git_bump_test");
+        let dir = std::env::temp_dir().join("picoder_git_bump_test");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -1472,7 +1472,7 @@ mod tests {
         // Now edit a file and autocommit.
         let f = dir.join("x.txt");
         std::fs::write(&f, "hi\n").unwrap();
-        let note = git_autocommit(&dir, &[f.to_string_lossy().into()], "picode: write x.txt");
+        let note = git_autocommit(&dir, &[f.to_string_lossy().into()], "picoder: write x.txt");
         assert!(note.contains("committed"), "got: {note:?}");
         assert!(note.contains("version → 0.1.1"), "got: {note:?}");
         let content = std::fs::read_to_string(&toml).unwrap();
@@ -1500,7 +1500,7 @@ mod tests {
         assert!(!is_image_path("notes.txt"));
         assert!(!is_image_path("Makefile"));
         // jpg maps to the image/jpeg mime.
-        let dir = std::env::temp_dir().join("picode_img_test.jpg");
+        let dir = std::env::temp_dir().join("picoder_img_test.jpg");
         std::fs::write(&dir, [0xff, 0xd8, 0xff, 0xe0]).unwrap();
         let uri = image_data_uri(dir.to_str().unwrap()).unwrap();
         assert!(uri.starts_with("data:image/jpeg;base64,/9j/"), "got: {uri}");
@@ -1586,7 +1586,7 @@ mod tests {
     #[cfg(unix)]
     fn file_tools_refuse_symlinks() {
         use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join("picode_symlink_test");
+        let dir = std::env::temp_dir().join("picoder_symlink_test");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("real.txt");

@@ -5,7 +5,7 @@
 //!
 //! Zero external crates — SHA-256, base64url, a CSPRNG (`/dev/urandom`) and
 //! percent-encoding are implemented here so the Pi-Zero build stays tiny, the
-//! same way the rest of picode hand-rolls its primitives (FNV in config.rs).
+//! same way the rest of picoder hand-rolls its primitives (FNV in config.rs).
 //!
 //! The client ids / endpoints below are the public values shipped by each
 //! vendor's own first-party CLI. They are reverse-engineered and may change;
@@ -36,8 +36,8 @@ pub struct OAuthProvider {
     pub extra: Vec<(String, String)>,
 }
 
-/// Built-in defaults, overridable via `PICODE_OAUTH_<PROVIDER>_<FIELD>` env vars
-/// (e.g. `PICODE_OAUTH_ANTHROPIC_CLIENT_ID`). Returns None for providers that
+/// Built-in defaults, overridable via `PICODER_OAUTH_<PROVIDER>_<FIELD>` env vars
+/// (e.g. `PICODER_OAUTH_ANTHROPIC_CLIENT_ID`). Returns None for providers that
 /// don't support subscription login (e.g. deepseek — API key only).
 pub fn provider(name: &str) -> Option<OAuthProvider> {
     let mut p = match name {
@@ -77,7 +77,7 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             token_url: "https://oauth2.googleapis.com/token".into(),
             // Google requires a registered client id + secret; supply your own
             // (or Gemini CLI's public desktop pair) via
-            // PICODE_OAUTH_GOOGLE_CLIENT_ID / PICODE_OAUTH_GOOGLE_CLIENT_SECRET.
+            // PICODER_OAUTH_GOOGLE_CLIENT_ID / PICODER_OAUTH_GOOGLE_CLIENT_SECRET.
             client_id: String::new(),
             client_secret: String::new(),
             scope: "https://www.googleapis.com/auth/cloud-platform \
@@ -95,16 +95,16 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
     };
     // Env overrides keep reverse-engineered constants fixable without a rebuild.
     let up = name.to_uppercase();
-    if let Ok(v) = std::env::var(format!("PICODE_OAUTH_{up}_CLIENT_ID")) {
+    if let Ok(v) = std::env::var(format!("PICODER_OAUTH_{up}_CLIENT_ID")) {
         p.client_id = v;
     }
-    if let Ok(v) = std::env::var(format!("PICODE_OAUTH_{up}_CLIENT_SECRET")) {
+    if let Ok(v) = std::env::var(format!("PICODER_OAUTH_{up}_CLIENT_SECRET")) {
         p.client_secret = v;
     }
-    if let Ok(v) = std::env::var(format!("PICODE_OAUTH_{up}_AUTH_URL")) {
+    if let Ok(v) = std::env::var(format!("PICODER_OAUTH_{up}_AUTH_URL")) {
         p.auth_url = v;
     }
-    if let Ok(v) = std::env::var(format!("PICODE_OAUTH_{up}_TOKEN_URL")) {
+    if let Ok(v) = std::env::var(format!("PICODER_OAUTH_{up}_TOKEN_URL")) {
         p.token_url = v;
     }
     Some(p)
@@ -133,8 +133,8 @@ pub fn start(p: OAuthProvider) -> Result<Login> {
     if p.client_id.is_empty() {
         let up = p.key.to_uppercase();
         bail!(
-            "no OAuth client id for {}. Set PICODE_OAUTH_{up}_CLIENT_ID (and \
-             PICODE_OAUTH_{up}_CLIENT_SECRET if the provider needs one) and retry.",
+            "no OAuth client id for {}. Set PICODER_OAUTH_{up}_CLIENT_ID (and \
+             PICODER_OAUTH_{up}_CLIENT_SECRET if the provider needs one) and retry.",
             p.label
         );
     }
@@ -302,7 +302,7 @@ fn wait_for_code(listener: &TcpListener, expect_state: &str) -> Result<String> {
                     if !expect_state.is_empty() && state != expect_state {
                         ("Login failed (state mismatch).".to_string(), Err(anyhow!("OAuth state mismatch — possible CSRF, aborted")))
                     } else {
-                        ("Login complete — you can close this tab and return to picode.".to_string(), Ok(code.clone()))
+                        ("Login complete — you can close this tab and return to picoder.".to_string(), Ok(code.clone()))
                     }
                 } else {
                     // Not the callback (e.g. favicon.ico); ignore and keep waiting.
@@ -322,7 +322,7 @@ fn wait_for_code(listener: &TcpListener, expect_state: &str) -> Result<String> {
 
 fn write_http(stream: &mut std::net::TcpStream, body: &str) -> std::io::Result<()> {
     let html = format!(
-        "<!doctype html><html><head><meta charset=utf-8><title>picode</title></head>\
+        "<!doctype html><html><head><meta charset=utf-8><title>picoder</title></head>\
          <body style=\"font-family:system-ui;background:#0b0b0b;color:#eee;display:flex;\
          align-items:center;justify-content:center;height:100vh;margin:0\">\
          <p style=\"font-size:1.1rem\">{body}</p></body></html>"

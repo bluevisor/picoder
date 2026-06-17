@@ -1,11 +1,11 @@
-# picode
+# picoder
 
 A tiny full-screen agentic coding CLI written in Rust, built to run **on a
 Raspberry Pi Zero W** (ARMv6, single core, ~512MB RAM). It talks to any
 OpenAI-compatible chat API (default: DeepSeek `deepseek-v4-pro`) and drives a
 Codex/Claude-Code-style tool loop with a ratatui terminal UI.
 
-This is picode's own source. picode can read and edit these files, but **the Pi
+This is picoder's own source. picoder can read and edit these files, but **the Pi
 cannot compile Rust** — see "Building" below.
 
 ## Layout
@@ -16,7 +16,7 @@ Cargo.toml            deps + release + jetson profiles (static musl, size-optimi
 build.sh              cross-compile (+ deploy/pull to sync with Pis)
 src/
   main.rs             CLI args, first-run setup, one-shot mode (+ --output), session/context wiring
-  config.rs           ~/.config/picode/config.json (incl. mcp_servers), setup wizard, session paths
+  config.rs           ~/.config/picoder/config.json (incl. mcp_servers), setup wizard, session paths
   api.rs              OpenAI-compatible streaming SSE, tool schema, multimodal parts, retry, list_models
   tools.rs            tool impls: bash (+ background), read/write/edit/list, grep, glob,
                       web_fetch, web_search, todo, view_image, remember, recall
@@ -60,8 +60,8 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - One-shot `--output FILE` writes the final reply to disk after the run.
 - Status bar: model · session tokens + $ cost · context-window bar · account balance.
 - Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
-- Auto-loads `PICODE.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
-- Session persistence + resume (`picode --continue`, per working directory).
+- Auto-loads `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
+- Session persistence + resume (`picoder --continue`, per working directory).
 - Composer: typing `/` opens a command palette (suggestions ranked by your
   usage history; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab
   autocomplete (commands + paths), history,
@@ -71,7 +71,7 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   modified keys (e.g. Option+Backspace) are reported unambiguously instead of
   being flattened to a bare Backspace by terminals like Warp.
 - ASCII fallback + clear-on-exit for the Pi's framebuffer console (`TERM=linux`).
-- Launch banner: rainbow-color PICODE logo + live status (MEM, WiFi SSID + IP).
+- Launch banner: rainbow-color PICODER logo + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `Default`, `Apple ][` (green phosphor, `] ▒`),
   `MSDOS` (gray, `C:\>`), `macOS` (dark mode system colors, `~ `),
   `SUN` (amber/gold, `sun% `), `NeXT` (platinum monochrome, `NeXT>`),
@@ -103,16 +103,16 @@ rustup target add arm-unknown-linux-musleabihf
 rustup target add armv7-unknown-linux-musleabihf
 rustup target add aarch64-unknown-linux-musl
 
-./build.sh           # build all three targets under target/<triple>/release/picode
-./build.sh deploy    # build + install the right binary per host in PICODE_HOSTS
-PICODE_HOSTS="pi@a pi@b" ./build.sh deploy   # custom deploy targets
+./build.sh           # build all three targets under target/<triple>/release/picoder
+./build.sh deploy    # build + install the right binary per host in PICODER_HOSTS
+PICODER_HOSTS="pi@a pi@b" ./build.sh deploy   # custom deploy targets
 PI=user@host ./build.sh deploy               # install to a single host instead
 ```
 
 `deploy` queries each host's `uname -m` and installs the matching binary
 (`armv6l` → ARMv6, `armv7l` → ARMv7, `aarch64` → aarch64) to
-`~/.local/bin/picode`. Hosts come
-from the `PICODE_HOSTS` env var (space-separated `user@host`; defaults to the
+`~/.local/bin/picoder`. Hosts come
+from the `PICODER_HOSTS` env var (space-separated `user@host`; defaults to the
 Pi Zero + Pi 5), or `PI=user@host` for a single host.
 
 `build.sh` sets the `ring` cross-compile env vars (`CC_/AR_/TARGET_CC`) per
@@ -124,7 +124,7 @@ fully static binary.
 
 ## Config / state (on the Pi)
 
-`~/.config/picode/` — `config.json` (provider/model/key), `memory.md`,
+`~/.config/picoder/` — `config.json` (provider/model/key), `memory.md`,
 `history`, `sessions/`.
 
 MCP servers are optional and configured by hand in `config.json`:
@@ -157,7 +157,7 @@ Each server is spawned over stdio at launch; its tools appear as
   `ui.rs` so the rest of the crate sees no change.
 
 - **Config/environment-driven integration tests**. MCP handshake and web_search
-  tests currently `#[ignore]` because they need a live server; a `PICODE_TEST=1`
+  tests currently `#[ignore]` because they need a live server; a `PICODER_TEST=1`
   gate would run them in CI with a containerized MCP stub.
 
 ## Performance / safety notes
