@@ -1233,7 +1233,7 @@ impl App {
             self.push(Kind::Notice, format!("  {name:<12} {desc}"));
         }
         self.push(Kind::Notice, String::from("  @file       attach a file"));
-        self.push(Kind::Notice, "  ↑/↓         browse history".into());
+        self.push(Kind::Notice, "  ↑/↓         browse history");
         self.push(Kind::Notice, "  Tab         autocomplete".into());
         self.push(Kind::Notice, "  Shift+Tab   cycle permissions (ask / bypass / plan)".into());
         self.push(Kind::Notice, "  Esc         interrupt the agent".into());
