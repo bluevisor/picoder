@@ -1314,6 +1314,22 @@ impl App {
         }
     }
 
+    fn working_timer(&self) -> String {
+        match self.busy_since {
+            Some(t) => {
+                let secs = t.elapsed().as_secs();
+                if secs < 60 {
+                    format!("working ({secs}s)… ")
+                } else {
+                    let m = secs / 60;
+                    let s = secs % 60;
+                    format!("working ({m}:{s:02})… ")
+                }
+            }
+            None => "working... ".to_string(),
+        }
+    }
+
     fn border_type(&self) -> BorderType {
         if self.glyphs.rounded {
             BorderType::Rounded
