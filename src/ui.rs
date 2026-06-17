@@ -623,6 +623,20 @@ impl App {
             }
             return;
         }
+        let n = SETTING_LABELS.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Settings { cursor: (cur + n - 1) % n, edit: None };
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.mode = Mode::Settings { cursor: (cur + 1) % n, edit: None };
+            }
+            KeyCode::Enter | KeyCode::Right => self.activate_setting(cur, 1, h),
+            KeyCode::Left => self.activate_setting(cur, -1, h),
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Idle,
+            _ => {}
+        }
+    }
 
     /// Act on a `/config` row: cycle choice rows by `dir`, or open text rows
     /// in the edit buffer. Choice changes apply (and persist) immediately.
