@@ -9,6 +9,8 @@ home on a Pi 5 or your laptop. It talks to any OpenAI-compatible chat API
 The whole thing is one ~2.5 MB statically linked binary with no runtime
 dependencies.
 
+![picode screenshot](assets/screenshot.png)
+
 ## Features
 
 - **Agentic tool loop** — `bash` (with timeout, or detached `background` jobs +
