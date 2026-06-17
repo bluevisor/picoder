@@ -624,71 +624,67 @@ impl App {
             return;
         }
 
+    /// Act on a `/config` row: cycle choice rows by `dir`, or open text rows
+    /// in the edit buffer. Choice changes apply (and persist) immediately.
     fn activate_setting(&mut self, cur: usize, dir: i32, h: &Handles) {
+        let cycle = |i: usize, n: usize| ((i as i32 + dir).rem_euclid(n as i32)) as usize;
+        let edit_with = |s: String| Mode::Settings { cursor: cur, edit: Some(s) };
         match cur {
             0 => {
-                // provider: cycle through known presets
-                let names: Vec<&str> = PROVIDERS.iter().map(|p| p.key).collect();
-                let idx = names.iter().position(|&n| n == self.settings.provider).unwrap_or(0);
-                let next = if dir >= 0 {
-                    (idx + 1) % names.len()
-                } else {
-                    (idx + names.len() - 1) % names.len()
-                };
-                let name = names[next].to_string();
+                let i = PROVIDERS
+                    .iter()
+                    .position(|(n, _, _)| *n == self.settings.provider)
+                    .map(|i| cycle(i, PROVIDERS.len()))
+                    .unwrap_or(0);
+                let (p, b, m) = PROVIDERS[i];
+                self.settings.provider = p.to_string();
+                self.settings.base_url = b.to_string();
+                // Swap to the new provider's saved API key.
+                self.settings.resolve_key();
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Provider {
-                    provider: name,
-                    model: String::new(),
+                    provider: p.to_string(),
+                    base_url: b.to_string(),
+                    model: m.to_string(),
                 }));
-                self.settings.provider = names[next].to_string();
             }
-            1 | 2 | 3 => {
-                // base url, model, api key: free-text edit
-                let current = match cur {
-                    1 => self.settings.base_url.clone(),
-                    2 => self.model_info.clone(),
-                    3 => self.settings.api_key.clone(),
-                    _ => String::new(),
-                };
-                self.mode = Mode::Settings { cursor: cur, edit: Some(current) };
-            }
+            1 => self.mode = edit_with(self.settings.base_url.clone()),
+            2 => self.mode = edit_with(self.settings.model.clone()),
+            3 => self.mode = edit_with(String::new()),
             4 => {
-                // auth mode: toggle api/sub
+                // Toggle credential source: API key <-> subscription (OAuth).
                 let next = if self.settings.auth_mode == "sub" { "api" } else { "sub" };
                 self.settings.auth_mode = next.to_string();
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AuthMode(next.to_string())));
             }
             5 => {
-                // thinking: toggle
-                let next = !self.settings.thinking;
-                self.settings.thinking = next;
-                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Thinking(next)));
+                let v = !self.settings.thinking;
+                self.settings.thinking = v;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Thinking(v)));
             }
             6 => {
-                // permissions: cycle
-                self.cycle_perm();
+                let next = if dir >= 0 { (self.perm() + 1) % 3 } else { (self.perm() + 2) % 3 };
+                self.perm.store(next, Ordering::Relaxed);
+                let name = perm_name(next);
+                self.settings.permission = name.to_string();
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Permission(name.to_string())));
             }
             7 => {
-                // auto-commit: toggle
-                let next = !self.settings.auto_commit;
-                self.settings.auto_commit = next;
-                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AutoCommit(next)));
+                let v = !self.settings.auto_commit;
+                self.settings.auto_commit = v;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AutoCommit(v)));
             }
             8 => {
-                // theme: cycle
-                let names: Vec<&str> = THEMES.to_vec();
-                let idx = names.iter().position(|&n| n == self.palette.name).unwrap_or(0);
-                let next_idx = (idx + 1) % names.len();
-                self.commit_theme(next_idx);
+                let i = THEMES
+                    .iter()
+                    .position(|t| *t == self.palette.name)
+                    .map(|i| cycle(i, THEMES.len()))
+                    .unwrap_or(0);
+                self.set_palette(palette_by_name(THEMES[i]));
+                self.settings.theme = THEMES[i].to_string();
+                Config::persist_theme(THEMES[i]);
             }
-            9 => {
-                // context window: free-text edit
-                self.mode = Mode::Settings { cursor: cur, edit: Some(self.settings.context_window.to_string()) };
-            }
-            10 => {
-                // max tool calls: free-text edit
-                self.mode = Mode::Settings { cursor: cur, edit: Some(setting_max_tool_calls(self.settings.max_tool_calls)) };
-            }
+            9 => self.mode = edit_with(self.settings.context_window.to_string()),
+            10 => self.mode = edit_with(setting_max_tool_calls(self.settings.max_tool_calls)),
             _ => {}
         }
     }
