@@ -1228,7 +1228,7 @@ impl App {
     }
 
     fn show_help(&mut self) {
-        self.push(Kind::Notice, "commands:".into());
+        self.push(Kind::Notice, String::from("commands:"));
         for (name, desc) in SLASH_COMMANDS {
             self.push(Kind::Notice, format!("  {name:<12} {desc}"));
         }
