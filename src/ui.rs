@@ -21,7 +21,7 @@ use helpers::{
 };
 use palette::{Palette, palette_by_name};
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
