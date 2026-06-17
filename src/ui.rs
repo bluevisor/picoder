@@ -573,8 +573,8 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
         let prefix = match bl.role {
             BRole::Art(i) => ansi_fg(p.mono_banner.unwrap_or(rainbow[i % rainbow.len()])),
             BRole::Version => format!("\x1b[1m{}", ansi_fg(p.accent)),
-            BRole::Tagline | BRole::Frame => ansi_fg(p.notice),
-            BRole::Data => ansi_fg(p.accent),
+            BRole::Tagline => ansi_fg(p.notice),  // dim tagline
+            BRole::Frame | BRole::Data => ansi_fg(p.accent),
         };
         out.push_str(&format!("{prefix}{}{reset}\n", bl.text));
     }
