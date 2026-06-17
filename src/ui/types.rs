@@ -151,6 +151,7 @@ pub struct TLine {
     pub color: Option<BannerColor>,
 }
 
+#[derive(Clone, PartialEq)]
 pub enum Mode {
     Idle,
     Busy,
