@@ -596,44 +596,33 @@ impl App {
     }
 
     fn on_key_settings(&mut self, key: KeyEvent, h: &Handles) {
-        let (cur, edit) = match &self.mode {
+        let (cur, editing) = match &self.mode {
             Mode::Settings { cursor, edit } => (*cursor, edit.clone()),
             _ => return,
         };
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Idle;
-            }
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.mode = Mode::Settings { cursor: cur.saturating_sub(1).max(0), edit: None };
-            }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.mode = Mode::Settings { cursor: (cur + 1).min(SETTING_LABELS.len() - 1), edit: None };
-            }
-            KeyCode::Left if cur == 6 => self.activate_setting(cur, -1, h),
-            KeyCode::Right if cur == 6 => self.activate_setting(cur, 1, h),
-            KeyCode::Enter => {
-                if let Some(ref val) = edit {
-                    self.commit_setting(cur, val.clone(), h);
-                } else {
-                    self.activate_setting(cur, 0, h);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(mut buf) = editing {
+            match key.code {
+                KeyCode::Enter => {
+                    self.mode = Mode::Settings { cursor: cur, edit: None };
+                    self.commit_setting(cur, buf, h);
                 }
-            }
-            KeyCode::Backspace => {
-                if let Some(ref mut val) = edit {
-                    val.pop();
-                    self.mode = Mode::Settings { cursor: cur, edit: Some(val.clone()) };
+                KeyCode::Esc => self.mode = Mode::Settings { cursor: cur, edit: None },
+                KeyCode::Char('u') if ctrl => {
+                    self.mode = Mode::Settings { cursor: cur, edit: Some(String::new()) };
                 }
-            }
-            KeyCode::Char(c) if edit.is_some() => {
-                if let Some(ref mut val) = edit {
-                    val.push(caps_char(&key, c));
-                    self.mode = Mode::Settings { cursor: cur, edit: Some(val.clone()) };
+                KeyCode::Backspace => {
+                    buf.pop();
+                    self.mode = Mode::Settings { cursor: cur, edit: Some(buf) };
                 }
+                KeyCode::Char(c) if !ctrl => {
+                    buf.push(caps_char(&key, c));
+                    self.mode = Mode::Settings { cursor: cur, edit: Some(buf) };
+                }
+                _ => {}
             }
-            _ => {}
+            return;
         }
-    }
 
     fn activate_setting(&mut self, cur: usize, dir: i32, h: &Handles) {
         match cur {
