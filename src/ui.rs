@@ -14,7 +14,7 @@ pub use types::{detect_ascii, is_16color_terminal, UiConfig};
 
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
 use crate::config::{Config, ConfigPatch, PROVIDERS};
-use banner::{BLine, BRole, banner_lines, push_banner_transcript};
+use banner::{BLine, BRole, banner_lines};
 use helpers::{
     bar, clean_text, complete_path, fmt_cost, humanize, layout, longest_common_prefix, pad1,
     perm_name, render_tline, setting_max_tool_calls,
