@@ -689,25 +689,29 @@ impl App {
         }
     }
 
+    /// Commit a text edit from the `/config` panel.
     fn commit_setting(&mut self, cur: usize, val: String, h: &Handles) {
+        let val = val.trim().to_string();
         match cur {
             1 => {
-                let v = val.trim().to_string();
-                self.settings.base_url = v.clone();
-                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::BaseUrl(v)));
+                if !val.is_empty() {
+                    let v = val.trim_end_matches('/').to_string();
+                    self.settings.base_url = v.clone();
+                    let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::BaseUrl(v)));
+                }
             }
             2 => {
-                let v = val.trim().to_string();
-                self.model_info = v.clone();
-                let _ = h.cmd_tx.send(WorkerCmd::SetModel(v));
+                if !val.is_empty() {
+                    self.model_info = val.clone();
+                    let _ = h.cmd_tx.send(WorkerCmd::SetModel(val));
+                }
             }
             3 => {
-                let v = val.trim().to_string();
-                self.settings.api_key = v.clone();
-                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(v)));
+                self.settings.api_key = val.clone();
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
             }
             9 => {
-                let v: u32 = val.trim().parse().unwrap_or(self.ctx_limit);
+                let v: u32 = val.parse().unwrap_or(self.ctx_limit);
                 self.settings.context_window = v;
                 self.ctx_limit = v;
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ContextWindow(v)));
@@ -719,7 +723,6 @@ impl App {
             }
             _ => {}
         }
-        self.mode = Mode::Settings { cursor: cur, edit: None };
     }
 
     fn on_key_select(&mut self, key: KeyEvent, h: &Handles) {
