@@ -533,7 +533,7 @@ fn banner_lines(w: usize, ascii: bool, status: &[String]) -> Vec<BLine> {
     out.push(BLine { text: format!("{head}{}{tr}", h.repeat(fill)), role: BRole::Frame });
     // Status lines: │ text ... │
     for line in status {
-        let pad = w.saturating_sub(line.chars().count() + 4); // 4 = "│ " + " │"
+        let pad = w.saturating_sub(line.chars().count() + 3); // 3 = "│ " + "│"
         out.push(BLine { text: format!("{vbar} {line}{}{vbar}", " ".repeat(pad)), role: BRole::Data });
     }
     // Bottom border: └───...──┘
