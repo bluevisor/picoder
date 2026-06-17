@@ -7,6 +7,7 @@
 mod agent;
 mod api;
 mod askpass;
+mod auth;
 mod config;
 mod diff;
 mod mcp;
@@ -209,7 +210,11 @@ fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
 /// the active LLM (model · provider · context window).
 fn status_lines(cfg: &Config, ascii: bool) -> Vec<String> {
     let sep = if ascii { " - " } else { " · " };
-    let ctx = if cfg.context_window >= 1000 {
+    let ctx = if cfg.context_window >= 1_000_000 {
+        let m = cfg.context_window as f64 / 1e6;
+        // 1M, not 1.0M; 1.5M keeps the decimal.
+        format!("{}M ctx", if m.fract() == 0.0 { format!("{m:.0}") } else { format!("{m:.1}") })
+    } else if cfg.context_window >= 1000 {
         format!("{}K ctx", cfg.context_window / 1000)
     } else {
         format!("{} ctx", cfg.context_window)

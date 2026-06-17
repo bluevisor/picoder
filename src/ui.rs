@@ -360,6 +360,7 @@ enum Kind {
 /// Slash commands with the one-line description shown in the `/` palette.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "pick a model from the provider's list"),
+    ("/login", "sign in to a subscription (anthropic, openai, google)"),
     ("/new", "clear conversation and session"),
     ("/config", "settings: provider, model, key, thinking, …"),
     ("/compact", "summarize older turns to free context"),
@@ -385,6 +386,7 @@ const SETTING_LABELS: &[&str] = &[
     "base url",
     "model",
     "api key",
+    "auth mode",
     "thinking",
     "permissions",
     "auto-commit",
@@ -568,6 +570,8 @@ enum Mode {
 enum PickAction {
     /// Switch model to the chosen id.
     Model,
+    /// Start the subscription OAuth flow for the chosen provider.
+    Login,
 }
 
 /// State for `Mode::Select`: a filterable, scrollable list of choices.
@@ -981,6 +985,15 @@ impl App {
             UiEvent::Context(tokens) => {
                 self.last_prompt_tokens = tokens;
             }
+            UiEvent::ContextLimit(n) => {
+                // Auto-detected model window: drives the ctx bar and the value
+                // shown in the `/config` panel until the user pins their own.
+                self.ctx_limit = n.max(1);
+                self.settings.context_window = n;
+            }
+            UiEvent::AuthMode(m) => {
+                self.settings.auth_mode = m;
+            }
             UiEvent::Balance(b) => {
                 self.balance = Some(b);
             }
@@ -1392,23 +1405,29 @@ impl App {
             2 => self.mode = edit_with(self.settings.model.clone()),
             3 => self.mode = edit_with(String::new()),
             4 => {
+                // Toggle credential source: API key <-> subscription (OAuth).
+                let next = if self.settings.auth_mode == "sub" { "api" } else { "sub" };
+                self.settings.auth_mode = next.to_string();
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AuthMode(next.to_string())));
+            }
+            5 => {
                 let v = !self.settings.thinking;
                 self.settings.thinking = v;
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Thinking(v)));
             }
-            5 => {
+            6 => {
                 let next = if dir >= 0 { (self.perm() + 1) % 3 } else { (self.perm() + 2) % 3 };
                 self.perm.store(next, Ordering::Relaxed);
                 let name = perm_name(next);
                 self.settings.permission = name.to_string();
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Permission(name.to_string())));
             }
-            6 => {
+            7 => {
                 let v = !self.settings.auto_commit;
                 self.settings.auto_commit = v;
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AutoCommit(v)));
             }
-            7 => {
+            8 => {
                 let i = THEMES
                     .iter()
                     .position(|t| *t == self.palette.name)
@@ -1418,8 +1437,8 @@ impl App {
                 self.settings.theme = THEMES[i].to_string();
                 Config::persist_theme(THEMES[i]);
             }
-            8 => self.mode = edit_with(self.settings.context_window.to_string()),
-            9 => self.mode = edit_with(setting_max_tool_calls(self.settings.max_tool_calls)),
+            9 => self.mode = edit_with(self.settings.context_window.to_string()),
+            10 => self.mode = edit_with(setting_max_tool_calls(self.settings.max_tool_calls)),
             _ => {}
         }
     }
@@ -1449,7 +1468,7 @@ impl App {
                     let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
                 }
             }
-            8 => match val.parse::<u32>() {
+            9 => match val.parse::<u32>() {
                 Ok(n) if n > 0 => {
                     self.settings.context_window = n;
                     self.ctx_limit = n;
@@ -1457,7 +1476,7 @@ impl App {
                 }
                 _ => self.push(Kind::ErrorK, "context window must be a positive integer".to_string()),
             },
-            9 => {
+            10 => {
                 let n = parse_max_tool_calls(&val);
                 self.settings.max_tool_calls = n;
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::MaxToolCalls(n)));
@@ -1495,6 +1514,12 @@ impl App {
                         // SetModel persists and echoes ModelChanged + a notice.
                         PickAction::Model => {
                             let _ = h.cmd_tx.send(WorkerCmd::SetModel(id));
+                        }
+                        // Items are "<key>  ·  <label>"; the key is the first token.
+                        PickAction::Login => {
+                            let key = id.split_whitespace().next().unwrap_or("").to_string();
+                            let _ = h.cmd_tx.send(WorkerCmd::Login(key));
+                            self.mode = Mode::Busy;
                         }
                     }
                 }
@@ -1959,6 +1984,32 @@ impl App {
         self.mode = Mode::Busy;
     }
 
+    /// Open the interactive subscription picker (`/login` with no argument).
+    /// Items are "<key>   <label>[   (signed in)]"; the key is the first token.
+    fn open_login_picker(&mut self) {
+        let items: Vec<String> = crate::auth::supported()
+            .iter()
+            .map(|&k| {
+                let label = crate::auth::provider(k).map(|p| p.label).unwrap_or_default();
+                let signed = if self.settings.oauth.contains_key(k) { "   (signed in)" } else { "" };
+                format!("{k}   {label}{signed}")
+            })
+            .collect();
+        let mut p = Picker {
+            title: "sign in to a subscription".to_string(),
+            items,
+            current: None,
+            filter: String::new(),
+            cursor: 0,
+            scroll: 0,
+            action: PickAction::Login,
+        };
+        let n = p.filtered().len();
+        p.clamp(n);
+        self.picker = Some(p);
+        self.mode = Mode::Select;
+    }
+
     fn run_command(&mut self, cmd: &str, h: &Handles) {
         let (name, arg) = match cmd.split_once(char::is_whitespace) {
             Some((a, b)) => (a, b.trim()),
@@ -2000,6 +2051,14 @@ impl App {
                 let mem = std::fs::read_to_string(memory_path()).unwrap_or_default();
                 let mem = mem.trim();
                 self.push(Kind::Notice, if mem.is_empty() { "(no memories yet)".into() } else { mem.to_string() });
+            }
+            "login" => {
+                if arg.is_empty() {
+                    self.open_login_picker();
+                } else {
+                    let _ = h.cmd_tx.send(WorkerCmd::Login(arg.to_string()));
+                    self.mode = Mode::Busy;
+                }
             }
             "model" | "models" => {
                 if arg.is_empty() {
@@ -2198,12 +2257,20 @@ impl App {
                     }
                 }
             }
-            4 => if s.thinking { "on".into() } else { "off".into() },
-            5 => perm_name(self.perm()).to_string(),
-            6 => if s.auto_commit { "on".into() } else { "off".into() },
-            7 => self.palette.name.to_string(),
-            8 => s.context_window.to_string(),
-            9 => setting_max_tool_calls(s.max_tool_calls),
+            4 => {
+                if s.auth_mode == "sub" {
+                    let signed = if s.oauth.contains_key(&s.provider) { "" } else { " — not signed in, run /login" };
+                    format!("subscription{signed}")
+                } else {
+                    "api key".into()
+                }
+            }
+            5 => if s.thinking { "on".into() } else { "off".into() },
+            6 => perm_name(self.perm()).to_string(),
+            7 => if s.auto_commit { "on".into() } else { "off".into() },
+            8 => self.palette.name.to_string(),
+            9 => s.context_window.to_string(),
+            10 => setting_max_tool_calls(s.max_tool_calls),
             _ => String::new(),
         }
     }

@@ -335,7 +335,7 @@ fn chat_stream(
     }
     let resp = http
         .post(&url)
-        .set("Authorization", &format!("Bearer {}", cfg.api_key))
+        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
         .set("Content-Type", "application/json")
         .send_string(&body.to_string());
 
@@ -490,7 +490,7 @@ pub fn fetch_balance(http: &ureq::Agent, cfg: &Config) -> Option<String> {
     let text = http
         .get(&url)
         .timeout(std::time::Duration::from_secs(10))
-        .set("Authorization", &format!("Bearer {}", cfg.api_key))
+        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
         .call()
         .ok()?
         .into_string()
@@ -516,13 +516,43 @@ pub fn fetch_balance(http: &ureq::Agent, cfg: &Config) -> Option<String> {
     Some(format!("{sym}{bal}"))
 }
 
+/// Best-effort context window (tokens) for `model` from the provider's
+/// `/models` metadata. OpenAI-compatible endpoints usually omit it (DeepSeek
+/// returns only id/object/owned_by), but OpenRouter and some others advertise
+/// `context_length`. Returns None when the provider doesn't expose it, so the
+/// caller can fall back to the built-in table.
+pub fn context_window(http: &ureq::Agent, cfg: &Config, model: &str) -> Option<u32> {
+    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    let text = http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let items = v.get("data").cloned().unwrap_or(v);
+    let entry = items
+        .as_array()?
+        .iter()
+        .find(|m| m.get("id").and_then(|x| x.as_str()) == Some(model))?;
+    // Field name varies across providers; accept the common spellings, plus
+    // OpenRouter's nested `top_provider.context_length`.
+    let n = ["context_length", "context_window", "max_context_length", "max_context_window"]
+        .iter()
+        .find_map(|k| entry.get(*k).and_then(|x| x.as_u64()))
+        .or_else(|| entry.pointer("/top_provider/context_length").and_then(|x| x.as_u64()))?;
+    (n > 0).then_some(n as u32)
+}
+
 /// Fetch the provider's available model ids.
 pub fn list_models(http: &ureq::Agent, cfg: &Config) -> Result<Vec<String>> {
     let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
     let resp = http
         .get(&url)
         .timeout(std::time::Duration::from_secs(30))
-        .set("Authorization", &format!("Bearer {}", cfg.api_key))
+        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
         .call();
     let text = match resp {
         Ok(r) => r.into_string()?,

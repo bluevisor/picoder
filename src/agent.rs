@@ -44,6 +44,12 @@ pub enum UiEvent {
     /// Re-estimate of the next prompt's size (after compaction) so the UI's
     /// context bar drops immediately, without touching session totals.
     Context(u32),
+    /// Auto-detected model context window (tokens): updates the ctx bar and the
+    /// `/config` panel's displayed value live, without the user pinning it.
+    ContextLimit(u32),
+    /// Auth mode changed by the worker (e.g. after a successful /login), so the
+    /// `/config` panel reflects "api" vs "sub" without a round-trip.
+    AuthMode(String),
     Balance(String),
     Notice(String),
     Error(String),
@@ -58,6 +64,8 @@ pub enum WorkerCmd {
     Reset,
     Compact,
     SetModel(String),
+    /// `/login <provider>`: run the OAuth subscription flow and store the token.
+    Login(String),
     /// A `/config` panel change: apply to the live config and persist.
     Patch(ConfigPatch),
     ListModels,
@@ -92,6 +100,9 @@ struct Worker {
     messages: Vec<Message>,
     system_len: usize,
     cancel: Arc<AtomicBool>,
+    /// Cancels the in-flight follow-up suggestion call from the previous turn
+    /// so a superseded suggestion neither bills nor surfaces stale.
+    suggest_cancel: Arc<AtomicBool>,
     perm: Arc<AtomicU8>,
     ui: Sender<UiEvent>,
     appr_rx: Receiver<ApprovalResponse>,
@@ -155,6 +166,7 @@ pub fn spawn(
             messages,
             system_len,
             cancel,
+            suggest_cancel: Arc::new(AtomicBool::new(true)),
             perm,
             ui,
             appr_rx,
@@ -165,7 +177,9 @@ pub fn spawn(
             mcp,
             tools,
         };
+        w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
         w.refresh_balance(); // initial account balance for the status line
+        w.refresh_context_window(); // refine the ctx window from the provider
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
                 WorkerCmd::Quit => break,
@@ -199,8 +213,13 @@ pub fn spawn(
                 WorkerCmd::SetModel(m) => {
                     w.cfg.model = m.clone();
                     w.cfg.persist_model();
+                    w.refresh_context_window(); // new model may have a different window
                     let _ = w.ui.send(UiEvent::ModelChanged(m.clone()));
                     let _ = w.ui.send(UiEvent::Notice(format!("model set to {m}")));
+                }
+                WorkerCmd::Login(name) => {
+                    w.login(&name);
+                    let _ = w.ui.send(UiEvent::TurnDone);
                 }
 
                 WorkerCmd::ListModels => {
@@ -245,10 +264,14 @@ pub fn spawn(
                         let _ = w.ui.send(UiEvent::ModelChanged(model.clone()));
                         let _ = w.ui.send(UiEvent::Notice(format!("provider set to {provider}")));
                         w.refresh_balance();
+                        w.refresh_context_window(); // new provider/model window
                     }
                 }
                 WorkerCmd::User { text, images } => {
                     w.cancel.store(false, Ordering::Relaxed);
+                    // Supersede the previous turn's follow-up suggestion: stop its
+                    // call early and mark it stale so a late result is dropped.
+                    w.suggest_cancel.store(true, Ordering::Relaxed);
                     w.maybe_auto_compact();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         w.run_turn(text, images);
@@ -268,26 +291,34 @@ pub fn spawn(
                         let suggest_cfg = w.cfg.clone();
                         // Only send the last few turns (system prefix + ~6 most recent
                         // messages), plus the suggestion prompt as a user message.
-                        let mut suggest_msgs: Vec<Message> = w.messages[..w.system_len]
-                            .iter()
-                            .cloned()
-                            .collect();
-                        let tail = w.messages[w.system_len..]
-                            .iter()
-                            .rev()
-                            .take(6)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        suggest_msgs.extend(tail.into_iter().rev());
+                        let mut suggest_msgs: Vec<Message> = w.messages[..w.system_len].to_vec();
+                        // Pick a window start no earlier than ~6 messages back, then
+                        // skip any leading orphaned `tool` results: an OpenAI-style
+                        // `tool` message with no preceding `tool_calls` inside the
+                        // window makes the API reject the whole request with a 400
+                        // (silently dropped below), so no suggestion would ever show.
+                        let n = w.messages.len();
+                        let mut start = n.saturating_sub(6).max(w.system_len);
+                        while start < n && w.messages[start].role == "tool" {
+                            start += 1;
+                        }
+                        suggest_msgs.extend(w.messages[start..].iter().cloned());
                         suggest_msgs.push(Message::user(
                             "Based on the conversation above, suggest ONE short follow-up \
                              prompt the user might want to ask next. Reply with ONLY the \
                              prompt text, no other words, no quotes, no explanation.",
                         ));
-                        let cancel_flag = std::sync::atomic::AtomicBool::new(false);
+                        // Fresh flag for this turn's suggestion; storing it on the
+                        // worker lets the next User command cancel it mid-flight.
+                        let cancel_flag = Arc::new(AtomicBool::new(false));
+                        w.suggest_cancel = cancel_flag.clone();
                         std::thread::spawn(move || {
                             match api::chat_plain(&suggest_http, &suggest_cfg, &suggest_msgs, &cancel_flag) {
                                 Ok(text) => {
+                                    // Drop a result that arrived after a new turn began.
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return;
+                                    }
                                     let text = text.trim().trim_matches('"').trim();
                                     if !text.is_empty() && text.len() < 200 {
                                         let _ = suggest_ui.send(UiEvent::Suggestion(text.to_string()));
@@ -316,6 +347,93 @@ impl Worker {
                 let _ = ui.send(UiEvent::Balance(b));
             }
         });
+    }
+
+    /// Set the context window for the current model. The built-in table is
+    /// authoritative and instant (used by auto-compaction); a background call
+    /// then refines the UI display from the provider's `/models` metadata for
+    /// providers that advertise one. A user-pinned window is left untouched.
+    fn refresh_context_window(&mut self) {
+        if self.cfg.context_window_explicit {
+            return;
+        }
+        let table = crate::config::known_context_window(&self.cfg.model);
+        self.cfg.context_window = table;
+        let _ = self.ui.send(UiEvent::ContextLimit(table));
+        let ui = self.ui.clone();
+        let cfg = self.cfg.clone();
+        std::thread::spawn(move || {
+            let http = api::agent_http();
+            if let Some(n) = api::context_window(&http, &cfg, &cfg.model) {
+                if n != table {
+                    let _ = ui.send(UiEvent::ContextLimit(n));
+                }
+            }
+        });
+    }
+
+    /// Run the OAuth subscription flow for `name` and store the token. Blocks
+    /// the worker (a deliberate modal action) while the browser round-trips.
+    fn login(&mut self, name: &str) {
+        let Some(p) = crate::auth::provider(name) else {
+            let _ = self.ui.send(UiEvent::Error(format!(
+                "unknown subscription provider '{name}'. Try one of: {}",
+                crate::auth::supported().join(", ")
+            )));
+            return;
+        };
+        let label = p.label.clone();
+        let login = match crate::auth::start(p) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = self.ui.send(UiEvent::Error(format!("login: {e}")));
+                return;
+            }
+        };
+        let _ = self.ui.send(UiEvent::Notice(format!(
+            "Opening your browser to sign in to {label}.\nIf it didn't open, visit:\n{}",
+            login.url
+        )));
+        match login.finish() {
+            Ok(token) => {
+                self.cfg.oauth.insert(name.to_string(), token.clone());
+                Config::persist_oauth(name, &token);
+                // Logging in is an explicit opt-in to subscription auth.
+                self.cfg.auth_mode = "sub".into();
+                Config::persist_patch(&ConfigPatch::AuthMode("sub".into()));
+                let _ = self.ui.send(UiEvent::AuthMode("sub".into()));
+                let exp = if token.expires_at > 0 {
+                    format!(
+                        " (access token valid ~{}m)",
+                        token.expires_at.saturating_sub(crate::config::now_unix()) / 60
+                    )
+                } else {
+                    String::new()
+                };
+                let _ = self.ui.send(UiEvent::Notice(format!(
+                    "Signed in to {label}{exp}. Auth mode set to subscription. \
+                     Select the {name} provider in /config to use it."
+                )));
+            }
+            Err(e) => {
+                let _ = self.ui.send(UiEvent::Error(format!("login failed: {e}")));
+            }
+        }
+    }
+
+    /// Refresh the active provider's subscription token if it's near expiry, so
+    /// a resumed session stays authenticated. Best-effort and synchronous.
+    fn ensure_oauth_fresh(&mut self) {
+        let name = self.cfg.provider.clone();
+        let Some(token) = self.cfg.oauth.get(&name).cloned() else { return };
+        if !token.needs_refresh() {
+            return;
+        }
+        let Some(p) = crate::auth::provider(&name) else { return };
+        if let Ok(fresh) = crate::auth::refresh(&p, &token) {
+            self.cfg.oauth.insert(name.clone(), fresh.clone());
+            Config::persist_oauth(&name, &fresh);
+        }
     }
 
     fn save_session(&self) {

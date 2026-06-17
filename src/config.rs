@@ -18,6 +18,38 @@ pub struct McpServerConfig {
     pub env: BTreeMap<String, String>,
 }
 
+/// A subscription-login token set for one provider (see auth.rs). Persisted to
+/// config.json (0600) under `oauth`. `expires_at` is unix seconds; 0 = unknown.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OAuthToken {
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+    #[serde(default)]
+    pub expires_at: u64,
+    /// Provider-specific routing hint (e.g. ChatGPT account id). Optional.
+    #[serde(default)]
+    pub account_id: String,
+}
+
+impl OAuthToken {
+    /// True when the access token is missing or within 60s of expiry.
+    pub fn needs_refresh(&self) -> bool {
+        if self.access_token.is_empty() {
+            return true;
+        }
+        self.expires_at != 0 && now_unix() + 60 >= self.expires_at
+    }
+}
+
+/// Current unix time in seconds (0 if the clock is before the epoch).
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub provider: String,
@@ -30,11 +62,24 @@ pub struct Config {
     /// Per-provider API keys persisted to disk. Keyed by provider name.
     #[serde(default)]
     pub api_keys: BTreeMap<String, String>,
+    /// Per-provider subscription-login tokens (OAuth). Keyed by provider name.
+    #[serde(default)]
+    pub oauth: BTreeMap<String, OAuthToken>,
+    /// Credential source for the active provider: "api" (API key) or "sub"
+    /// (subscription / OAuth login). Defaults to API key.
+    #[serde(default = "default_auth_mode")]
+    pub auth_mode: String,
     #[serde(default = "default_theme")]
     pub theme: String,
     /// Model context window, for the ctx usage bar.
     #[serde(default = "default_ctx")]
     pub context_window: u32,
+    /// True when the user pinned context_window themselves (config.json key or
+    /// the `/config` panel). When false the window is auto-derived from the
+    /// model, so switching models picks up the right size; a user value is
+    /// never overwritten or rewritten to disk by auto-detection.
+    #[serde(skip)]
+    pub context_window_explicit: bool,
     /// USD per 1M tokens, for the session cost readout (DeepSeek defaults).
     #[serde(default = "default_price_in")]
     pub price_in: f64,
@@ -70,6 +115,9 @@ fn default_true() -> bool {
 
 fn default_permission() -> String {
     "ask".to_string()
+}
+fn default_auth_mode() -> String {
+    "api".to_string()
 }
 fn default_max_tool_calls() -> u32 {
     100
@@ -113,6 +161,7 @@ pub enum ConfigPatch {
     AutoCommit(bool),
     ContextWindow(u32),
     MaxToolCalls(u32),
+    AuthMode(String),
 }
 
 fn default_theme() -> String {
@@ -121,6 +170,21 @@ fn default_theme() -> String {
 fn default_ctx() -> u32 {
     // Matches the default model, DeepSeek v4 Pro (1M-token context window).
     1_000_000
+}
+
+/// Best-known context window (in tokens) for a model id, used when the
+/// provider's `/models` endpoint doesn't advertise one — DeepSeek's, for
+/// instance, returns only `id`/`object`/`owned_by`. Matched by substring so
+/// version suffixes need no enumerating. Conservative 128k fallback.
+pub fn known_context_window(model: &str) -> u32 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("deepseek-v4") {
+        1_000_000 // v4-pro and v4-flash both advertise 1M
+    } else if m.contains("deepseek") {
+        128_000 // V3 / chat / reasoner
+    } else {
+        default_ctx()
+    }
 }
 fn default_price_in() -> f64 {
     0.27
@@ -137,8 +201,11 @@ impl Default for Config {
             model: "deepseek-v4-pro".into(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
+            oauth: BTreeMap::new(),
+            auth_mode: default_auth_mode(),
             theme: default_theme(),
             context_window: default_ctx(),
+            context_window_explicit: false,
             price_in: default_price_in(),
             price_out: default_price_out(),
             mcp_servers: BTreeMap::new(),
@@ -236,6 +303,12 @@ impl Config {
                         }
                     }
                 }
+                // Subscription-login tokens (one per provider).
+                if let Some(m) = v.get("oauth") {
+                    if let Ok(tokens) = serde_json::from_value::<BTreeMap<String, OAuthToken>>(m.clone()) {
+                        cfg.oauth = tokens;
+                    }
+                }
                 // Legacy single api_key field — use as fallback for the current
                 // provider if no per-provider entry exists.
                 if let Some(s) = v.get("api_key").and_then(|x| x.as_str()) {
@@ -251,6 +324,7 @@ impl Config {
                 }
                 if let Some(n) = v.get("context_window").and_then(|x| x.as_u64()) {
                     cfg.context_window = n as u32;
+                    cfg.context_window_explicit = true;
                 }
                 if let Some(n) = v.get("price_in").and_then(|x| x.as_f64()) {
                     cfg.price_in = n;
@@ -271,6 +345,9 @@ impl Config {
                 }
                 if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
                     cfg.permission = s.to_string();
+                }
+                if let Some(s) = v.get("auth_mode").and_then(|x| x.as_str()) {
+                    cfg.auth_mode = if s == "sub" { "sub".into() } else { "api".into() };
                 }
                 if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
                     cfg.max_tool_calls = n as u32;
@@ -294,6 +371,13 @@ impl Config {
                     break;
                 }
             }
+        }
+        // When the user hasn't pinned a window, derive it from the model so the
+        // ctx bar and compaction limit match the model's real capacity rather
+        // than a stale 128k default. The worker refines this from the provider's
+        // /models metadata (for providers that advertise it) once it's running.
+        if !cfg.context_window_explicit {
+            cfg.context_window = known_context_window(&cfg.model);
         }
         cfg
     }
@@ -323,6 +407,10 @@ impl Config {
                 }
             }
         }
+        // Subscription-login tokens, when any provider has been logged in.
+        if !on_disk.oauth.is_empty() {
+            json["oauth"] = serde_json::to_value(&on_disk.oauth).unwrap_or_default();
+        }
         // Preserve user customizations across model/theme rewrites; only
         // non-default values are written, keeping the common file minimal.
         if !on_disk.mcp_servers.is_empty() {
@@ -331,7 +419,9 @@ impl Config {
         if !on_disk.auto_commit {
             json["auto_commit"] = serde_json::json!(false);
         }
-        if on_disk.context_window != default_ctx() {
+        // Only persist a window the user pinned; an auto-derived value stays out
+        // of the file so it keeps tracking the model on later launches.
+        if on_disk.context_window_explicit {
             json["context_window"] = serde_json::json!(on_disk.context_window);
         }
         if on_disk.price_in != default_price_in() {
@@ -345,6 +435,9 @@ impl Config {
         }
         if on_disk.permission != default_permission() {
             json["permission"] = serde_json::json!(on_disk.permission);
+        }
+        if on_disk.auth_mode != default_auth_mode() {
+            json["auth_mode"] = serde_json::json!(on_disk.auth_mode);
         }
         if on_disk.max_tool_calls != default_max_tool_calls() {
             json["max_tool_calls"] = serde_json::json!(on_disk.max_tool_calls);
@@ -363,6 +456,35 @@ impl Config {
         let mut disk = Config::load_disk();
         disk.model = self.model.clone();
         let _ = disk.save();
+    }
+
+    /// Persist one provider's subscription-login token, preserving the rest of
+    /// the file. Goes through the lenient loader so a malformed field elsewhere
+    /// can't wipe other saved state.
+    pub fn persist_oauth(provider: &str, token: &OAuthToken) {
+        let mut disk = Config::load_disk();
+        disk.oauth.insert(provider.to_string(), token.clone());
+        let _ = disk.save();
+    }
+
+    /// The active provider's subscription token, if logged in. Consumed by the
+    /// per-provider inference adapters (the request path's auth source).
+    #[allow(dead_code)] // wired in by the native inference adapters
+    pub fn oauth_token(&self) -> Option<&OAuthToken> {
+        self.oauth.get(&self.provider)
+    }
+
+    /// The Bearer credential to send for the active provider: the subscription
+    /// access token in "sub" mode (when present), otherwise the API key.
+    pub fn bearer(&self) -> &str {
+        if self.auth_mode == "sub" {
+            if let Some(t) = self.oauth.get(&self.provider) {
+                if !t.access_token.is_empty() {
+                    return &t.access_token;
+                }
+            }
+        }
+        &self.api_key
     }
 
     /// Persist only the theme name, preserving the rest of the file.
@@ -397,8 +519,14 @@ impl Config {
             ConfigPatch::Thinking(b) => self.thinking = *b,
             ConfigPatch::Permission(m) => self.permission = m.clone(),
             ConfigPatch::AutoCommit(b) => self.auto_commit = *b,
-            ConfigPatch::ContextWindow(n) => self.context_window = (*n).max(1),
+            ConfigPatch::ContextWindow(n) => {
+                self.context_window = (*n).max(1);
+                self.context_window_explicit = true;
+            }
             ConfigPatch::MaxToolCalls(n) => self.max_tool_calls = *n,
+            ConfigPatch::AuthMode(m) => {
+                self.auth_mode = if m == "sub" { "sub".into() } else { "api".into() };
+            }
         }
     }
 
@@ -440,6 +568,21 @@ mod tests {
         // Zero context window is clamped, not propagated.
         c.apply_patch(&ConfigPatch::ContextWindow(0));
         assert_eq!(c.context_window, 1);
+        // Pinning the window through the panel marks it explicit so it sticks.
+        assert!(c.context_window_explicit);
+    }
+
+    #[test]
+    fn context_window_table_by_model() {
+        assert_eq!(known_context_window("deepseek-v4-pro"), 1_000_000);
+        assert_eq!(known_context_window("deepseek-v4-flash"), 1_000_000);
+        assert_eq!(known_context_window("deepseek-chat"), 128_000);
+        // Unknown models fall back to the conservative default.
+        assert_eq!(known_context_window("gpt-4o-mini"), default_ctx());
+        // A fresh config auto-derives, and stays non-explicit so it keeps
+        // tracking the model and never gets written to disk.
+        let c = Config::default();
+        assert!(!c.context_window_explicit);
     }
 
     #[test]
