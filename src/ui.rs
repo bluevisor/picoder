@@ -1234,10 +1234,10 @@ impl App {
         }
         self.push(Kind::Notice, String::from("  @file       attach a file"));
         self.push(Kind::Notice, "  ↑/↓         browse history");
-        self.push(Kind::Notice, "  Tab         autocomplete".into());
-        self.push(Kind::Notice, "  Shift+Tab   cycle permissions (ask / bypass / plan)".into());
-        self.push(Kind::Notice, "  Esc         interrupt the agent".into());
-        self.push(Kind::Notice, "  Ctrl+L      force clear/repaint".into());
+        self.push(Kind::Notice, String::from("  Tab         autocomplete"));
+        self.push(Kind::Notice, String::from("  Shift+Tab   cycle permissions (ask / bypass / plan)"));
+        self.push(Kind::Notice, String::from("  Esc         interrupt the agent"));
+        self.push(Kind::Notice, String::from("  Ctrl+L      force clear/repaint"));
     }
 
     pub fn banner(&mut self, width: u16, status: Vec<String>) {
