@@ -7,6 +7,7 @@ mod helpers;
 mod palette;
 mod types;
 
+pub use banner::banner_ansi;
 pub use helpers::{expand_attachments, extract_images, term_width};
 pub use palette::{is_theme_name, THEMES};
 pub use types::{detect_ascii, is_16color_terminal, UiConfig};
@@ -1635,6 +1636,7 @@ impl App {
                 f.render_widget(Paragraph::new(lines), area);
             }
             Mode::Password { prompt } => {
+                let mut lines: Vec<Line> = Vec::new();
                 let masked: String = self.pw_input.chars().map(|_| '*').collect();
                 lines.push(Line::from(vec![
                     Span::styled(prompt.clone(), Style::default().fg(self.palette.accent)),
