@@ -1008,7 +1008,7 @@ impl App {
     fn complete(&mut self) {
         if self.input.starts_with('@') {
             let prefix = &self.input[1..];
-            let mut opts = complete_path(prefix);
+            let opts = complete_path(prefix);
             if opts.is_empty() {
                 return;
             }
