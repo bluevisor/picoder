@@ -4,7 +4,6 @@
 
 use super::palette::{self};
 use super::types::{BannerColor, Kind, TLine};
-use ratatui::style::Color;
 
 pub const TAGLINE: &str = "a tiny agentic coding CLI";
 
