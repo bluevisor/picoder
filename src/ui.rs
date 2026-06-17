@@ -377,7 +377,7 @@ impl App {
             }
             UiEvent::TurnDone => {
                 self.flush_live();
-                self.mode = Mode::Idle;
+                self.clear_busy();
                 // The worker may reply with Bypass toggled; sync the UI.
                 self.perm = h.shared.perm.clone();
                 // Dispatch the next queued message, if any.
