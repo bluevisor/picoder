@@ -467,9 +467,8 @@ fn ascii_shadow_row() -> String {
 /// Pick the widest PICODER art that fits in `w` columns.
 fn banner_art(w: usize, ascii: bool) -> Vec<String> {
     if !ascii && w >= 55 {
-        let mut art: Vec<String> = ART_UNICODE.iter().map(|s| s.to_string()).collect();
         // Unicode art already includes its shadow row (row 5).
-        return art;
+        return ART_UNICODE.iter().map(|s| s.to_string()).collect();
     } else if w >= 34 {
         let mut art = art_glyphs(if ascii { '#' } else { '█' }, false);
         // ASCII gets a drop-shadow row; Unicode non-heavy gets none (too narrow).
