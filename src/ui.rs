@@ -407,6 +407,17 @@ const ART_GLYPHS: [[&str; 6]; 7] = [
     ["####", "#  #", "####", "# # ", "#  #", "#  #"], // R
 ];
 
+/// Heavy Unicode "PICODER" with a diagonal `░` drop-shadow, for wide terminals.
+/// Hand-tuned: the shadow can't be derived by simply doubling `ART_GLYPHS`.
+const ART_UNICODE: [&str; 6] = [
+    "██████  ██████  ██████  ██████  ████    ██████  ██████ ",
+    "██░░██░░  ██░░░░██░░░░░░██░░██░░██░░██  ██░░░░░░██░░██░",
+    "██████░░  ██░░  ██░░    ██░░██░░██░░██░░████    ██████░",
+    "██░░░░░░  ██░░  ██░░    ██░░██░░██░░██░░██░░░░  ████░░░",
+    "██░░    ██████  ██████  ██████░░████  ░░██████  ██░░██ ",
+    "  ░░      ░░░░░░  ░░░░░░  ░░░░░░  ░░░░    ░░░░░░  ░░  ░",
+];
+
 /// Render the glyph table at a row, mapping `#`→`fill`. `double` widens each
 /// cell to two columns for the heavy Unicode logo.
 fn art_glyphs(fill: char, double: bool) -> Vec<String> {
@@ -431,8 +442,8 @@ fn art_glyphs(fill: char, double: bool) -> Vec<String> {
 
 /// Pick the widest PICODER art that fits in `w` columns.
 fn banner_art(w: usize, ascii: bool) -> Vec<String> {
-    if !ascii && w >= 68 {
-        art_glyphs('█', true)
+    if !ascii && w >= 55 {
+        ART_UNICODE.iter().map(|s| s.to_string()).collect()
     } else if w >= 34 {
         art_glyphs(if ascii { '#' } else { '█' }, false)
     } else {
