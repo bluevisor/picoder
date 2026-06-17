@@ -1232,7 +1232,7 @@ impl App {
         for (name, desc) in SLASH_COMMANDS {
             self.push(Kind::Notice, format!("  {name:<12} {desc}"));
         }
-        self.push(Kind::Notice, "  @file       attach a file".into());
+        self.push(Kind::Notice, String::from("  @file       attach a file"));
         self.push(Kind::Notice, "  ↑/↓         browse history".into());
         self.push(Kind::Notice, "  Tab         autocomplete".into());
         self.push(Kind::Notice, "  Shift+Tab   cycle permissions (ask / bypass / plan)".into());
