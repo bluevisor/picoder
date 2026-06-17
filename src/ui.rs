@@ -10,7 +10,7 @@ mod types;
 pub use banner::banner_ansi;
 pub use helpers::{expand_attachments, extract_images, term_width};
 pub use palette::{is_theme_name, THEMES};
-pub use types::{detect_ascii, is_16color_terminal, UiConfig};
+pub use types::{detect_ascii, UiConfig};
 
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
 use crate::config::{Config, ConfigPatch, PROVIDERS};
