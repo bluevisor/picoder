@@ -1128,7 +1128,7 @@ impl App {
         use crate::auth;
         self.picker = Some(Picker {
             title: "Pick a provider to sign in to".into(),
-            items: auth::supported(),
+            items: auth::supported().iter().map(|s| s.to_string()).collect(),
             current: None,
             filter: String::new(),
             cursor: 0,
