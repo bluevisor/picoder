@@ -582,19 +582,17 @@ impl App {
     }
 
     fn preview_theme(&mut self, idx: usize, prev: String) {
-        let name = THEMES.get(idx).copied().unwrap_or("Default");
-        self.set_palette(palette_by_name(name));
+        self.set_palette(palette_by_name(THEMES[idx]));
         self.mode = Mode::ThemeSelect { cursor: idx, prev };
     }
 
+    /// Commit the theme at `idx`: persist it and close the picker.
     fn commit_theme(&mut self, idx: usize) {
-        let name = THEMES.get(idx).copied().unwrap_or("Default");
+        let name = THEMES[idx];
         self.set_palette(palette_by_name(name));
+        crate::config::Config::persist_theme(name);
+        self.push(Kind::Notice, format!("theme set to {name}"));
         self.mode = Mode::Idle;
-        self.settings.theme = name.to_string();
-        let _ = crate::config::Config::persist_patch(&crate::config::ConfigPatch::Theme(
-            name.to_string(),
-        ));
     }
 
     fn on_key_settings(&mut self, key: KeyEvent, h: &Handles) {

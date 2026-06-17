@@ -1,6 +1,6 @@
 [package]
 name = "picoder"
-version = "0.2.152"
+version = "0.2.153"
 edition = "2021"
 description = "A tiny full-screen agentic coding CLI for the Raspberry Pi Zero W"
 
