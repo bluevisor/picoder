@@ -440,12 +440,43 @@ fn art_glyphs(fill: char, double: bool) -> Vec<String> {
         .collect()
 }
 
+/// Generate a drop-shadow row for the ASCII art, matching the bottom row
+/// shifted right by one column. Uses `.` as the shadow character.
+fn ascii_shadow_row() -> String {
+    let fill = '#';
+    let bottom: String = ART_GLYPHS
+        .iter()
+        .map(|g| {
+            g[5]
+                .chars()
+                .map(|c| if c == '#' { fill } else { ' ' })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let chars: Vec<char> = bottom.chars().collect();
+    let mut shadow = vec![' '; chars.len()];
+    for i in 0..chars.len().saturating_sub(1) {
+        if chars[i] == '#' {
+            shadow[i + 1] = '.';
+        }
+    }
+    shadow.into_iter().collect()
+}
+
 /// Pick the widest PICODER art that fits in `w` columns.
 fn banner_art(w: usize, ascii: bool) -> Vec<String> {
     if !ascii && w >= 55 {
-        ART_UNICODE.iter().map(|s| s.to_string()).collect()
+        let mut art: Vec<String> = ART_UNICODE.iter().map(|s| s.to_string()).collect();
+        // Unicode art already includes its shadow row (row 5).
+        return art;
     } else if w >= 34 {
-        art_glyphs(if ascii { '#' } else { '█' }, false)
+        let mut art = art_glyphs(if ascii { '#' } else { '█' }, false);
+        // ASCII gets a drop-shadow row; Unicode non-heavy gets none (too narrow).
+        if ascii {
+            art.push(ascii_shadow_row());
+        }
+        return art;
     } else {
         vec!["P I C O D E R".to_string()]
     }
@@ -491,14 +522,23 @@ fn banner_lines(w: usize, ascii: bool, status: &[String]) -> Vec<BLine> {
     out.push(BLine { text: center(TAGLINE), role: BRole::Tagline });
     out.push(BLine { text: String::new(), role: BRole::Frame });
 
-    let (tl, bl, h, vbar) = if ascii { ("+", "+", "-", "|") } else { ("┌", "└", "─", "│") };
+    let (tl, tr, bl, br, h, vbar) = if ascii {
+        ("+", "+", "+", "+", "-", "|")
+    } else {
+        ("┌", "┐", "└", "┘", "─", "│")
+    };
+    // Top border: ┌─ SYSTEM ───...──┐
     let head = format!("{tl}{h} SYSTEM ");
-    let fill = w.saturating_sub(head.chars().count());
-    out.push(BLine { text: format!("{head}{}", h.repeat(fill)), role: BRole::Frame });
+    let fill = w.saturating_sub(head.chars().count() + 1); // +1 for right corner
+    out.push(BLine { text: format!("{head}{}{tr}", h.repeat(fill)), role: BRole::Frame });
+    // Status lines: │ text ... │
     for line in status {
-        out.push(BLine { text: format!("{vbar} {line}"), role: BRole::Data });
+        let pad = w.saturating_sub(line.chars().count() + 4); // 4 = "│ " + " │"
+        out.push(BLine { text: format!("{vbar} {line}{}{vbar}", " ".repeat(pad)), role: BRole::Data });
     }
-    out.push(BLine { text: format!("{bl}{}", h.repeat(w.saturating_sub(1))), role: BRole::Frame });
+    // Bottom border: └───...──┘
+    let bfill = w.saturating_sub(2); // bl + br = 2
+    out.push(BLine { text: format!("{bl}{}{br}", h.repeat(bfill)), role: BRole::Frame });
     out
 }
 
@@ -2162,9 +2202,10 @@ impl App {
                     Some(BannerColor::Rainbow(i)),
                 ),
                 BRole::Version => (Kind::Banner, None),
-                BRole::Tagline | BRole::Frame => (Kind::BannerDim, None),
-                // Non-bold accent: BannerDim base recolored to the accent.
-                BRole::Data => (Kind::BannerDim, Some(BannerColor::Accent)),
+                // Frame and Data share the accent color so the whole SYSTEM
+                // panel border is uniform.
+                BRole::Tagline => (Kind::BannerDim, None),
+                BRole::Frame | BRole::Data => (Kind::BannerDim, Some(BannerColor::Accent)),
             };
             self.transcript.push(TLine { kind, text: bl.text, lead: false, color });
         }
