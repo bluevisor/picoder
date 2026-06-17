@@ -33,6 +33,11 @@ const APPLE_RAINBOW: [Color; 6] = [
     Color::Rgb(150, 61, 151),
     Color::Rgb(0, 157, 220),
 ];
+/// Per-row brightness factors that turn a theme's banner color into a shaded
+/// top→bottom gradient, so the logo reads with depth (darkest row = the drop
+/// shadow). Each non-default theme thus gets a distinct shaded ramp of its own
+/// color; the default theme uses the Apple rainbow instead.
+const BANNER_SHADE: [f32; 6] = [1.0, 0.86, 0.72, 0.60, 0.49, 0.40];
 /// 16-color approximation for the framebuffer console.
 const APPLE_RAINBOW_16: [Color; 6] = [
     Color::Green,
@@ -75,6 +80,9 @@ struct Palette {
     secondary: Color,
     /// Background for user messages (a subtle band).
     user_bg: Color,
+    /// App background. `Color::Reset` inherits the terminal's own background;
+    /// themed palettes paint their own near-black so the whole TUI matches.
+    bg: Color,
     /// Theme-specific composer prompt (else the default glyph set's prompt).
     prompt: Option<&'static str>,
     cursor: CursorKind,
@@ -99,6 +107,7 @@ const DEFAULT_PALETTE: Palette = Palette {
     chrome: Color::DarkGray,
     secondary: Color::Rgb(140, 140, 140),
     user_bg: Color::Rgb(48, 48, 48),
+    bg: Color::Reset,                             // inherit the terminal background
     prompt: None,
     cursor: CursorKind::Reverse,
 };
@@ -127,6 +136,7 @@ const APPLE2_PALETTE: Palette = Palette {
     chrome: Color::Rgb(0, 120, 0),
     secondary: Color::Rgb(0, 155, 0),
     user_bg: Color::Rgb(0, 30, 0),
+    bg: Color::Rgb(0, 12, 0),                     // black CRT with faint green cast
     prompt: Some("] "),
     cursor: CursorKind::Block,
 };
@@ -151,30 +161,36 @@ const MSDOS_PALETTE: Palette = Palette {
     chrome: Color::DarkGray,
     secondary: Color::Gray,
     user_bg: Color::DarkGray,
+    bg: Color::Rgb(8, 8, 10),                     // black DOS console
     prompt: Some("C:\\> "),
     cursor: CursorKind::Block,
 };
 
-// macOS — actual macOS Terminal.app dark mode palette.
+// macOS — macOS Terminal.app dark mode running fish: near-black background,
+// soft off-white text, muted steel-blue directories, and a green prompt.
+const MACOS_BLUE: Color = Color::Rgb(111, 157, 196);   // Terminal dir blue (#6F9DC4)
+const MACOS_GREEN: Color = Color::Rgb(126, 190, 106);  // fish prompt green (#7EBE6A)
+const MACOS_FG: Color = Color::Rgb(216, 216, 216);     // soft off-white text
 const MACOS_PALETTE: Palette = Palette {
     name: "macOS",
-    accent: Color::Rgb(10, 132, 255),            // systemBlue dark (#0A84FF)
-    assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
-    assistant_glyph: Color::Rgb(100, 210, 255),  // lightSystemBlue
+    accent: MACOS_BLUE,                           // steel blue (dirs, borders, paths)
+    assistant: MACOS_FG,                          // soft off-white
+    assistant_glyph: MACOS_GREEN,                 // green prompt bullet
     reasoning: Color::Rgb(142, 142, 147),         // systemGray
-    tool: Color::Rgb(255, 159, 10),              // systemOrange dark (#FF9F0A)
+    tool: MACOS_BLUE,                             // steel blue
     tool_result: Color::Rgb(174, 174, 178),       // systemGray2
     notice: Color::Rgb(152, 152, 157),            // systemGray3
-    code: Color::Rgb(100, 210, 255),              // systemTeal dark (#64D2FF)
-    heading: Color::Rgb(242, 242, 247),           // near white
-    diff_add: Color::Rgb(48, 209, 88),            // systemGreen dark (#30D158)
-    diff_del: Color::Rgb(255, 69, 58),            // systemRed dark (#FF453A)
+    code: MACOS_GREEN,                            // green (builtins/commands like `help`)
+    heading: MACOS_FG,
+    diff_add: MACOS_GREEN,                        // green
+    diff_del: Color::Rgb(255, 95, 86),            // macOS red (#FF5F56)
     diff_ctx: Color::Rgb(99, 99, 102),            // systemGray4
-    error: Color::Rgb(255, 69, 58),               // systemRed dark
-    mono_banner: Some(Color::Rgb(10, 132, 255)),  // systemBlue dark
+    error: Color::Rgb(255, 95, 86),               // macOS red
+    mono_banner: Some(MACOS_BLUE),               // steel-blue shaded logo
     chrome: Color::Rgb(72, 72, 74),               // systemGray5
     secondary: Color::Rgb(152, 152, 157),          // systemGray3
-    user_bg: Color::Rgb(44, 44, 46),          // macOS dark elevated bg
+    user_bg: Color::Rgb(38, 38, 38),              // near-black elevated bg
+    bg: Color::Rgb(29, 29, 29),                   // Terminal.app dark (#1D1D1D)
     prompt: Some("~ "),
     cursor: CursorKind::Reverse,
 };
@@ -202,6 +218,7 @@ const SUN_PALETTE: Palette = Palette {
     chrome: Color::Rgb(100, 80, 50),              // dark bronze
     secondary: Color::Rgb(160, 140, 100),
     user_bg: Color::Rgb(40, 30, 15),             // warm dark brown
+    bg: Color::Rgb(22, 16, 8),                    // warm brown-black
     prompt: Some("sun% "),                        // Solaris C-shell prompt
     cursor: CursorKind::Block,
 };
@@ -229,6 +246,7 @@ const NEXTS_PALETTE: Palette = Palette {
     chrome: Color::Rgb(80, 80, 80),               // architectural gray
     secondary: Color::Rgb(120, 120, 120),
     user_bg: Color::Rgb(40, 40, 40),              // dark slate
+    bg: Color::Rgb(18, 18, 20),                   // architectural near-black
     prompt: Some("NeXT> "),                       // NeXTSTEP workspace
     cursor: CursorKind::Reverse,
 };
@@ -256,6 +274,7 @@ const SGI_PALETTE: Palette = Palette {
     chrome: Color::Rgb(50, 70, 90),               // deep slate
     secondary: Color::Rgb(100, 130, 145),
     user_bg: Color::Rgb(20, 30, 50),              // deep indigo
+    bg: Color::Rgb(12, 16, 26),                   // deep indigo-black
     prompt: Some("irix# "),                       // IRIX root prompt
     cursor: CursorKind::Block,
 };
@@ -410,12 +429,12 @@ const ART_GLYPHS: [[&str; 6]; 7] = [
 /// Heavy Unicode "PICODER" with a diagonal `░` drop-shadow, for wide terminals.
 /// Hand-tuned: the shadow can't be derived by simply doubling `ART_GLYPHS`.
 const ART_UNICODE: [&str; 6] = [
-    "██████  ██████  ██████  ██████  ████    ██████  ██████ ",
-    "██░░██░░  ██░░░░██░░░░░░██░░██░░██░░██  ██░░░░░░██░░██░",
-    "██████░░  ██░░  ██░░    ██░░██░░██░░██░░████    ██████░",
-    "██░░░░░░  ██░░  ██░░    ██░░██░░██░░██░░██░░░░  ████░░░",
-    "██░░    ██████  ██████  ██████░░████  ░░██████  ██░░██ ",
-    "  ░░      ░░░░░░  ░░░░░░  ░░░░░░  ░░░░    ░░░░░░  ░░  ░",
+    "██████  ██████  ██████  ██████  ████    ██████  ██████",
+    "██░░██░░  ██░░░░██░░░░░░██░░██░░██░░██  ██░░░░░░██░░██░░",
+    "██████░░  ██░░  ██░░    ██░░██░░██░░██░░████    ██████░░",
+    "██░░░░░░  ██░░  ██░░    ██░░██░░██░░██░░██░░░░  ████░░░░",
+    "██░░    ██████  ██████  ██████░░████  ░░██████  ██░░██",
+    "  ░░      ░░░░░░  ░░░░░░  ░░░░░░  ░░░░    ░░░░░░  ░░  ░░",
 ];
 
 /// Render the glyph table at a row, mapping `#`→`fill`. `double` widens each
@@ -466,7 +485,7 @@ fn ascii_shadow_row() -> String {
 
 /// Pick the widest PICODER art that fits in `w` columns.
 fn banner_art(w: usize, ascii: bool) -> Vec<String> {
-    if !ascii && w >= 55 {
+    if !ascii && w >= 56 {
         // Unicode art already includes its shadow row (row 5).
         return ART_UNICODE.iter().map(|s| s.to_string()).collect();
     } else if w >= 34 {
@@ -560,6 +579,43 @@ fn ansi_fg(c: Color) -> String {
     }
 }
 
+/// Best-effort RGB for a `Color`, so we can shade named theme colors too.
+fn color_to_rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::White => (255, 255, 255),
+        Color::Gray => (190, 190, 190),
+        Color::DarkGray => (110, 110, 110),
+        Color::Green => (0, 200, 0),
+        Color::LightGreen => (120, 255, 120),
+        Color::Yellow => (220, 220, 0),
+        Color::Red => (220, 0, 0),
+        Color::LightRed => (255, 90, 90),
+        Color::Blue => (0, 90, 220),
+        Color::Cyan => (0, 200, 200),
+        Color::Magenta => (200, 0, 200),
+        _ => (220, 220, 220),
+    }
+}
+
+/// Darken `c` by the row-`i` shade factor for the banner gradient.
+fn shade(c: Color, i: usize) -> Color {
+    let (r, g, b) = color_to_rgb(c);
+    let f = BANNER_SHADE[i.min(BANNER_SHADE.len() - 1)];
+    let s = |v: u8| (v as f32 * f).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(s(r), s(g), s(b))
+}
+
+/// Color for art row `i`: the Apple rainbow for the default theme, or a shaded
+/// top→bottom gradient of the theme's own banner color for any non-default
+/// theme. `i` may exceed the ramp on the ASCII shadow row, so it's clamped.
+fn banner_row_color(p: &Palette, rainbow: &[Color; 6], i: usize) -> Color {
+    match p.mono_banner {
+        Some(c) => shade(c, i),
+        None => rainbow[i % rainbow.len()],
+    }
+}
+
 /// ANSI-colored banner for the `--banner` flag (a preview of the launch screen).
 pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> String {
     let p = palette_by_name(theme);
@@ -570,7 +626,7 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
     let mut out = String::new();
     for bl in banner_lines(w, ascii, status) {
         let prefix = match bl.role {
-            BRole::Art(i) => ansi_fg(p.mono_banner.unwrap_or(rainbow[i % rainbow.len()])),
+            BRole::Art(i) => ansi_fg(banner_row_color(&p, &rainbow, i)),
             BRole::Version => format!("\x1b[1m{}", ansi_fg(p.accent)),
             BRole::Tagline => ansi_fg(p.notice),  // dim tagline
             BRole::Frame | BRole::Data => ansi_fg(p.accent),
@@ -2269,6 +2325,15 @@ impl App {
 
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
+        // Paint the themed background first; spans drawn on top keep their own
+        // fg and inherit this bg (Color::Reset on the default theme = no-op,
+        // so the terminal's own background shows through).
+        if self.palette.bg != Color::Reset {
+            f.render_widget(
+                Block::default().style(Style::default().bg(self.palette.bg)),
+                area,
+            );
+        }
         let ch = self.composer_rows(area.width);
         let chunks = Layout::vertical([
             Constraint::Min(3),    // output
@@ -2786,7 +2851,7 @@ impl App {
         spans.push(sep());
         spans.push(Span::styled("ctx ", gray));
         let frac = self.last_prompt_tokens as f64 / self.ctx_limit as f64;
-        spans.extend(bar(frac, 8, self.dim_text()));
+        spans.extend(bar(frac, 8, self.palette.accent));
         spans.push(Span::styled(
             format!(" {}%", (frac.clamp(0.0, 1.0) * 100.0).round() as u32),
             gray,
@@ -2869,20 +2934,23 @@ fn pad1(r: Rect) -> Rect {
     Rect { x: r.x + 1, width: r.width.saturating_sub(2), ..r }
 }
 
-/// A solid mini progress bar (green→yellow→red as it fills). The empty track is
-/// a dimmed shade of the same hue as the fill, so the bar reads as one element.
-fn bar(frac: f64, width: usize, _chrome: Color) -> Vec<Span<'static>> {
+/// A solid mini progress bar. At normal usage it's the theme `accent`, then
+/// escalates to amber → red as context fills, so it both matches the theme and
+/// still warns. The empty track is a dimmed shade of the fill's hue, so the bar
+/// reads as one element.
+fn bar(frac: f64, width: usize, accent: Color) -> Vec<Span<'static>> {
     let frac = frac.clamp(0.0, 1.0);
     let filled = (frac * width as f64).round() as usize;
     let fill = if frac < 0.8 {
-        Color::Rgb(40, 200, 90)
+        accent
     } else if frac < 0.95 {
         Color::Rgb(220, 190, 50)
     } else {
         Color::Rgb(220, 70, 70)
     };
-    // Same hue, ~22% brightness — a dim track that matches the fill's color.
-    let track = scale_rgb(fill, 0.22);
+    // Empty track: a dark slate carrying a hint of the theme's own hue, held at
+    // a constant dark brightness so it reads as quiet chrome on every theme.
+    let track = track_color(accent);
     let mut v = Vec::new();
     if filled > 0 {
         v.push(Span::styled(" ".repeat(filled), Style::default().bg(fill)));
@@ -2895,15 +2963,16 @@ fn bar(frac: f64, width: usize, _chrome: Color) -> Vec<Span<'static>> {
 
 /// Scale an RGB color's brightness by `factor` (0.0–1.0), preserving hue.
 /// Non-RGB colors are returned unchanged.
-fn scale_rgb(c: Color, factor: f64) -> Color {
-    match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            (r as f64 * factor) as u8,
-            (g as f64 * factor) as u8,
-            (b as f64 * factor) as u8,
-        ),
-        other => other,
-    }
+/// A dark "slate" tinted toward `accent`'s hue: a neutral floor plus a small
+/// proportional tint, so every theme's empty ctx-bar track shares ~the same
+/// dark brightness but carries its own color cast.
+fn track_color(accent: Color) -> Color {
+    const FLOOR: f64 = 10.0; // neutral dark gray base
+    const TINT: f64 = 20.0;  // hue-tint amplitude on the brightest channel
+    let (r, g, b) = color_to_rgb(accent);
+    let max = r.max(g).max(b).max(1) as f64;
+    let chan = |v: u8| (FLOOR + (v as f64 / max) * TINT).round() as u8;
+    Color::Rgb(chan(r), chan(g), chan(b))
 }
 
 fn humanize(n: u64) -> String {
@@ -3076,7 +3145,7 @@ fn render_tline(
         let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
         let c = match bc {
             BannerColor::Fixed(c) => c,
-            BannerColor::Rainbow(i) => p.mono_banner.unwrap_or(rainbow[i % rainbow.len()]),
+            BannerColor::Rainbow(i) => banner_row_color(p, &rainbow, i),
             BannerColor::Accent => p.accent,
         };
         base = base.fg(c);
