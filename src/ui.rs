@@ -1186,7 +1186,7 @@ impl App {
             "memory" => {
                 match crate::tools::load_memory() {
                     Ok(Some(text)) => self.push(Kind::Notice, format!("memory:\n{text}")),
-                    Ok(None) => self.push(Kind::Notice, "no persistent memory.".into()),
+                    Ok(None) => self.push(Kind::Notice, String::from("no persistent memory.")),
                     Err(e) => self.push(Kind::ErrorK, format!("{e}")),
                 }
             }
