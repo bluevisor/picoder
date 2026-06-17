@@ -1180,8 +1180,7 @@ impl App {
                 if let Some(name) = _arg {
                     let p = palette_by_name(name);
                     self.set_palette(p);
-                    self.settings.theme = name.to_string();
-                    let _ = Config::persist_patch(&ConfigPatch::Theme(name.to_string()));
+                    crate::config::Config::persist_theme(p.name);
                     self.push(Kind::Notice, format!("theme set to {}", p.name));
                 } else {
                     let current = THEMES
