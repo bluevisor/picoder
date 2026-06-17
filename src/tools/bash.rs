@@ -1,72 +1,13 @@
 //! Bash tool: synchronous and background shell commands.
 
 use crate::api::{truncate, MAX_TOOL_OUTPUT};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-fn expand(path: &str) -> PathBuf {
-    let raw = if let Some(rest) = path.strip_prefix("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home).join(rest),
-            Err(_) => PathBuf::from(path),
-        }
-    } else if path == "~" {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home),
-            Err(_) => PathBuf::from(path),
-        }
-    } else {
-        PathBuf::from(path)
-    };
-    normalize(&raw)
-}
-
-/// Collapse `.` and `..` lexically (without touching the filesystem, so it works
-/// for paths that don't exist yet). This doesn't sandbox — a coding agent
-/// legitimately reads files all over the box — but it turns a sneaky
-/// `~/../../etc/x` into the plain `/etc/x` it really means, so the path the user
-/// approves is the path that's used.
-fn normalize(p: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::ParentDir => match out.components().next_back() {
-                // Pop a real directory name…
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                // …but never climb above the filesystem root.
-                Some(Component::RootDir) => {}
-                // At a relative start, keep the `..` (can't resolve it lexically).
-                _ => out.push(".."),
-            },
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    if out.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        out
-    }
-}
-
-/// Refuse to operate through a symlink: a symlinked path could point outside the
-/// intended target. Reads and writes both go through this so the guard is
-/// symmetric. Returns `Some(error)` to short-circuit, `None` to proceed.
-fn deny_symlink(p: &Path, path: &str, verb: &str) -> Option<String> {
-    match std::fs::symlink_metadata(p) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            Some(format!("DENIED: {path} is a symlink; {verb} the real path instead."))
-        }
-        _ => None,
-    }
-}
 
 // ----------------------------------------------------------------- bash -----
 
