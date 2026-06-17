@@ -96,6 +96,8 @@ pub struct App {
     view_h: usize,
     spinner: usize,
     spin_counter: usize,
+    /// Clock time when the agent last entered Busy; used to show an elapsed timer.
+    busy_since: Option<Instant>,
     model_info: String,
     last_models: Vec<String>,
     should_quit: bool,
@@ -173,6 +175,7 @@ impl App {
             view_h: 0,
             spinner: 0,
             spin_counter: 0,
+            busy_since: None,
             model_info: cfg.model,
             last_models: Vec::new(),
             should_quit: false,
@@ -381,7 +384,7 @@ impl App {
                 if let Some(next) = self.queued.first() {
                     let _ = h.cmd_tx.send(WorkerCmd::User { text: next.clone(), images: vec![] });
                     self.queued.remove(0);
-                    self.mode = Mode::Busy;
+                    self.set_busy();
                 }
             }
             UiEvent::Suggestion(s) => {
@@ -478,14 +481,15 @@ impl App {
             Mode::Question { .. } => self.cancel_question(),
             Mode::Approval(_) => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
-                self.mode = Mode::Idle;
+                self.clear_busy();
             }
             Mode::Settings { .. } | Mode::Select | Mode::ThemeSelect { .. } => {
-                self.mode = Mode::Idle;
+                self.clear_busy();
                 self.picker = None;
             }
             Mode::Busy => self.interrupt(h),
             Mode::Idle => {
+                self.busy_since = None;
                 self.suggestion = None;
             }
         }
@@ -563,19 +567,19 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let _ = h.appr_tx.send(ApprovalResponse::Yes);
-                self.mode = Mode::Busy;
+                self.set_busy();
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
-                self.mode = Mode::Busy;
+                self.set_busy();
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 let _ = h.appr_tx.send(ApprovalResponse::Always);
-                self.mode = Mode::Busy;
+                self.set_busy();
             }
             KeyCode::Esc => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
-                self.mode = Mode::Idle;
+                self.clear_busy();
             }
             _ => {}
         }
@@ -842,7 +846,7 @@ impl App {
                 self.queued.insert(0, pending);
             }
         }
-        self.mode = Mode::Idle;
+        self.clear_busy();
         // Clear the suggestion so the user sees the hint again.
         self.suggestion = None;
     }
@@ -1104,19 +1108,7 @@ impl App {
         Some(text)
     }
 
-    fn dispatch(&mut self, text: String, h: &Handles) {
-        if self.mode == Mode::Busy {
-            self.queued.push(text);
-            return;
-        }
-        if let Some(cmd) = text.strip_prefix('/') {
-            self.run_command(cmd, h);
-            return;
-        }
-        self.mode = Mode::Busy;
-        let (task_text, images) = self.prepare_message(text);
-        let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
-    }
+
 
     fn prepare_message(&self, text: String) -> (String, Vec<String>) {
         let (task_text, _attached) = expand_attachments(&text);
@@ -1165,7 +1157,7 @@ impl App {
                 self.mode = Mode::Settings { cursor: 0, edit: None };
             }
             "compact" => {
-                self.mode = Mode::Busy;
+                self.set_busy();
                 let _ = h.cmd_tx.send(WorkerCmd::Compact);
             }
             "reset" => {
@@ -1205,7 +1197,7 @@ impl App {
                 }
             }
             "init" => {
-                self.mode = Mode::Busy;
+                self.set_busy();
                 let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 let task = format!(
                     "Summarise this codebase into a PICODER.md (or AGENTS.md / CLAUDE.md \
@@ -1515,7 +1507,7 @@ impl App {
             Mode::Busy => {
                 let mut lines = vec![Line::from(vec![
                     Span::styled(format!("{} ", self.spin_frame()), Style::default().fg(self.palette.accent)),
-                    Span::styled("working... ", Style::default().fg(self.dim_text())),
+                    Span::styled(self.working_timer(), Style::default().fg(self.dim_text())),
                     Span::styled("(Esc to interrupt · Enter queues)", Style::default().fg(self.dim_text())),
                 ])];
                 let mark = if self.ascii { "->" } else { "↳" };
