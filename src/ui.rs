@@ -19,7 +19,7 @@ use helpers::{
     bar, complete_path, fmt_cost, humanize, longest_common_prefix, pad1,
     perm_name, render_tline, setting_max_tool_calls,
 };
-use palette::{self, Palette, palette_by_name};
+use palette::{Palette, palette_by_name};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
