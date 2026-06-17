@@ -16,7 +16,7 @@ use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
 use crate::config::{Config, ConfigPatch, PROVIDERS};
 use banner::{BLine, BRole, banner_lines};
 use helpers::{
-    bar, clean_text, complete_path, fmt_cost, humanize, longest_common_prefix, pad1,
+    bar, complete_path, fmt_cost, humanize, longest_common_prefix, pad1,
     perm_name, render_tline, setting_max_tool_calls,
 };
 use palette::{self, Palette, palette_by_name};
