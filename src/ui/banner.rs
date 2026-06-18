@@ -174,6 +174,7 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
 }
 
 /// Push banner lines into the transcript as `TLine`s.
+#[allow(dead_code)]
 pub fn push_banner_transcript(
     transcript: &mut Vec<TLine>,
     width: u16,

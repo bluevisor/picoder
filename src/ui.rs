@@ -259,6 +259,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn push_assistant(&mut self, text: &str) {
         if let Some(last) = self.transcript.last_mut() {
             if last.kind == Kind::Assistant {
@@ -393,6 +394,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn model_short(&self) -> &str {
         self.model_info.rsplit('/').next().unwrap_or(&self.model_info)
     }
