@@ -278,7 +278,7 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new().read(true).custom_flags(0x20000).open(&p) {
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p) {
             Ok(f) => f,
             Err(e) => {
                 if let Ok(meta) = std::fs::symlink_metadata(&p) {
@@ -447,7 +447,7 @@ pub fn write_file(path: &str, content: &str) -> String {
         use std::os::unix::fs::OpenOptionsExt;
         match std::fs::OpenOptions::new()
             .write(true).create(true).truncate(true)
-            .custom_flags(0x20000)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&p)
         {
             Ok(mut f) => {
@@ -566,7 +566,7 @@ pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
     #[cfg(unix)]
     let data = {
         use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new().read(true).custom_flags(0x20000).open(&p) {
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p) {
             Ok(mut f) => {
                 let mut s = String::new();
                 if let Err(e) = std::io::Read::read_to_string(&mut f, &mut s) {
