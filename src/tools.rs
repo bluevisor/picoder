@@ -273,23 +273,52 @@ pub fn bash_kill(id: u64) -> String {
 
 pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let p = expand(path);
-    if let Some(err) = deny_symlink(&p, path, "read") {
-        return err;
-    }
+    // Open with O_NOFOLLOW so symlinks are refused atomically — no TOCTOU
+    // window between the check and the open.
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).custom_flags(0x20000).open(&p) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() {
+                        return format!("DENIED: {path} is a symlink; read the real path instead.");
+                    }
+                }
+                return format!("ERROR: {e}");
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let mut file = {
+        if let Some(err) = deny_symlink(&p, path, "read") {
+            return err;
+        }
+        match std::fs::File::open(&p) {
+            Ok(f) => f,
+            Err(e) => return format!("ERROR: {e}"),
+        }
+    };
     // Open and read only up to READ_FILE_LIMIT bytes to avoid OOM on huge files.
     const READ_FILE_LIMIT: usize = 1_000_000; // 1 MB
-    let mut file = match std::fs::File::open(&p) {
-        Ok(f) => f,
-        Err(e) => return format!("ERROR: {e}"),
+    // Read a small probe first: if the file is binary, hex-dump it without
+    // allocating the full 1 MB.
+    let mut probe = [0u8; 4096];
+    let probe_n = match std::io::Read::read(&mut file, &mut probe) {
+        Ok(0) => return "(empty file)".into(),
+        Ok(n) => n,
+        Err(e) => return format!("ERROR: read failed: {e}"),
     };
-    // Read raw bytes first: if the file is binary (null bytes or invalid
-    // UTF-8), return a hex dump instead of garbled text.
-    let mut raw = Vec::new();
-    if let Err(e) = std::io::Read::by_ref(&mut file)
-        .take(READ_FILE_LIMIT as u64)
-        .read_to_end(&mut raw)
-    {
-        return format!("ERROR: read failed: {e}");
+    let is_binary = probe[..probe_n].contains(&0);
+    let mut raw = probe[..probe_n].to_vec();
+    if !is_binary {
+        if let Err(e) = std::io::Read::by_ref(&mut file)
+            .take((READ_FILE_LIMIT - probe_n) as u64)
+            .read_to_end(&mut raw)
+        {
+            return format!("ERROR: read failed: {e}");
+        }
     }
     let content = match String::from_utf8(raw) {
         Ok(s) => s,
@@ -369,21 +398,20 @@ pub fn list_files(path: &str) -> String {
                 }
             }
             Err(_) => {
-                if unreadable < 10 {
-                    names.push("(unreadable)".into());
-                }
                 unreadable += 1;
             }
         }
     }
-    if unreadable >= 10 {
-        names.push(format!("... (+{more} unreadable entries)", more = unreadable.saturating_sub(10)));
+    names.sort();
+    if unreadable > 0 {
+        let s = if unreadable == 1 { "" } else { "s" };
+        names.push(format!("({unreadable} unreadable entry{s})"));
     }
+    // Pin truncation notice to the very bottom.
     names.sort_by(|a, b| {
-        // Keep truncation/unreadable notes pinned to the bottom after sort.
-        match (a.starts_with("..."), b.starts_with("..."), a == "(unreadable)", b == "(unreadable)") {
-            (true, false, _, _) | (_, _, true, false) => std::cmp::Ordering::Greater,
-            (false, true, _, _) | (_, _, false, true) => std::cmp::Ordering::Less,
+        match (a.starts_with("..."), b.starts_with("...")) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
             _ => a.cmp(b),
         }
     });
@@ -406,11 +434,6 @@ pub fn write_preview(path: &str, content: &str) -> (String, bool) {
 
 pub fn write_file(path: &str, content: &str) -> String {
     let p = expand(path);
-    // Refuse to follow symlinks: writing through a symlink could overwrite an
-    // unexpected target outside the working directory.
-    if let Some(err) = deny_symlink(&p, path, "write to") {
-        return err;
-    }
     if let Some(dir) = p.parent() {
         if !dir.as_os_str().is_empty() {
             if let Err(e) = std::fs::create_dir_all(dir) {
@@ -418,10 +441,43 @@ pub fn write_file(path: &str, content: &str) -> String {
             }
         }
     }
-    match std::fs::write(&p, content) {
-        Ok(()) => format!("OK wrote {} ({} bytes)", p.display(), content.len()),
-        Err(e) => format!("ERROR: {e}"),
+    // O_NOFOLLOW: refuse to write through symlinks atomically.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true)
+            .custom_flags(0x20000)
+            .open(&p)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(content.as_bytes()) {
+                    return format!("ERROR: {e}");
+                }
+            }
+            Err(e) => {
+                // Distinguish symlink denial from other errors.
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() {
+                        return format!("DENIED: {path} is a symlink; write to the real path instead.");
+                    }
+                }
+                return format!("ERROR: {e}");
+            }
+        }
     }
+    #[cfg(not(unix))]
+    {
+        if let Some(err) = deny_symlink(&p, path, "write to") {
+            return err;
+        }
+        match std::fs::write(&p, content) {
+            Err(e) => return format!("ERROR: {e}"),
+            _ => {}
+        }
+    }
+    format!("OK wrote {} ({} bytes)", p.display(), content.len())
 }
 
 pub enum EditPreview {
@@ -506,13 +562,37 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
 }
 pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
     let p = expand(path);
-    // Refuse to write through symlinks.
-    if let Some(err) = deny_symlink(&p, path, "edit") {
-        return EditPreview::Err(err);
-    }
-    let data = match std::fs::read_to_string(&p) {
-        Ok(d) => d,
-        Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
+    // Open with O_NOFOLLOW so symlinks are refused atomically.
+    #[cfg(unix)]
+    let data = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).custom_flags(0x20000).open(&p) {
+            Ok(mut f) => {
+                let mut s = String::new();
+                if let Err(e) = std::io::Read::read_to_string(&mut f, &mut s) {
+                    return EditPreview::Err(format!("ERROR: {e}"));
+                }
+                s
+            }
+            Err(e) => {
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() {
+                        return EditPreview::Err(format!("DENIED: {path} is a symlink; edit the real path instead."));
+                    }
+                }
+                return EditPreview::Err(format!("ERROR: {e}"));
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let data = {
+        if let Some(err) = deny_symlink(&p, path, "edit") {
+            return EditPreview::Err(err);
+        }
+        match std::fs::read_to_string(&p) {
+            Ok(d) => d,
+            Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
+        }
     };
     // NFC-normalize both sides before substring matching: the model may emit
     // composed codepoints while the file uses decomposed forms (e.g. "é" as
@@ -612,26 +692,34 @@ fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::proces
 pub fn bump_cargo_version(dir: &Path) -> Option<String> {
     let path = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).ok()?;
+    let trailing_nl = text.ends_with('\n');
     // Match `version = "x.y.z"` and bump z. (?m) enables multi-line mode so ^
     // matches at the start of any line, not just the start of the string.
     let re = regex::Regex::new(r#"(?m)^(\s*version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")"#).ok()?;
     let mut bumped = String::new();
     let mut found = false;
+    let mut first = true;
     for line in text.lines() {
+        if !first {
+            bumped.push('\n');
+        }
+        first = false;
         if !found {
             if let Some(caps) = re.captures(line) {
                 let z: u64 = caps[4].parse().ok()?;
                 let new_version = format!("{}.{}.{}", &caps[2], &caps[3], z + 1);
-                bumped.push_str(&format!("{}{}{}\n", &caps[1], new_version, &caps[5]));
+                bumped.push_str(&format!("{}{}{}", &caps[1], new_version, &caps[5]));
                 found = true;
                 continue;
             }
         }
         bumped.push_str(line);
-        bumped.push('\n');
     }
     if !found {
         return None;
+    }
+    if trailing_nl {
+        bumped.push('\n');
     }
     std::fs::write(&path, &bumped).ok()?;
     // Return the new version as e.g. "0.2.3".
@@ -1074,9 +1162,10 @@ pub fn web_search(http: &ureq::Agent, query: &str) -> String {
         Err(ureq::Error::Status(code, _)) => return format!("ERROR: search returned HTTP {code}"),
         Err(e) => return format!("ERROR: {e}"),
     };
-    let mut body = String::new();
-    if let Err(e) = resp.into_reader().take(2_000_000).read_to_string(&mut body) {
-        return format!("ERROR: read failed: {e}");
+    // into_string() keeps ureq's deadline so a slow server can't hang us.
+    let mut body = resp.into_string().unwrap_or_default();
+    if body.len() > 2_000_000 {
+        body.truncate(2_000_000);
     }
     parse_ddg(&body)
 }

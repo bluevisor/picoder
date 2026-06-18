@@ -28,10 +28,10 @@ pub enum Kind {
     DiffCtx,
     Notice,
     ErrorK,
-    Code,
-    Heading,
-    Banner,
-    BannerDim,
+    #[allow(dead_code)] Code,
+    #[allow(dead_code)] Heading,
+    #[allow(dead_code)] Banner,
+    #[allow(dead_code)] BannerDim,
 }
 
 /// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
@@ -133,7 +133,7 @@ pub const SETTING_LABELS: &[&str] = &[
 #[derive(Clone, Copy)]
 pub enum BannerColor {
     /// A fixed color (no palette reactivity).
-    Fixed(Color),
+    #[allow(dead_code)] Fixed(Color),
     /// Rainbow art row: uses `palette.mono_banner` when set, else
     /// the Apple rainbow at the given index.
     Rainbow(usize),
@@ -176,7 +176,7 @@ pub enum Mode {
 #[derive(Clone, Copy)]
 pub enum PickAction {
     /// Switch model to the chosen id.
-    Model,
+    #[allow(dead_code)] Model,
     /// Start the subscription OAuth flow for the chosen provider.
     Login,
 }
