@@ -605,7 +605,7 @@ mod tests {
                 assert!(
                     v.starts_with(&prov_upper)
                         || (*name == "google" && v.starts_with("GEMINI"))
-                        || (*name == "zai" && v.starts_with("ZHIPUAI")),
+                        || (*name == "zai" && (v.starts_with("ZAI") || v.starts_with("ZHIPUAI"))),
                     "{name} must not read {v}"
                 );
             }
