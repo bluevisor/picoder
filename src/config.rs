@@ -601,7 +601,9 @@ mod tests {
             for v in &vars[1..] {
                 let prov_upper = name.to_uppercase();
                 assert!(
-                    v.starts_with(&prov_upper) || (*name == "google" && v.starts_with("GEMINI")),
+                    v.starts_with(&prov_upper)
+                        || (*name == "google" && v.starts_with("GEMINI"))
+                        || (*name == "zai" && v.starts_with("ZHIPUAI")),
                     "{name} must not read {v}"
                 );
             }
