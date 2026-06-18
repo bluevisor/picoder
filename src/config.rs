@@ -132,7 +132,7 @@ pub const PROVIDERS: &[(&str, &str, &str)] = &[
     ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     ("openrouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
     ("google", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
-    ("zai", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
+    ("zai", "https://api.z.ai/api/paas/v4", "glm-5.2"),
 ];
 
 /// Env vars that may supply the API key for `provider`, highest priority
@@ -147,7 +147,7 @@ fn key_env_vars(provider: &str) -> &'static [&'static str] {
         "groq" => &["PICODER_API_KEY", "GROQ_API_KEY"],
         "openrouter" => &["PICODER_API_KEY", "OPENROUTER_API_KEY"],
         "google" => &["PICODER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
-        "zai" => &["PICODER_API_KEY", "ZHIPUAI_API_KEY"],
+        "zai" => &["PICODER_API_KEY", "ZAI_API_KEY", "ZHIPUAI_API_KEY"],
         _ => &["PICODER_API_KEY"],
     }
 }
@@ -184,6 +184,8 @@ pub fn known_context_window(model: &str) -> u32 {
         1_000_000 // v4-pro and v4-flash both advertise 1M
     } else if m.contains("deepseek") {
         128_000 // V3 / chat / reasoner
+    } else if m.contains("glm-5") {
+        1_000_000 // GLM-5 / 5.1 / 5.2 all advertise 1M
     } else if m.contains("glm-4-plus") {
         1_000_000 // GLM-4-Plus advertises 1M
     } else if m.contains("glm") {
