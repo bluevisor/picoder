@@ -825,6 +825,11 @@ impl App {
     fn on_key_busy(&mut self, key: KeyEvent, h: &Handles) {
         match key.code {
             KeyCode::Esc => self.interrupt(h),
+            KeyCode::Char('c') | KeyCode::Char('d')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.interrupt(h);
+            }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_char(caps_char(&key, c));
             }
@@ -854,7 +859,7 @@ impl App {
     }
 
     fn on_key_idle(&mut self, key: KeyEvent, h: &Handles) {
-        if key.code == KeyCode::Esc {
+        if key.code == KeyCode::Esc || ctrl_c_or_d(&key) {
             // Check for double-press exit (Ctrl+C / Ctrl+D style).
             if self.input.is_empty() {
                 let now = Instant::now();
