@@ -41,14 +41,15 @@ impl Message {
     }
 }
 
-/// Serialize messages for the API request. A message with images becomes the
-/// OpenAI multimodal form (`content` as an array of text + image_url parts);
-/// plain messages serialize normally.
-fn messages_payload(messages: &[Message]) -> Vec<serde_json::Value> {
+/// Serialize messages for the API request. When `supports_images` is true, a
+/// message with images becomes the OpenAI multimodal form (`content` as an array
+/// of text + image_url parts); otherwise images are silently dropped and the
+/// message serializes as plain text (DeepSeek and Zhipu reject `image_url`).
+fn messages_payload(messages: &[Message], supports_images: bool) -> Vec<serde_json::Value> {
     messages
         .iter()
         .map(|m| {
-            if m.images.is_empty() {
+            if !supports_images || m.images.is_empty() {
                 return serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
             }
             let mut parts: Vec<serde_json::Value> = Vec::new();
@@ -319,7 +320,7 @@ fn chat_stream(
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({
         "model": cfg.model,
-        "messages": messages_payload(messages),
+        "messages": messages_payload(messages, cfg.supports_images()),
         "temperature": 0.2,
         "stream": true,
         "stream_options": {"include_usage": true},
