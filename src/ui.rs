@@ -1746,15 +1746,20 @@ impl App {
     fn on_key_idle(&mut self, key: KeyEvent, h: &Handles) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // While the `/` palette is open, Up/Down/Tab/Enter act on it.
+        // Exception: when the user is browsing command history with Up/Down
+        // and lands on an entry that starts with '/', Up/Down should
+        // continue history navigation rather than switching to palette
+        // navigation (otherwise history browsing gets stuck).
         let sugg = self.slash_suggestions();
+        let browsing_history = self.hist_idx < self.history.len();
         if !sugg.is_empty() {
             let idx = self.suggest_idx.min(sugg.len() - 1);
             match key.code {
-                KeyCode::Down => {
+                KeyCode::Down if !browsing_history => {
                     self.suggest_idx = (idx + 1) % sugg.len();
                     return;
                 }
-                KeyCode::Up => {
+                KeyCode::Up if !browsing_history => {
                     self.suggest_idx = (idx + sugg.len() - 1) % sugg.len();
                     return;
                 }
