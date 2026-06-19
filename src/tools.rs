@@ -323,8 +323,17 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let content = match String::from_utf8(raw) {
         Ok(s) => s,
         Err(e) => {
-            // Binary: return a hex dump of the first 512 bytes.
+            // A file read right up to READ_FILE_LIMIT can be cut mid-codepoint;
+            // that lone trailing partial char isn't "binary". If the only invalid
+            // bytes are at the very end of a limit-sized read, keep the valid
+            // prefix as text instead of hex-dumping a legit UTF-8 file.
+            let valid_up_to = e.utf8_error().valid_up_to();
             let raw = e.into_bytes();
+            if raw.len() >= READ_FILE_LIMIT && valid_up_to >= raw.len().saturating_sub(3) {
+                // Safe: valid_up_to is by definition a char boundary.
+                String::from_utf8_lossy(&raw[..valid_up_to]).into_owned()
+            } else {
+            // Binary: return a hex dump of the first 512 bytes.
             let preview = &raw[..raw.len().min(512)];
             let hex: String = preview
                 .chunks(16)
@@ -344,6 +353,7 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
                 raw.len(),
                 preview.len()
             );
+            }
         }
     };
     let truncated_read = content.len() >= READ_FILE_LIMIT;
@@ -1042,6 +1052,20 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 // ----------------------------------------------------------- web_fetch ------
 
+/// Truncate `s` to at most `max_bytes`, snapping down to the nearest char
+/// boundary. `String::truncate` panics when the byte index splits a multibyte
+/// codepoint — common on real >2MB web pages — so callers go through here.
+fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 /// Fetch a URL and return readable text. HTML is stripped to text; anything
 /// else (JSON, plain text, …) comes back as-is. Body capped at 2MB.
 pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
@@ -1071,9 +1095,7 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
         Ok(s) => s,
         Err(e) => return format!("ERROR: read failed (binary?): {e}"),
     };
-    if body.len() > 2_000_000 {
-        body.truncate(2_000_000);
-    }
+    truncate_to_char_boundary(&mut body, 2_000_000);
     let text = if html { html_to_text(&body) } else { body };
     let text = text.trim();
     if text.is_empty() {
@@ -1164,9 +1186,7 @@ pub fn web_search(http: &ureq::Agent, query: &str) -> String {
     };
     // into_string() keeps ureq's deadline so a slow server can't hang us.
     let mut body = resp.into_string().unwrap_or_default();
-    if body.len() > 2_000_000 {
-        body.truncate(2_000_000);
-    }
+    truncate_to_char_boundary(&mut body, 2_000_000);
     parse_ddg(&body)
 }
 
@@ -1197,6 +1217,9 @@ fn parse_ddg(html: &str) -> String {
         let href_rest = &full[href_start..];
         let href_end = href_rest.find('"').unwrap_or(href_rest.len());
         let encoded = &href_rest[..href_end];
+        // The uddg value ends at the next query param (`&rut=…`); keep only the
+        // encoded destination so the URL doesn't carry a tracking suffix.
+        let encoded = &encoded[..encoded.find('&').unwrap_or(encoded.len())];
         out.push_str(&format!("{}. {title}\n   {}\n", i + 1, urldecode(encoded)));
         if let Some(s) = snippets.get(i) {
             if !s.is_empty() {
@@ -1432,6 +1455,8 @@ mod tests {
         let out = parse_ddg(html);
         assert!(out.contains("1. Example Domain"), "got: {out}");
         assert!(out.contains("https://example.com/"));
+        // The redirect's trailing tracking param (&rut=…) must be stripped.
+        assert!(!out.contains("rut"), "tracking suffix leaked into url: {out}");
         assert!(out.contains("This domain is for use in &c."));
     }
 
