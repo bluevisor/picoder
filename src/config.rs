@@ -495,6 +495,12 @@ impl Config {
         &self.api_key
     }
 
+    /// Does this provider accept OpenAI-style `image_url` content parts?
+    /// DeepSeek is text-only and rejects the variant; most others accept it.
+    pub fn supports_images(&self) -> bool {
+        !matches!(self.provider.as_str(), "deepseek" | "zai")
+    }
+
     /// Persist only the theme name, preserving the rest of the file.
     pub fn persist_theme(theme: &str) {
         let mut disk = Config::load_disk();
