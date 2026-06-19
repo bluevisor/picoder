@@ -273,29 +273,67 @@ pub fn bash_kill(id: u64) -> String {
 
 pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     let p = expand(path);
-    if let Some(err) = deny_symlink(&p, path, "read") {
-        return err;
-    }
+    // Open with O_NOFOLLOW so symlinks are refused atomically — no TOCTOU
+    // window between the check and the open.
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() {
+                        return format!("DENIED: {path} is a symlink; read the real path instead.");
+                    }
+                }
+                return format!("ERROR: {e}");
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let mut file = {
+        if let Some(err) = deny_symlink(&p, path, "read") {
+            return err;
+        }
+        match std::fs::File::open(&p) {
+            Ok(f) => f,
+            Err(e) => return format!("ERROR: {e}"),
+        }
+    };
     // Open and read only up to READ_FILE_LIMIT bytes to avoid OOM on huge files.
     const READ_FILE_LIMIT: usize = 1_000_000; // 1 MB
-    let mut file = match std::fs::File::open(&p) {
-        Ok(f) => f,
-        Err(e) => return format!("ERROR: {e}"),
+    // Read a small probe first: if the file is binary, hex-dump it without
+    // allocating the full 1 MB.
+    let mut probe = [0u8; 4096];
+    let probe_n = match std::io::Read::read(&mut file, &mut probe) {
+        Ok(0) => return "(empty file)".into(),
+        Ok(n) => n,
+        Err(e) => return format!("ERROR: read failed: {e}"),
     };
-    // Read raw bytes first: if the file is binary (null bytes or invalid
-    // UTF-8), return a hex dump instead of garbled text.
-    let mut raw = Vec::new();
-    if let Err(e) = std::io::Read::by_ref(&mut file)
-        .take(READ_FILE_LIMIT as u64)
-        .read_to_end(&mut raw)
-    {
-        return format!("ERROR: read failed: {e}");
+    let is_binary = probe[..probe_n].contains(&0);
+    let mut raw = probe[..probe_n].to_vec();
+    if !is_binary {
+        if let Err(e) = std::io::Read::by_ref(&mut file)
+            .take((READ_FILE_LIMIT - probe_n) as u64)
+            .read_to_end(&mut raw)
+        {
+            return format!("ERROR: read failed: {e}");
+        }
     }
     let content = match String::from_utf8(raw) {
         Ok(s) => s,
         Err(e) => {
-            // Binary: return a hex dump of the first 512 bytes.
+            // A file read right up to READ_FILE_LIMIT can be cut mid-codepoint;
+            // that lone trailing partial char isn't "binary". If the only invalid
+            // bytes are at the very end of a limit-sized read, keep the valid
+            // prefix as text instead of hex-dumping a legit UTF-8 file.
+            let valid_up_to = e.utf8_error().valid_up_to();
             let raw = e.into_bytes();
+            if raw.len() >= READ_FILE_LIMIT && valid_up_to >= raw.len().saturating_sub(3) {
+                // Safe: valid_up_to is by definition a char boundary.
+                String::from_utf8_lossy(&raw[..valid_up_to]).into_owned()
+            } else {
+            // Binary: return a hex dump of the first 512 bytes.
             let preview = &raw[..raw.len().min(512)];
             let hex: String = preview
                 .chunks(16)
@@ -315,6 +353,7 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
                 raw.len(),
                 preview.len()
             );
+            }
         }
     };
     let truncated_read = content.len() >= READ_FILE_LIMIT;
@@ -369,21 +408,20 @@ pub fn list_files(path: &str) -> String {
                 }
             }
             Err(_) => {
-                if unreadable < 10 {
-                    names.push("(unreadable)".into());
-                }
                 unreadable += 1;
             }
         }
     }
-    if unreadable >= 10 {
-        names.push(format!("... (+{more} unreadable entries)", more = unreadable.saturating_sub(10)));
+    names.sort();
+    if unreadable > 0 {
+        let s = if unreadable == 1 { "" } else { "s" };
+        names.push(format!("({unreadable} unreadable entry{s})"));
     }
+    // Pin truncation notice to the very bottom.
     names.sort_by(|a, b| {
-        // Keep truncation/unreadable notes pinned to the bottom after sort.
-        match (a.starts_with("..."), b.starts_with("..."), a == "(unreadable)", b == "(unreadable)") {
-            (true, false, _, _) | (_, _, true, false) => std::cmp::Ordering::Greater,
-            (false, true, _, _) | (_, _, false, true) => std::cmp::Ordering::Less,
+        match (a.starts_with("..."), b.starts_with("...")) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
             _ => a.cmp(b),
         }
     });
@@ -406,11 +444,6 @@ pub fn write_preview(path: &str, content: &str) -> (String, bool) {
 
 pub fn write_file(path: &str, content: &str) -> String {
     let p = expand(path);
-    // Refuse to follow symlinks: writing through a symlink could overwrite an
-    // unexpected target outside the working directory.
-    if let Some(err) = deny_symlink(&p, path, "write to") {
-        return err;
-    }
     if let Some(dir) = p.parent() {
         if !dir.as_os_str().is_empty() {
             if let Err(e) = std::fs::create_dir_all(dir) {
@@ -418,10 +451,43 @@ pub fn write_file(path: &str, content: &str) -> String {
             }
         }
     }
-    match std::fs::write(&p, content) {
-        Ok(()) => format!("OK wrote {} ({} bytes)", p.display(), content.len()),
-        Err(e) => format!("ERROR: {e}"),
+    // O_NOFOLLOW: refuse to write through symlinks atomically.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&p)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(content.as_bytes()) {
+                    return format!("ERROR: {e}");
+                }
+            }
+            Err(e) => {
+                // Distinguish symlink denial from other errors.
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() {
+                        return format!("DENIED: {path} is a symlink; write to the real path instead.");
+                    }
+                }
+                return format!("ERROR: {e}");
+            }
+        }
     }
+    #[cfg(not(unix))]
+    {
+        if let Some(err) = deny_symlink(&p, path, "write to") {
+            return err;
+        }
+        match std::fs::write(&p, content) {
+            Err(e) => return format!("ERROR: {e}"),
+            _ => {}
+        }
+    }
+    format!("OK wrote {} ({} bytes)", p.display(), content.len())
 }
 
 pub enum EditPreview {
@@ -506,13 +572,37 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
 }
 pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
     let p = expand(path);
-    // Refuse to write through symlinks.
-    if let Some(err) = deny_symlink(&p, path, "edit") {
-        return EditPreview::Err(err);
-    }
-    let data = match std::fs::read_to_string(&p) {
-        Ok(d) => d,
-        Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
+    // Open with O_NOFOLLOW so symlinks are refused atomically.
+    #[cfg(unix)]
+    let data = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p) {
+            Ok(mut f) => {
+                let mut s = String::new();
+                if let Err(e) = std::io::Read::read_to_string(&mut f, &mut s) {
+                    return EditPreview::Err(format!("ERROR: {e}"));
+                }
+                s
+            }
+            Err(e) => {
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() {
+                        return EditPreview::Err(format!("DENIED: {path} is a symlink; edit the real path instead."));
+                    }
+                }
+                return EditPreview::Err(format!("ERROR: {e}"));
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let data = {
+        if let Some(err) = deny_symlink(&p, path, "edit") {
+            return EditPreview::Err(err);
+        }
+        match std::fs::read_to_string(&p) {
+            Ok(d) => d,
+            Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
+        }
     };
     // NFC-normalize both sides before substring matching: the model may emit
     // composed codepoints while the file uses decomposed forms (e.g. "é" as
@@ -612,26 +702,34 @@ fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::proces
 pub fn bump_cargo_version(dir: &Path) -> Option<String> {
     let path = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).ok()?;
+    let trailing_nl = text.ends_with('\n');
     // Match `version = "x.y.z"` and bump z. (?m) enables multi-line mode so ^
     // matches at the start of any line, not just the start of the string.
     let re = regex::Regex::new(r#"(?m)^(\s*version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")"#).ok()?;
     let mut bumped = String::new();
     let mut found = false;
+    let mut first = true;
     for line in text.lines() {
+        if !first {
+            bumped.push('\n');
+        }
+        first = false;
         if !found {
             if let Some(caps) = re.captures(line) {
                 let z: u64 = caps[4].parse().ok()?;
                 let new_version = format!("{}.{}.{}", &caps[2], &caps[3], z + 1);
-                bumped.push_str(&format!("{}{}{}\n", &caps[1], new_version, &caps[5]));
+                bumped.push_str(&format!("{}{}{}", &caps[1], new_version, &caps[5]));
                 found = true;
                 continue;
             }
         }
         bumped.push_str(line);
-        bumped.push('\n');
     }
     if !found {
         return None;
+    }
+    if trailing_nl {
+        bumped.push('\n');
     }
     std::fs::write(&path, &bumped).ok()?;
     // Return the new version as e.g. "0.2.3".
@@ -954,6 +1052,20 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 // ----------------------------------------------------------- web_fetch ------
 
+/// Truncate `s` to at most `max_bytes`, snapping down to the nearest char
+/// boundary. `String::truncate` panics when the byte index splits a multibyte
+/// codepoint — common on real >2MB web pages — so callers go through here.
+fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 /// Fetch a URL and return readable text. HTML is stripped to text; anything
 /// else (JSON, plain text, …) comes back as-is. Body capped at 2MB.
 pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
@@ -983,9 +1095,7 @@ pub fn web_fetch(http: &ureq::Agent, url: &str) -> String {
         Ok(s) => s,
         Err(e) => return format!("ERROR: read failed (binary?): {e}"),
     };
-    if body.len() > 2_000_000 {
-        body.truncate(2_000_000);
-    }
+    truncate_to_char_boundary(&mut body, 2_000_000);
     let text = if html { html_to_text(&body) } else { body };
     let text = text.trim();
     if text.is_empty() {
@@ -1074,10 +1184,9 @@ pub fn web_search(http: &ureq::Agent, query: &str) -> String {
         Err(ureq::Error::Status(code, _)) => return format!("ERROR: search returned HTTP {code}"),
         Err(e) => return format!("ERROR: {e}"),
     };
-    let mut body = String::new();
-    if let Err(e) = resp.into_reader().take(2_000_000).read_to_string(&mut body) {
-        return format!("ERROR: read failed: {e}");
-    }
+    // into_string() keeps ureq's deadline so a slow server can't hang us.
+    let mut body = resp.into_string().unwrap_or_default();
+    truncate_to_char_boundary(&mut body, 2_000_000);
     parse_ddg(&body)
 }
 
@@ -1108,6 +1217,9 @@ fn parse_ddg(html: &str) -> String {
         let href_rest = &full[href_start..];
         let href_end = href_rest.find('"').unwrap_or(href_rest.len());
         let encoded = &href_rest[..href_end];
+        // The uddg value ends at the next query param (`&rut=…`); keep only the
+        // encoded destination so the URL doesn't carry a tracking suffix.
+        let encoded = &encoded[..encoded.find('&').unwrap_or(encoded.len())];
         out.push_str(&format!("{}. {title}\n   {}\n", i + 1, urldecode(encoded)));
         if let Some(s) = snippets.get(i) {
             if !s.is_empty() {
@@ -1343,6 +1455,8 @@ mod tests {
         let out = parse_ddg(html);
         assert!(out.contains("1. Example Domain"), "got: {out}");
         assert!(out.contains("https://example.com/"));
+        // The redirect's trailing tracking param (&rut=…) must be stripped.
+        assert!(!out.contains("rut"), "tracking suffix leaked into url: {out}");
         assert!(out.contains("This domain is for use in &c."));
     }
 

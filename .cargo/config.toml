@@ -17,11 +17,11 @@ linker = "arm-unknown-linux-musleabihf-gcc"
 linker = "aarch64-unknown-linux-musl-gcc"
 rustflags = ["-C", "target-cpu=cortex-a76", "-C", "opt-level=3"]
 
-# NVIDIA Jetson AGX Orin (Cortex-A78) native build. Unlike the Pis, the Orin can
-# compile Rust itself, so it builds and runs its own native glibc binary — no
-# Mac cross-compile needed: `cargo build --release` or `--profile jetson`.
-# Tunes codegen to the A78 and overrides the size-first release profile with
-# opt-level=3 for speed. Scoped to the native gnu triple, so the ARMv6 and
-# Pi 5 musl cross-builds above are unaffected.
+# NVIDIA Jetson (Cortex-A57/A78) native build. Jetson boards can compile Rust
+# themselves, so they build and run their own native glibc binary — no
+# Mac cross-compile needed: `cargo build --release`.
+# Tunes codegen to the local CPU and overrides the size-first release profile
+# with opt-level=3 for speed. Scoped to the native gnu triple, so the ARMv6
+# and Pi 5 musl cross-builds above are unaffected.
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=cortex-a78", "-C", "opt-level=3"]
+rustflags = ["-C", "target-cpu=cortex-a57", "-C", "opt-level=3"]

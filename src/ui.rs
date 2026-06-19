@@ -2,10 +2,26 @@
 //! composer, and a status bar. Runs on the UI thread; the agent runs on a
 //! worker thread and feeds this UI through a channel.
 
+mod banner;
+mod helpers;
+mod palette;
+mod types;
+
+pub use banner::banner_ansi;
+pub use helpers::{expand_attachments, extract_images, term_width};
+pub use palette::{is_theme_name, THEMES};
+pub use types::{detect_ascii, UiConfig};
+
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
-use crate::config::{memory_path, Config, ConfigPatch, PROVIDERS};
+use crate::config::{Config, ConfigPatch, PROVIDERS};
+use banner::{BRole, banner_lines};
+use helpers::{
+    bar, complete_path, fmt_cost, humanize, longest_common_prefix, pad1,
+    perm_name, render_tline, setting_max_tool_calls,
+};
+use palette::{Palette, palette_by_name};
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
@@ -19,731 +35,11 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
-
-const SPIN_U: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPIN_A: [&str; 4] = ["|", "/", "-", "\\"];
-const MAX_TRANSCRIPT: usize = 4000;
-
-/// Apple-logo rainbow (top→bottom): green, yellow, orange, red, purple, blue.
-const APPLE_RAINBOW: [Color; 6] = [
-    Color::Rgb(97, 187, 70),
-    Color::Rgb(253, 184, 39),
-    Color::Rgb(245, 130, 31),
-    Color::Rgb(224, 58, 62),
-    Color::Rgb(150, 61, 151),
-    Color::Rgb(0, 157, 220),
-];
-/// Per-row brightness factors that turn a theme's banner color into a shaded
-/// top→bottom gradient, so the logo reads with depth (darkest row = the drop
-/// shadow). Each non-default theme thus gets a distinct shaded ramp of its own
-/// color; the default theme uses the Apple rainbow instead.
-const BANNER_SHADE: [f32; 6] = [1.0, 0.86, 0.72, 0.60, 0.49, 0.40];
-/// 16-color approximation for the framebuffer console.
-const APPLE_RAINBOW_16: [Color; 6] = [
-    Color::Green,
-    Color::Yellow,
-    Color::LightRed,
-    Color::Red,
-    Color::Magenta,
-    Color::Blue,
-];
-
-#[derive(Clone, Copy, PartialEq)]
-enum CursorKind {
-    Caret,   // hardware caret
-    Reverse, // reverse-video over the char (Claude-style)
-    Block,   // a solid ▒/# block (Apple ][ / DOS)
-}
-
-/// A color theme. `mono_banner = Some(c)` draws the logo in one color instead
-/// of the Apple rainbow.
-#[derive(Clone, Copy)]
-struct Palette {
-    name: &'static str,
-    accent: Color,
-    assistant: Color,
-    assistant_glyph: Color,
-    reasoning: Color,
-    tool: Color,
-    tool_result: Color,
-    notice: Color,
-    code: Color,
-    heading: Color,
-    diff_add: Color,
-    diff_del: Color,
-    diff_ctx: Color,
-    error: Color,
-    mono_banner: Option<Color>,
-    /// UI chrome: borders, rules, separators.
-    chrome: Color,
-    /// Secondary / dimmed text (hints, status values, picker dim).
-    secondary: Color,
-    /// Background for user messages (a subtle band).
-    user_bg: Color,
-    /// App background. `Color::Reset` inherits the terminal's own background;
-    /// themed palettes paint their own near-black so the whole TUI matches.
-    bg: Color,
-    /// Theme-specific composer prompt (else the default glyph set's prompt).
-    prompt: Option<&'static str>,
-    cursor: CursorKind,
-}
-
-const DEFAULT_PALETTE: Palette = Palette {
-    name: "Default",
-    accent: Color::Cyan,
-    assistant: Color::Rgb(242, 242, 247),        // systemWhite (slightly warm)
-    assistant_glyph: Color::Green,
-    reasoning: Color::Rgb(140, 140, 150),          // dim gray, readable on dark bg
-    tool: Color::Blue,
-    tool_result: Color::Rgb(150, 150, 150),
-    notice: Color::Rgb(150, 150, 150),
-    code: Color::Yellow,
-    heading: Color::Rgb(242, 242, 247),           // near white
-    diff_add: Color::Green,
-    diff_del: Color::Red,
-    diff_ctx: Color::DarkGray,
-    error: Color::Red,
-    mono_banner: None,
-    chrome: Color::DarkGray,
-    secondary: Color::Rgb(140, 140, 140),
-    user_bg: Color::Rgb(48, 48, 48),
-    bg: Color::Reset,                             // inherit the terminal background
-    prompt: None,
-    cursor: CursorKind::Reverse,
+use types::{
+    caps_char, ctrl_c_or_d, BannerColor, CursorKind, GLYPHS_A, GLYPHS_U, Glyphs, Kind, Mode,
+    PickAction, Picker, PICKER_VISIBLE, SETTING_LABELS, SLASH_COMMANDS, SPIN_A, SPIN_U, TLine,
+    DOUBLE_PRESS_TIMEOUT, MAX_SUGGEST, MAX_TRANSCRIPT,
 };
-
-// Apple ][ — authentic green-phosphor CRT (P31, Monitor II / Monitor ///).
-const APPLE2_GREEN: Color = Color::Rgb(51, 255, 51);
-const APPLE2_PALETTE: Palette = Palette {
-    name: "Apple ][",
-    accent: APPLE2_GREEN,
-    assistant: APPLE2_GREEN,
-    assistant_glyph: Color::Rgb(100, 255, 100),
-    reasoning: Color::Rgb(0, 130, 0),
-    tool: APPLE2_GREEN,
-    tool_result: Color::Rgb(0, 160, 0),
-    notice: Color::Rgb(0, 155, 0),
-    code: Color::Rgb(140, 255, 140),
-    heading: APPLE2_GREEN,
-    diff_add: Color::Rgb(110, 255, 110),
-    diff_del: Color::Rgb(0, 100, 0),
-    diff_ctx: Color::Rgb(0, 70, 0),
-    // On a green-phosphor CRT there is no red; errors were signalled by
-    // inverse video or the bell. We use a near-white green that stands out.
-    error: Color::Rgb(200, 255, 200),
-    // The Apple II text screen was strictly monochrome — green all the way.
-    mono_banner: Some(APPLE2_GREEN),
-    chrome: Color::Rgb(0, 120, 0),
-    secondary: Color::Rgb(0, 155, 0),
-    user_bg: Color::Rgb(0, 30, 0),
-    bg: Color::Rgb(0, 12, 0),                     // black CRT with faint green cast
-    prompt: Some("] "),
-    cursor: CursorKind::Block,
-};
-
-// MS-DOS — light-gray text on black, C:\> prompt.
-const MSDOS_PALETTE: Palette = Palette {
-    name: "MSDOS",
-    accent: Color::White,
-    assistant: Color::Gray,
-    assistant_glyph: Color::White,
-    reasoning: Color::DarkGray,
-    tool: Color::Cyan,
-    tool_result: Color::Gray,
-    notice: Color::Gray,
-    code: Color::LightGreen,
-    heading: Color::Rgb(242, 242, 247),           // near white
-    diff_add: Color::Green,
-    diff_del: Color::Red,
-    diff_ctx: Color::DarkGray,
-    error: Color::LightRed,
-    mono_banner: Some(Color::White),
-    chrome: Color::DarkGray,
-    secondary: Color::Gray,
-    user_bg: Color::DarkGray,
-    bg: Color::Rgb(8, 8, 10),                     // black DOS console
-    prompt: Some("C:\\> "),
-    cursor: CursorKind::Block,
-};
-
-// macOS — macOS Terminal.app dark mode running fish: near-black background,
-// soft off-white text, muted steel-blue directories, and a green prompt.
-const MACOS_BLUE: Color = Color::Rgb(111, 157, 196);   // Terminal dir blue (#6F9DC4)
-const MACOS_GREEN: Color = Color::Rgb(126, 190, 106);  // fish prompt green (#7EBE6A)
-const MACOS_FG: Color = Color::Rgb(216, 216, 216);     // soft off-white text
-const MACOS_PALETTE: Palette = Palette {
-    name: "macOS",
-    accent: MACOS_BLUE,                           // steel blue (dirs, borders, paths)
-    assistant: MACOS_FG,                          // soft off-white
-    assistant_glyph: MACOS_GREEN,                 // green prompt bullet
-    reasoning: Color::Rgb(142, 142, 147),         // systemGray
-    tool: MACOS_BLUE,                             // steel blue
-    tool_result: Color::Rgb(174, 174, 178),       // systemGray2
-    notice: Color::Rgb(152, 152, 157),            // systemGray3
-    code: MACOS_GREEN,                            // green (builtins/commands like `help`)
-    heading: MACOS_FG,
-    diff_add: MACOS_GREEN,                        // green
-    diff_del: Color::Rgb(255, 95, 86),            // macOS red (#FF5F56)
-    diff_ctx: Color::Rgb(99, 99, 102),            // systemGray4
-    error: Color::Rgb(255, 95, 86),               // macOS red
-    mono_banner: Some(MACOS_BLUE),               // steel-blue shaded logo
-    chrome: Color::Rgb(72, 72, 74),               // systemGray5
-    secondary: Color::Rgb(152, 152, 157),          // systemGray3
-    user_bg: Color::Rgb(38, 38, 38),              // near-black elevated bg
-    bg: Color::Rgb(29, 29, 29),                   // Terminal.app dark (#1D1D1D)
-    prompt: Some("~ "),
-    cursor: CursorKind::Reverse,
-};
-
-// ── Sun Microsystems ───────────────────────────────────────────────
-// Warm amber/gold palette inspired by Sun workstations and the Sun
-// logo's amber diamond. Dark brown-black background with golden-hour
-// amber accents, purple secondary, and a Solaris C-shell prompt.
-const SUN_PALETTE: Palette = Palette {
-    name: "SUN",
-    accent: Color::Rgb(255, 183, 0),             // golden amber (#FFB700)
-    assistant: Color::Rgb(238, 232, 213),         // warm Solaris paper-white
-    assistant_glyph: Color::Rgb(255, 183, 0),    // amber
-    reasoning: Color::Rgb(139, 119, 80),          // muted bronze
-    tool: Color::Rgb(186, 85, 211),              // Sun purple (#BA55D3)
-    tool_result: Color::Rgb(160, 140, 100),       // warm sand
-    notice: Color::Rgb(160, 140, 100),
-    code: Color::Rgb(255, 200, 80),              // bright amber
-    heading: Color::Rgb(238, 232, 213),
-    diff_add: Color::Rgb(100, 200, 100),          // soft green (CRT-friendly)
-    diff_del: Color::Rgb(220, 100, 60),           // warm rust red
-    diff_ctx: Color::Rgb(100, 80, 50),
-    error: Color::Rgb(255, 120, 70),             // amber-red
-    mono_banner: Some(Color::Rgb(255, 183, 0)),  // golden amber
-    chrome: Color::Rgb(100, 80, 50),              // dark bronze
-    secondary: Color::Rgb(160, 140, 100),
-    user_bg: Color::Rgb(40, 30, 15),             // warm dark brown
-    bg: Color::Rgb(22, 16, 8),                    // warm brown-black
-    prompt: Some("sun% "),                        // Solaris C-shell prompt
-    cursor: CursorKind::Block,
-};
-
-// ── NeXT ────────────────────────────────────────────────────────────
-// Stark monochrome palette inspired by NeXTSTEP's platinum/black UI.
-// High-contrast architectural minimalism: crisp whites, clean grays,
-// and the distinctive NeXT workspace style.
-const NEXTS_PALETTE: Palette = Palette {
-    name: "NeXT",
-    accent: Color::White,                        // pure architectural white
-    assistant: Color::Rgb(220, 220, 220),         // bright platinum
-    assistant_glyph: Color::White,               // crisp white
-    reasoning: Color::Rgb(100, 100, 100),         // medium gray
-    tool: Color::Rgb(180, 180, 180),              // light platinum
-    tool_result: Color::Rgb(130, 130, 130),       // mid gray
-    notice: Color::Rgb(130, 130, 130),
-    code: Color::Rgb(200, 200, 200),              // bright code
-    heading: Color::White,
-    diff_add: Color::Rgb(180, 180, 180),          // monochrome diff
-    diff_del: Color::Rgb(80, 80, 80),             // dimmed delete
-    diff_ctx: Color::Rgb(60, 60, 60),
-    error: Color::Rgb(255, 255, 255),             // white on error (NeXT style)
-    mono_banner: Some(Color::White),             // pure white
-    chrome: Color::Rgb(80, 80, 80),               // architectural gray
-    secondary: Color::Rgb(120, 120, 120),
-    user_bg: Color::Rgb(40, 40, 40),              // dark slate
-    bg: Color::Rgb(18, 18, 20),                   // architectural near-black
-    prompt: Some("NeXT> "),                       // NeXTSTEP workspace
-    cursor: CursorKind::Reverse,
-};
-
-// ── SGI (Silicon Graphics) ─────────────────────────────────────────
-// Deep indigo/teal palette inspired by IRIX and the SGI Indigo
-// workstation. Blue-purple dark bg with IRIX teal window-manager
-// accents and the iconic IRIX root prompt.
-const SGI_PALETTE: Palette = Palette {
-    name: "SGI",
-    accent: Color::Rgb(0, 191, 165),              // teal 400 (#00BFA5) — IRIX 4Dwm
-    assistant: Color::Rgb(224, 240, 240),         // cool white
-    assistant_glyph: Color::Rgb(0, 191, 165),    // teal
-    reasoning: Color::Rgb(80, 100, 120),          // muted slate-blue
-    tool: Color::Rgb(100, 140, 220),              // SGI blue
-    tool_result: Color::Rgb(100, 130, 145),       // muted teal
-    notice: Color::Rgb(100, 130, 145),
-    code: Color::Rgb(120, 220, 200),              // bright teal
-    heading: Color::Rgb(224, 240, 240),
-    diff_add: Color::Rgb(60, 200, 140),           // teal-green
-    diff_del: Color::Rgb(200, 80, 100),           // magenta-red
-    diff_ctx: Color::Rgb(50, 70, 90),
-    error: Color::Rgb(255, 100, 120),             // bright red
-    mono_banner: Some(Color::Rgb(0, 191, 165)),   // teal
-    chrome: Color::Rgb(50, 70, 90),               // deep slate
-    secondary: Color::Rgb(100, 130, 145),
-    user_bg: Color::Rgb(20, 30, 50),              // deep indigo
-    bg: Color::Rgb(12, 16, 26),                   // deep indigo-black
-    prompt: Some("irix# "),                       // IRIX root prompt
-    cursor: CursorKind::Block,
-};
-
-const THEMES: &[&str] = &["Default", "Apple ][", "MSDOS", "macOS", "SUN", "NeXT", "SGI"];
-
-fn palette_by_name(name: &str) -> Palette {
-    match name {
-        "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" => APPLE2_PALETTE,
-        "MSDOS" | "msdos" | "dos" => MSDOS_PALETTE,
-        "macOS" | "macos" | "macintosh" | "mac" => MACOS_PALETTE,
-        "SUN" | "sun" | "solaris" | "sunos" => SUN_PALETTE,
-        "NeXT" | "next" | "nextstep" => NEXTS_PALETTE,
-        "SGI" | "sgi" | "irix" | "indigo" => SGI_PALETTE,
-        _ => DEFAULT_PALETTE,
-    }
-}
-
-/// Whether `name` is a known theme name (used by the CLI to avoid consuming
-/// the next argument after --banner as a theme if it's a task description).
-pub fn is_theme_name(name: &str) -> bool {
-    matches!(name, "Default" | "default" | "Apple ][" | "apple2" | "apple][" | "appleii" | "apple2e" | "MSDOS" | "msdos" | "dos" | "macOS" | "macos" | "macintosh" | "mac" | "SUN" | "sun" | "solaris" | "sunos" | "NeXT" | "next" | "nextstep" | "SGI" | "sgi" | "irix" | "indigo")
-}
-
-/// Glyphs vary by terminal: the Pi's framebuffer console (TERM=linux) lacks
-/// the fancy Unicode used over SSH, so we fall back to ASCII there.
-#[derive(Clone, Copy)]
-struct Glyphs {
-    user: &'static str,
-    assistant: &'static str,
-    tool: &'static str,
-    result: &'static str,
-    error: &'static str,
-    prompt: &'static str,
-    rounded: bool,
-}
-
-const GLYPHS_U: Glyphs = Glyphs {
-    user: "❯ ",
-    assistant: "● ",
-    tool: "⏺ ",
-    result: "⎿ ",
-    error: "✗ ",
-    prompt: "❯ ",
-    rounded: true,
-};
-const GLYPHS_A: Glyphs = Glyphs {
-    user: "> ",
-    assistant: "* ",
-    tool: "* ",
-    result: "> ",
-    error: "x ",
-    prompt: "> ",
-    rounded: false,
-};
-
-/// Choose a glyph set. ASCII for dumb terminals, or when forced via
-/// PICODER_ASCII=1; Unicode otherwise (or forced via PICODER_UNICODE=1).
-/// TERM=linux stays Unicode: the framebuffer console renders the glyphs we
-/// use at single-cell width (set PICODER_ASCII=1 on consoles whose font
-/// doesn't cover them).
-pub fn detect_ascii() -> bool {
-    if std::env::var("PICODER_UNICODE").is_ok() {
-        return false;
-    }
-    if std::env::var("PICODER_ASCII").is_ok() {
-        return true;
-    }
-    match std::env::var("TERM").as_deref() {
-        Ok("dumb") | Ok("vt100") | Ok("") | Err(_) => true,
-        _ => false,
-    }
-}
-
-/// True when the terminal likely has only 16 colors (Linux console without truecolor).
-pub fn is_16color_terminal() -> bool {
-    // COLORTERM=truecolor or COLORTERM=24bit means true color support.
-    matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor") | Ok("24bit"))
-        == false
-        && matches!(std::env::var("TERM").as_deref(), Ok("linux") | Ok("dumb") | Ok("vt100"))
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    User,
-    Assistant,
-    Reasoning,
-    Tool,
-    ToolResult,
-    ToolErr,
-    DiffAdd,
-    DiffDel,
-    DiffCtx,
-    Notice,
-    ErrorK,
-    Code,
-    Heading,
-    Banner,
-    BannerDim,
-}
-
-/// Slash commands with the one-line description shown in the `/` palette.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/model", "pick a model from the provider's list"),
-    ("/login", "sign in to a subscription (anthropic, openai, google)"),
-    ("/new", "clear conversation and session"),
-    ("/config", "settings: provider, model, key, thinking, …"),
-    ("/compact", "summarize older turns to free context"),
-    ("/reset", "clear conversation context"),
-    ("/auto", "toggle bypass-permissions"),
-    ("/mcp", "list MCP servers and their tools"),
-    ("/memory", "show persistent memory"),
-    ("/theme", "open the theme picker"),
-    ("/init", "summarize this project into PICODER.md"),
-    ("/clear", "clear the screen transcript"),
-    ("/help", "show help"),
-    ("/exit", "quit picoder"),
-];
-
-/// Most suggestions shown under the composer for a `/` prefix.
-const MAX_SUGGEST: usize = 8;
-/// Window within which a second Ctrl+C/Ctrl+D exits (Claude Code style).
-const DOUBLE_PRESS_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Rows of the `/config` panel, in display order.
-const SETTING_LABELS: &[&str] = &[
-    "provider",
-    "base url",
-    "model",
-    "api key",
-    "auth mode",
-    "thinking",
-    "permissions",
-    "auto-commit",
-    "theme",
-    "context window",
-    "max tool calls",
-];
-
-/// 6x4 block glyphs (P I C O D E R), assembled at runtime so the heavy and
-/// ASCII logos stay aligned and adding a letter is a one-line change.
-const ART_GLYPHS: [[&str; 6]; 7] = [
-    ["####", "#  #", "####", "#   ", "#   ", "#   "], // P
-    ["####", " ## ", " ## ", " ## ", " ## ", "####"], // I
-    ["####", "#   ", "#   ", "#   ", "#   ", "####"], // C
-    ["####", "#  #", "#  #", "#  #", "#  #", "####"], // O
-    ["### ", "#  #", "#  #", "#  #", "#  #", "### "], // D
-    ["####", "#   ", "### ", "#   ", "#   ", "####"], // E
-    ["####", "#  #", "####", "# # ", "#  #", "#  #"], // R
-];
-
-/// Heavy Unicode "PICODER" with a diagonal `░` drop-shadow, for wide terminals.
-/// Hand-tuned: the shadow can't be derived by simply doubling `ART_GLYPHS`.
-const ART_UNICODE: [&str; 6] = [
-    "██████  ██████  ██████  ██████  ████    ██████  ██████",
-    "██░░██░░  ██░░░░██░░░░░░██░░██░░██░░██  ██░░░░░░██░░██░░",
-    "██████░░  ██░░  ██░░    ██░░██░░██░░██░░████    ██████░░",
-    "██░░░░░░  ██░░  ██░░    ██░░██░░██░░██░░██░░░░  ████░░░░",
-    "██░░    ██████  ██████  ██████░░████  ░░██████  ██░░██",
-    "  ░░      ░░░░░░  ░░░░░░  ░░░░░░  ░░░░    ░░░░░░  ░░  ░░",
-];
-
-/// Render the glyph table at a row, mapping `#`→`fill`. `double` widens each
-/// cell to two columns for the heavy Unicode logo.
-fn art_glyphs(fill: char, double: bool) -> Vec<String> {
-    (0..6)
-        .map(|r| {
-            ART_GLYPHS
-                .iter()
-                .map(|g| {
-                    g[r]
-                        .chars()
-                        .map(|c| {
-                            let cell = if c == '#' { fill } else { ' ' };
-                            if double { format!("{cell}{cell}") } else { cell.to_string() }
-                        })
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join(if double { "  " } else { " " })
-        })
-        .collect()
-}
-
-/// Generate a drop-shadow row for the ASCII art, matching the bottom row
-/// shifted right by one column. Uses `.` as the shadow character.
-fn ascii_shadow_row() -> String {
-    let fill = '#';
-    let bottom: String = ART_GLYPHS
-        .iter()
-        .map(|g| {
-            g[5]
-                .chars()
-                .map(|c| if c == '#' { fill } else { ' ' })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let chars: Vec<char> = bottom.chars().collect();
-    let mut shadow = vec![' '; chars.len()];
-    for i in 0..chars.len().saturating_sub(1) {
-        if chars[i] == '#' {
-            shadow[i + 1] = '.';
-        }
-    }
-    shadow.into_iter().collect()
-}
-
-/// Pick the widest PICODER art that fits in `w` columns.
-fn banner_art(w: usize, ascii: bool) -> Vec<String> {
-    if !ascii && w >= 56 {
-        // Unicode art already includes its shadow row (row 5).
-        return ART_UNICODE.iter().map(|s| s.to_string()).collect();
-    } else if w >= 34 {
-        let mut art = art_glyphs(if ascii { '#' } else { '█' }, false);
-        // ASCII gets a drop-shadow row; Unicode non-heavy gets none (too narrow).
-        if ascii {
-            art.push(ascii_shadow_row());
-        }
-        return art;
-    } else {
-        vec!["P I C O D E R".to_string()]
-    }
-}
-
-const TAGLINE: &str = "a tiny agentic coding CLI";
-
-/// Role of a banner line, so the TUI and the ANSI `--banner` preview color the
-/// same layout identically.
-#[derive(Clone, Copy)]
-enum BRole {
-    Art(usize), // rainbow/mono block-art row
-    Version,    // bold accent
-    Tagline,    // dim
-    Frame,      // dim panel rule / blank
-    Data,       // accent status line
-}
-
-struct BLine {
-    text: String,
-    role: BRole,
-}
-
-/// Build the launch banner as structured lines: centered block art, a version
-/// + tagline, and a bordered SYSTEM panel wrapping the status lines.
-fn banner_lines(w: usize, ascii: bool, status: &[String]) -> Vec<BLine> {
-    let center = |s: &str| {
-        let pad = " ".repeat(w.saturating_sub(s.chars().count()) / 2);
-        format!("{pad}{s}")
-    };
-    let art = banner_art(w, ascii);
-    let artw = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let art_pad = " ".repeat(w.saturating_sub(artw) / 2);
-
-    let mut out = Vec::new();
-    // Breathing room between the box title (working path) and the logo.
-    out.push(BLine { text: String::new(), role: BRole::Frame });
-    for (i, l) in art.iter().enumerate() {
-        out.push(BLine { text: format!("{art_pad}{l}"), role: BRole::Art(i) });
-    }
-    out.push(BLine { text: String::new(), role: BRole::Frame });
-    out.push(BLine { text: center(&format!("picoder v{}", env!("CARGO_PKG_VERSION"))), role: BRole::Version });
-    out.push(BLine { text: center(TAGLINE), role: BRole::Tagline });
-    out.push(BLine { text: String::new(), role: BRole::Frame });
-
-    let (tl, tr, bl, br, h, vbar) = if ascii {
-        ("+", "+", "+", "+", "-", "|")
-    } else {
-        ("┌", "┐", "└", "┘", "─", "│")
-    };
-    // Top border: ┌─ SYSTEM ───...──┐
-    let head = format!("{tl}{h} SYSTEM ");
-    let fill = w.saturating_sub(head.chars().count() + 1); // +1 for right corner
-    out.push(BLine { text: format!("{head}{}{tr}", h.repeat(fill)), role: BRole::Frame });
-    // Status lines: │ text ... │
-    for line in status {
-        let pad = w.saturating_sub(line.chars().count() + 3); // 3 = "│ " + "│"
-        out.push(BLine { text: format!("{vbar} {line}{}{vbar}", " ".repeat(pad)), role: BRole::Data });
-    }
-    // Bottom border: └───...──┘
-    let bfill = w.saturating_sub(2); // bl + br = 2
-    out.push(BLine { text: format!("{bl}{}{br}", h.repeat(bfill)), role: BRole::Frame });
-    out
-}
-
-fn ansi_fg(c: Color) -> String {
-    match c {
-        Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
-        Color::Green => "\x1b[32m".into(),
-        Color::Yellow => "\x1b[33m".into(),
-        Color::LightRed => "\x1b[91m".into(),
-        Color::LightGreen => "\x1b[92m".into(),
-        Color::Red => "\x1b[31m".into(),
-        Color::Magenta => "\x1b[35m".into(),
-        Color::Blue => "\x1b[34m".into(),
-        Color::Cyan => "\x1b[36m".into(),
-        Color::White => "\x1b[97m".into(),
-        Color::Gray => "\x1b[37m".into(),
-        Color::DarkGray => "\x1b[90m".into(),
-        Color::Black => "\x1b[30m".into(),
-        _ => "\x1b[39m".into(),
-    }
-}
-
-/// Best-effort RGB for a `Color`, so we can shade named theme colors too.
-fn color_to_rgb(c: Color) -> (u8, u8, u8) {
-    match c {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::White => (255, 255, 255),
-        Color::Gray => (190, 190, 190),
-        Color::DarkGray => (110, 110, 110),
-        Color::Green => (0, 200, 0),
-        Color::LightGreen => (120, 255, 120),
-        Color::Yellow => (220, 220, 0),
-        Color::Red => (220, 0, 0),
-        Color::LightRed => (255, 90, 90),
-        Color::Blue => (0, 90, 220),
-        Color::Cyan => (0, 200, 200),
-        Color::Magenta => (200, 0, 200),
-        _ => (220, 220, 220),
-    }
-}
-
-/// Darken `c` by the row-`i` shade factor for the banner gradient.
-fn shade(c: Color, i: usize) -> Color {
-    let (r, g, b) = color_to_rgb(c);
-    let f = BANNER_SHADE[i.min(BANNER_SHADE.len() - 1)];
-    let s = |v: u8| (v as f32 * f).round().clamp(0.0, 255.0) as u8;
-    Color::Rgb(s(r), s(g), s(b))
-}
-
-/// Color for art row `i`: the Apple rainbow for the default theme, or a shaded
-/// top→bottom gradient of the theme's own banner color for any non-default
-/// theme. `i` may exceed the ramp on the ASCII shadow row, so it's clamped.
-fn banner_row_color(p: &Palette, rainbow: &[Color; 6], i: usize) -> Color {
-    match p.mono_banner {
-        Some(c) => shade(c, i),
-        None => rainbow[i % rainbow.len()],
-    }
-}
-
-/// ANSI-colored banner for the `--banner` flag (a preview of the launch screen).
-pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> String {
-    let p = palette_by_name(theme);
-    let w = (width as usize).saturating_sub(4).max(8);
-    let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
-    let reset = "\x1b[0m";
-
-    let mut out = String::new();
-    for bl in banner_lines(w, ascii, status) {
-        let prefix = match bl.role {
-            BRole::Art(i) => ansi_fg(banner_row_color(&p, &rainbow, i)),
-            BRole::Version => format!("\x1b[1m{}", ansi_fg(p.accent)),
-            BRole::Tagline => ansi_fg(p.notice),  // dim tagline
-            BRole::Frame | BRole::Data => ansi_fg(p.accent),
-        };
-        out.push_str(&format!("{prefix}{}{reset}\n", bl.text));
-    }
-    out
-}
-
-/// Deferred banner colour so the logo reacts to `/theme` switches.
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-enum BannerColor {
-    /// A fixed color (no palette reactivity).
-    Fixed(Color),
-    /// Rainbow art row: uses `palette.mono_banner` when set, else
-    /// the Apple rainbow at the given index.
-    Rainbow(usize),
-    /// Uses `palette.accent`.
-    Accent,
-}
-
-struct TLine {
-    kind: Kind,
-    text: String,
-    /// First line of a block — shows the glyph; later lines align under it.
-    lead: bool,
-    /// Optional per-line fg override that resolves against the current palette.
-    /// Banner colors are deferred so theme switches update the logo in real time.
-    color: Option<BannerColor>,
-}
-
-enum Mode {
-    Idle,
-    Busy,
-    Approval(String),
-    /// Interactive theme picker (`/theme` with no argument). `cursor` is the
-    /// highlighted theme index; `prev` is the theme to restore if cancelled.
-    ThemeSelect { cursor: usize, prev: String },
-    /// Masked sudo password entry, requested by the askpass helper. `prompt` is
-    /// the text sudo asked with (e.g. "[sudo] password for user:").
-    Password { prompt: String },
-    /// The ask_user tool: a visible one-line answer to the agent's question.
-    Question { prompt: String },
-    /// The `/config` panel. `edit` holds the text buffer while a free-text
-    /// row (base url, model, api key, context window) is being edited.
-    Settings { cursor: usize, edit: Option<String> },
-    /// A generic selection list (state lives in `App::picker`): cursor +
-    /// type-to-filter, used by `/model` for the fetched model list.
-    Select,
-}
-
-/// What committing a `Select` picker entry does.
-#[derive(Clone, Copy)]
-enum PickAction {
-    /// Switch model to the chosen id.
-    Model,
-    /// Start the subscription OAuth flow for the chosen provider.
-    Login,
-}
-
-/// State for `Mode::Select`: a filterable, scrollable list of choices.
-struct Picker {
-    title: String,
-    items: Vec<String>,
-    /// Item highlighted as the current value (shown with a marker).
-    current: Option<usize>,
-    filter: String,
-    /// Cursor within the *filtered* view.
-    cursor: usize,
-    scroll: usize,
-    action: PickAction,
-}
-
-/// Visible rows of a Select picker before it scrolls.
-const PICKER_VISIBLE: usize = 8;
-
-impl Picker {
-    /// Indices of items matching the filter (case-insensitive substring).
-    fn filtered(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.items.len()).collect();
-        }
-        let f = self.filter.to_lowercase();
-        (0..self.items.len())
-            .filter(|&i| self.items[i].to_lowercase().contains(&f))
-            .collect()
-    }
-
-    /// Keep the cursor inside the filtered list and the scroll window.
-    fn clamp(&mut self, filtered_len: usize) {
-        if filtered_len == 0 {
-            self.cursor = 0;
-            self.scroll = 0;
-            return;
-        }
-        self.cursor = self.cursor.min(filtered_len - 1);
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + PICKER_VISIBLE {
-            self.scroll = self.cursor + 1 - PICKER_VISIBLE;
-        }
-    }
-}
-
-/// Everything the UI needs from config, captured before the worker consumes it.
-pub struct UiConfig {
-    pub model: String,
-    pub theme: String,
-    pub ascii: bool,
-    pub ctx_limit: u32,
-    pub price_in: f64,
-    pub price_out: f64,
-    pub perm: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    /// Snapshot for the `/config` panel; kept in sync as patches are sent.
-    pub settings: Config,
-}
 
 /// The current working directory as a display string, with `$HOME` collapsed to
 /// `~`. Falls back to `picoder` if the cwd can't be read.
@@ -800,6 +96,8 @@ pub struct App {
     view_h: usize,
     spinner: usize,
     spin_counter: usize,
+    /// Clock time when the agent last entered Busy; used to show an elapsed timer.
+    busy_since: Option<Instant>,
     model_info: String,
     last_models: Vec<String>,
     should_quit: bool,
@@ -877,6 +175,7 @@ impl App {
             view_h: 0,
             spinner: 0,
             spin_counter: 0,
+            busy_since: None,
             model_info: cfg.model,
             last_models: Vec::new(),
             should_quit: false,
@@ -906,7 +205,6 @@ impl App {
             git_head: None,
             git_checked_at: None,
         };
-        app.refresh_git_head();
         app.rebuild_cmd_uses();
         app
     }
@@ -915,36 +213,34 @@ impl App {
         &self.history
     }
 
-    /// Recompute the cached git branch/dirty state for the title, at most once
-    /// every 2s. Spawning `git status` runs on the UI thread, so the throttle
-    /// keeps it off the hot render path while still reflecting edits/commits.
     fn refresh_git_head(&mut self) {
-        let now = Instant::now();
-        if let Some(last) = self.git_checked_at {
-            if now.duration_since(last) < Duration::from_secs(2) {
+        // Throttle: only probe git once every 5 seconds within render_output.
+        if let Some(t) = self.git_checked_at {
+            if t.elapsed() < Duration::from_secs(5) {
                 return;
             }
         }
-        self.git_checked_at = Some(now);
-        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        self.git_checked_at = Some(Instant::now());
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
         self.git_head = crate::tools::git_head(&cwd);
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
-        for (i, ln) in text.into().split('\n').enumerate() {
-            self.transcript.push(TLine { kind, text: ln.to_string(), lead: i == 0, color: None });
+        let text = text.into();
+        if text.is_empty() && kind != Kind::Banner && kind != Kind::BannerDim {
+            return;
         }
+        self.transcript.push(TLine { kind, text, lead: true, color: None });
         self.after_push();
     }
 
-    /// Invalidate the transcript render cache. Call after any change to
-    /// `transcript` content or `palette`.
     fn dirty(&mut self) {
         self.tver = self.tver.wrapping_add(1);
     }
 
-    /// Swap the active palette and invalidate the render cache (cached lines
-    /// carry the old theme's colors).
     fn set_palette(&mut self, p: Palette) {
         self.palette = p;
         self.dirty();
@@ -953,85 +249,70 @@ impl App {
     fn after_push(&mut self) {
         self.dirty();
         if self.transcript.len() > MAX_TRANSCRIPT {
-            let drop = self.transcript.len() - MAX_TRANSCRIPT;
-            // Push a dim notice so the user knows lines were trimmed.
-            self.transcript.drain(0..drop);
-            self.transcript.insert(0, TLine {
-                kind: Kind::Notice,
-                text: format!("(trimmed {drop} lines — transcript limit)"),
-                lead: true,
-                color: None,
-            });
+            let excess = self.transcript.len() - MAX_TRANSCRIPT;
+            self.transcript.drain(0..excess);
         }
-        if !self.follow {
+        if self.follow {
+            self.scroll = self.max_top;
+        } else {
             self.scrolled_up = true;
         }
-        self.follow = true;
     }
 
-    /// Push assistant text, classifying lines: ``` fences toggle code blocks,
-    /// `#`-prefixed lines are headings, everything else is prose.
+    #[allow(dead_code)]
     fn push_assistant(&mut self, text: &str) {
-        let mut in_code = false;
-        let mut first = true;
-        for ln in text.split('\n') {
-            let trimmed = ln.trim_start();
-            if trimmed.starts_with("```") {
-                in_code = !in_code;
-                self.transcript.push(TLine { kind: Kind::Code, text: ln.to_string(), lead: false, color: None });
-                continue;
+        if let Some(last) = self.transcript.last_mut() {
+            if last.kind == Kind::Assistant {
+                last.text.push_str(text);
+                self.dirty();
+                return;
             }
-            let kind = if in_code {
-                Kind::Code
-            } else if trimmed.starts_with('#') && trimmed.contains("# ") {
-                Kind::Heading
-            } else {
-                Kind::Assistant
-            };
-            self.transcript.push(TLine { kind, text: ln.to_string(), lead: first, color: None });
-            first = false;
         }
-        self.after_push();
+        self.transcript.push(TLine { kind: Kind::Assistant, text: text.to_string(), lead: true, color: None });
+        self.dirty();
     }
 
     fn flush_live(&mut self) {
         if !self.live.is_empty() {
-            let live = std::mem::take(&mut self.live);
-            self.push_assistant(&live);
+            self.transcript.push(TLine { kind: Kind::Assistant, text: std::mem::take(&mut self.live), lead: true, color: None });
+            self.after_push();
         }
-        self.live.clear();
-        self.live_reasoning.clear();
+        if !self.live_reasoning.is_empty() {
+            self.transcript.push(TLine { kind: Kind::Reasoning, text: std::mem::take(&mut self.live_reasoning), lead: true, color: None });
+            self.after_push();
+        }
     }
 
     pub fn handle_event(&mut self, ev: UiEvent, h: &Handles) {
         match ev {
             UiEvent::Token(t) => {
                 self.live.push_str(&t);
-                self.follow = true;
+                self.dirty();
             }
             UiEvent::Reasoning(t) => {
-                if self.live.is_empty() {
-                    self.live_reasoning.push_str(&t);
-                    self.follow = true;
-                }
+                self.live_reasoning.push_str(&t);
+                self.dirty();
             }
             UiEvent::ResetLive => {
-                self.live.clear();
-                self.live_reasoning.clear();
+                self.flush_live();
             }
-            UiEvent::AssistantCommit => self.flush_live(),
+            UiEvent::AssistantCommit => {
+                self.flush_live();
+                if let Some(last) = self.transcript.last() {
+                    if last.kind == Kind::Assistant && last.text.is_empty() {
+                        self.transcript.pop();
+                    }
+                }
+            }
             UiEvent::ToolStart { name, summary } => {
                 self.flush_live();
-                let text = if summary.is_empty() {
-                    name
-                } else {
-                    format!("{name}  {summary}")
-                };
-                self.push(Kind::Tool, text);
+                self.push(Kind::Tool, format!("{name} {summary}"));
             }
             UiEvent::Diff(d) => {
+                // Flush any live assistant text before showing a diff preview so
+                // the diff doesn't interleave with streaming tokens mid-sentence.
                 self.flush_live();
-                for ln in d.lines() {
+                for (i, ln) in d.lines().enumerate() {
                     let kind = if ln.starts_with('+') {
                         Kind::DiffAdd
                     } else if ln.starts_with('-') {
@@ -1039,56 +320,37 @@ impl App {
                     } else {
                         Kind::DiffCtx
                     };
-                    self.transcript.push(TLine { kind, text: ln.to_string(), lead: true, color: None });
+                    self.transcript.push(TLine { kind, text: ln.to_string(), lead: i == 0, color: None });
                 }
-                self.dirty();
-                self.follow = true;
+                self.after_push();
             }
             UiEvent::ToolResult { ok, preview } => {
                 self.flush_live();
-                self.push(if ok { Kind::ToolResult } else { Kind::ToolErr }, preview);
+                if preview.is_empty() {
+                    return;
+                }
+                let kind = if ok { Kind::ToolResult } else { Kind::ToolErr };
+                self.push(kind, preview);
             }
             UiEvent::Approval(desc) => {
+                // Flush any preceding assistant text before showing the prompt.
                 self.flush_live();
                 self.mode = Mode::Approval(desc);
             }
             UiEvent::PasswordRequest { prompt, reply } => {
-                self.flush_live();
                 self.pw_input.clear();
                 self.pw_reply = Some(reply);
                 self.mode = Mode::Password { prompt };
             }
             UiEvent::Question { prompt, reply } => {
-                self.flush_live();
                 self.q_input.clear();
                 self.q_reply = Some(reply);
                 self.mode = Mode::Question { prompt };
             }
             UiEvent::ModelList(ids) => {
-                self.flush_live();
-                self.last_models = ids.clone();
-                if ids.is_empty() {
-                    self.push(Kind::Notice, "provider returned no models.".to_string());
-                    return;
-                }
-                // Open an interactive picker instead of printing the list.
-                let current = ids.iter().position(|id| id == self.model_short());
-                let mut p = Picker {
-                    title: format!("select model ({})", ids.len()),
-                    items: ids,
-                    current,
-                    filter: String::new(),
-                    cursor: current.unwrap_or(0),
-                    scroll: 0,
-                    action: PickAction::Model,
-                };
-                let n = p.filtered().len();
-                p.clamp(n);
-                self.picker = Some(p);
-                self.mode = Mode::Select;
+                self.last_models = ids;
             }
             UiEvent::ModelChanged(m) => {
-                self.settings.model = m.clone();
                 self.model_info = m;
             }
             UiEvent::Usage { prompt, completion } => {
@@ -1096,14 +358,11 @@ impl App {
                 self.sess_prompt += prompt as u64;
                 self.sess_completion += completion as u64;
             }
-            UiEvent::Context(tokens) => {
-                self.last_prompt_tokens = tokens;
+            UiEvent::Context(n) => {
+                self.last_prompt_tokens = n;
             }
             UiEvent::ContextLimit(n) => {
-                // Auto-detected model window: drives the ctx bar and the value
-                // shown in the `/config` panel until the user pins their own.
-                self.ctx_limit = n.max(1);
-                self.settings.context_window = n;
+                self.ctx_limit = n;
             }
             UiEvent::AuthMode(m) => {
                 self.settings.auth_mode = m;
@@ -1111,117 +370,94 @@ impl App {
             UiEvent::Balance(b) => {
                 self.balance = Some(b);
             }
-            UiEvent::Notice(s) => {
-                self.flush_live();
-                self.push(Kind::Notice, s);
+            UiEvent::Notice(msg) => {
+                self.push(Kind::Notice, msg);
             }
-            UiEvent::Error(s) => {
-                self.flush_live();
-                self.push(Kind::ErrorK, s);
+            UiEvent::Error(msg) => {
+                self.push(Kind::ErrorK, msg);
             }
             UiEvent::TurnDone => {
                 self.flush_live();
-                // Don't clobber an interactive mode a preceding event opened
-                // in this same turn (e.g. ModelList → Select picker).
-                if matches!(self.mode, Mode::Busy) {
-                    self.mode = Mode::Idle;
-                }
-                // Send the next queued message, if any. Local slash commands
-                // resolve immediately (no TurnDone), so keep draining until
-                // something goes to the worker or the queue empties.
-                while !self.queued.is_empty() && matches!(self.mode, Mode::Idle) {
-                    let text = self.queued.remove(0);
-                    self.dispatch(text, h);
+                self.clear_busy();
+                // The worker may reply with Bypass toggled; sync the UI.
+                self.perm = h.shared.perm.clone();
+                // Dispatch the next queued message, if any.
+                if let Some(next) = self.queued.first() {
+                    let _ = h.cmd_tx.send(WorkerCmd::User { text: next.clone(), images: vec![] });
+                    self.queued.remove(0);
+                    self.set_busy();
                 }
             }
             UiEvent::Suggestion(s) => {
-                // Only keep if the user hasn't started typing.
-                if self.input.is_empty() {
-                    self.suggestion = Some(s);
-                }
+                self.suggestion = Some(s);
             }
         }
     }
 
+    #[allow(dead_code)]
     fn model_short(&self) -> &str {
-        self.model_info.split(':').nth(1).unwrap_or(&self.model_info)
+        self.model_info.rsplit('/').next().unwrap_or(&self.model_info)
     }
 
     pub fn on_paste(&mut self, s: String) {
-        if matches!(self.mode, Mode::Idle | Mode::Busy) {
-            self.suggestion = None;
-            let mut filtered = String::with_capacity(s.len());
-            for c in s.chars() {
-                if c == '\n' || c == '\r' || c == '\t' {
-                    filtered.push(' ');
-                } else if !c.is_control() {
-                    filtered.push(c);
-                }
+        for c in s.chars() {
+            if c == '\n' || c == '\r' {
+                // ignore; pasted newlines shouldn't submit
+            } else {
+                self.insert_char(c);
             }
-            self.last_ctrl_c = None;
-            let byte = self.byte_at(self.cursor);
-            let added = filtered.chars().count();
-            self.input.insert_str(byte, &filtered);
-            self.cursor += added;
-            self.suggest_idx = 0;
         }
     }
 
     fn insert_char(&mut self, c: char) {
-        // Control characters would be written verbatim into the composer cells
-        // and desync the terminal (a raw ESC starts an escape sequence).
-        if c.is_control() {
-            return;
-        }
-        self.suggestion = None;
-        let byte = self.byte_at(self.cursor);
-        self.input.insert(byte, c);
+        let pos = self.byte_at(self.cursor);
+        self.input.insert(pos, c);
         self.cursor += 1;
-        // New text narrows the `/` palette — restart from the top match.
-        self.suggest_idx = 0;
     }
 
-    /// Commands matching the typed `/` prefix, for the palette under the
-    /// composer. "Most likely" first: ranked by how often each command appears
-    /// in composer history, with the curated order breaking ties. Empty unless
-    /// idle with a bare command token (no arguments yet).
     fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        if !matches!(self.mode, Mode::Idle | Mode::Busy)
-            || !self.input.starts_with('/')
-            || self.input.contains(char::is_whitespace)
-        {
-            return Vec::new();
+        if self.mode == Mode::Idle && self.input.starts_with('/') && !self.input.contains(' ') {
+            let mut scored: Vec<_> = SLASH_COMMANDS
+                .iter()
+                .filter(|(cmd, _)| cmd.starts_with(&self.input))
+                .map(|&(cmd, desc)| {
+                    let count = self.cmd_uses.get(cmd).copied().unwrap_or(0);
+                    (cmd, desc, count)
+                })
+                .collect();
+            scored.sort_by_key(|(cmd, _, count)| {
+                // Exact match first, then prefix matches sorted by usage (desc),
+                // then alphabetically.
+                (
+                    if *cmd == self.input { 0 } else { 1 },
+                    std::cmp::Reverse(*count),
+                    *cmd,
+                )
+            });
+            scored.truncate(MAX_SUGGEST);
+            scored.into_iter().map(|(c, d, _)| (c, d)).collect()
+        } else {
+            Vec::new()
         }
-        // Use cached usage counts so we don't scan full history per keystroke.
-        let mut scored: Vec<((&'static str, &'static str), usize)> = SLASH_COMMANDS
-            .iter()
-            .filter(|(c, _)| c.starts_with(self.input.as_str()))
-            .map(|&(c, d)| {
-                let uses = self.cmd_uses.get(c).copied().unwrap_or(0);
-                ((c, d), uses)
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1)); // stable: ties keep curated order
-        scored.into_iter().map(|(cd, _)| cd).take(MAX_SUGGEST).collect()
     }
 
     fn rebuild_cmd_uses(&mut self) {
         self.cmd_uses.clear();
-        for h in &self.history {
-            if let Some(cmd) = h.strip_prefix('/') {
-                let name = cmd.split_whitespace().next().unwrap_or(cmd);
-                let slash_cmd = format!("/{name}");
-                *self.cmd_uses.entry(slash_cmd).or_insert(0) += 1;
+        for entry in &self.history {
+            if let Some(cmd) = entry.split_whitespace().next() {
+                if cmd.starts_with('/') {
+                    *self.cmd_uses.entry(cmd.to_string()).or_insert(0) += 1;
+                }
             }
         }
     }
 
     fn byte_at(&self, char_idx: usize) -> usize {
         self.input
-            .char_indices()
-            .nth(char_idx)
-            .map(|(b, _)| b)
-            .unwrap_or(self.input.len())
+            .chars()
+            .take(char_idx)
+            .map(|c| c.len_utf8())
+            .sum()
     }
 
     fn char_len(&self) -> usize {
@@ -1229,177 +465,99 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent, h: &Handles) {
-        // Masked sudo password entry captures every key (so a stray Ctrl+P, Tab,
-        // etc. never leaks out or triggers a shortcut) — handle it first.
-        if matches!(self.mode, Mode::Password { .. }) {
-            self.on_key_password(key);
-            return;
-        }
-        // ask_user answers likewise capture every key.
-        if matches!(self.mode, Mode::Question { .. }) {
-            self.on_key_question(key);
-            return;
-        }
-        // Cycle permission mode in any state. Shift+Tab is the primary binding:
-        // it arrives as BackTab on ANSI terminals, or Tab+SHIFT under the Kitty
-        // keyboard protocol. But the Linux framebuffer console (TERM=linux)
-        // reports Shift+Tab as a bare Tab — its default keymap has no shift
-        // binding for the Tab key, so the two are byte-identical and no app can
-        // tell them apart. Ctrl+P is a console-safe alias that works there (and
-        // everywhere else), since Ctrl-letter chords always come through.
-        let shift_tab = key.code == KeyCode::BackTab
-            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
-        let ctrl_p = matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
-            && key.modifiers.contains(KeyModifiers::CONTROL);
-        if shift_tab || ctrl_p {
-            self.cycle_perm();
-            return;
-        }
-        // Ctrl+L: force a full clear + repaint in any state. The framebuffer
-        // console in particular can drift out of sync with ratatui's diff
-        // buffer (font/width quirks, kernel messages); this recovers it.
-        if matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            self.force_clear = true;
-            self.follow = true;
-            return;
-        }
-        // If ESC arrived recently (within 18 ms, just over one frame at 60 Hz)
-        // and another key follows, terminals are encoding Alt+key as ESC prefix.
-        // Treat the key as Alt-modified instead of acting on the lone ESC.
-        // Only relevant in Idle mode; clear stale deadlines for other modes.
-        if !matches!(&self.mode, Mode::Idle) {
-            self.esc_deadline = None;
-        }
-        if let Some(deadline) = self.esc_deadline {
-            self.esc_deadline = None;
-            if Instant::now() < deadline {
-                let mut alt_key = key;
-                alt_key.modifiers |= KeyModifiers::ALT;
-                match &self.mode {
-                    Mode::Approval(_) => self.on_key_approval(alt_key, h),
-                    Mode::ThemeSelect { .. } => self.on_key_themeselect(alt_key, h),
-                    Mode::Settings { .. } => self.on_key_settings(alt_key, h),
-                    Mode::Select => self.on_key_select(alt_key, h),
-                    Mode::Busy => self.on_key_busy(alt_key, h),
-                    Mode::Password { .. } | Mode::Question { .. } => {}
-                    Mode::Idle => self.on_key_idle(alt_key, h),
-                }
-                return;
-            } else {
-                // ESC timed out — process it as a standalone Esc first.
-                self.do_esc(h);
-            }
-        }
-        match &self.mode {
+        match self.mode {
+            Mode::Password { .. } => self.on_key_password(key),
+            Mode::Question { .. } => self.on_key_question(key),
             Mode::Approval(_) => self.on_key_approval(key, h),
-            Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
             Mode::Settings { .. } => self.on_key_settings(key, h),
             Mode::Select => self.on_key_select(key, h),
+            Mode::ThemeSelect { .. } => self.on_key_themeselect(key, h),
             Mode::Busy => self.on_key_busy(key, h),
-            // Password/Question are intercepted at the top of on_key.
-            Mode::Password { .. } | Mode::Question { .. } => {}
             Mode::Idle => self.on_key_idle(key, h),
         }
     }
 
-    /// Handle a standalone Esc (not an Alt-prefix).
     fn do_esc(&mut self, h: &Handles) {
-        match &self.mode {
+        match self.mode {
+            Mode::Password { .. } => self.cancel_password(),
+            Mode::Question { .. } => self.cancel_question(),
             Mode::Approval(_) => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
+                self.clear_busy();
             }
-            Mode::ThemeSelect { prev, .. } => {
-                // Cancel the picker, restoring the theme we started with.
-                self.set_palette(palette_by_name(&prev.clone()));
-                self.mode = Mode::Idle;
-            }
-            Mode::Busy => h.shared.cancel.store(true, Ordering::Relaxed),
-            Mode::Settings { .. } => self.mode = Mode::Idle,
-            Mode::Select => {
+            Mode::Settings { .. } | Mode::Select | Mode::ThemeSelect { .. } => {
+                self.clear_busy();
                 self.picker = None;
-                self.mode = Mode::Idle;
             }
-            // Password/Question Esc is handled in their own key handlers.
-            Mode::Password { .. } | Mode::Question { .. } => {}
+            Mode::Busy => self.interrupt(h),
             Mode::Idle => {
-                self.input.clear();
-                self.cursor = 0;
+                self.busy_since = None;
+                self.suggestion = None;
             }
         }
     }
 
-    /// Masked sudo password entry. Keystrokes go into `pw_input` (never shown);
-    /// Enter sends it to the askpass helper, Esc/Ctrl+C cancel. Either way we
-    /// return to the busy view, since the bash command is still running.
     fn on_key_password(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Enter => {
-                let pw = std::mem::take(&mut self.pw_input);
-                if let Some(tx) = self.pw_reply.take() {
-                    let _ = tx.send(Some(pw));
-                }
-                self.mode = Mode::Busy;
-            }
             KeyCode::Esc => self.cancel_password(),
-            KeyCode::Char('c') if ctrl => self.cancel_password(),
-            KeyCode::Char('u') if ctrl => self.pw_input.clear(),
+            KeyCode::Enter => {
+                let val = std::mem::take(&mut self.pw_input);
+                if let Some(tx) = self.pw_reply.take() {
+                    let _ = tx.send(Some(val));
+                }
+                self.mode = Mode::Idle;
+            }
             KeyCode::Backspace => {
                 self.pw_input.pop();
             }
-            KeyCode::Char(c) if !ctrl && !alt => self.pw_input.push(caps_char(&key, c)),
+            KeyCode::Char(c) => {
+                self.pw_input.push(caps_char(&key, c));
+            }
             _ => {}
         }
     }
 
-    /// Abort the password prompt: tell the helper there's no password (so sudo
-    /// fails cleanly) and drop the buffer.
     fn cancel_password(&mut self) {
-        self.pw_input.clear();
         if let Some(tx) = self.pw_reply.take() {
             let _ = tx.send(None);
         }
-        self.mode = Mode::Busy;
+        self.mode = Mode::Idle;
     }
 
-    /// The ask_user answer line. Enter sends the answer; Esc declines. The
-    /// agent's bash-free turn is still running, so we return to the busy view.
     fn on_key_question(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Enter => {
-                let ans = std::mem::take(&mut self.q_input);
-                self.push(Kind::User, ans.clone());
-                if let Some(tx) = self.q_reply.take() {
-                    let _ = tx.send(Some(ans));
-                }
-                self.mode = Mode::Busy;
-            }
             KeyCode::Esc => self.cancel_question(),
-            KeyCode::Char('c') if ctrl => self.cancel_question(),
-            KeyCode::Char('u') if ctrl => self.q_input.clear(),
+            KeyCode::Enter => {
+                let val = std::mem::take(&mut self.q_input);
+                if let Some(tx) = self.q_reply.take() {
+                    let _ = tx.send(Some(val));
+                }
+                self.mode = Mode::Idle;
+            }
             KeyCode::Backspace => {
                 self.q_input.pop();
             }
-            KeyCode::Char(c) if !ctrl && !alt => self.q_input.push(caps_char(&key, c)),
+            KeyCode::Char(c) => {
+                self.q_input.push(caps_char(&key, c));
+            }
             _ => {}
         }
     }
 
     fn cancel_question(&mut self) {
-        self.q_input.clear();
         if let Some(tx) = self.q_reply.take() {
             let _ = tx.send(None);
         }
-        self.mode = Mode::Busy;
+        self.mode = Mode::Idle;
     }
 
     fn cycle_perm(&self) {
-        let next = (self.perm.load(Ordering::Relaxed) + 1) % 3;
+        let v = self.perm.load(Ordering::Relaxed);
+        let next = match v {
+            crate::agent::PERM_ASK => crate::agent::PERM_AUTO,
+            crate::agent::PERM_AUTO => crate::agent::PERM_PLAN,
+            _ => crate::agent::PERM_ASK,
+        };
         self.perm.store(next, Ordering::Relaxed);
     }
 
@@ -1408,30 +566,27 @@ impl App {
     }
 
     fn on_key_approval(&mut self, key: KeyEvent, h: &Handles) {
-        let resp = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalResponse::Yes),
-            KeyCode::Char('a') | KeyCode::Char('A') => Some(ApprovalResponse::Always),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(ApprovalResponse::No),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                h.shared.cancel.store(true, Ordering::Relaxed);
-                Some(ApprovalResponse::No)
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let _ = h.appr_tx.send(ApprovalResponse::Yes);
+                self.set_busy();
             }
-            _ => None,
-        };
-        if let Some(r) = resp {
-            if matches!(r, ApprovalResponse::Always) {
-                h.shared.perm.store(crate::agent::PERM_AUTO, Ordering::Relaxed);
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                let _ = h.appr_tx.send(ApprovalResponse::No);
+                self.set_busy();
             }
-            if matches!(r, ApprovalResponse::No) {
-                self.push(Kind::Notice, "denied".to_string());
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                let _ = h.appr_tx.send(ApprovalResponse::Always);
+                self.set_busy();
             }
-            let _ = h.appr_tx.send(r);
-            self.mode = Mode::Busy;
+            KeyCode::Esc => {
+                let _ = h.appr_tx.send(ApprovalResponse::No);
+                self.clear_busy();
+            }
+            _ => {}
         }
     }
 
-    /// Live-preview the theme at `idx` (applies the palette so the whole UI
-    /// updates) while keeping the picker open.
     fn preview_theme(&mut self, idx: usize, prev: String) {
         self.set_palette(palette_by_name(THEMES[idx]));
         self.mode = Mode::ThemeSelect { cursor: idx, prev };
@@ -1446,9 +601,6 @@ impl App {
         self.mode = Mode::Idle;
     }
 
-    /// `/config` panel keys. Up/Down move; Enter/←/→ cycle a choice row or
-    /// open a text row for editing; while editing, Enter commits, Esc cancels;
-    /// Esc otherwise closes the panel (everything was applied as it changed).
     fn on_key_settings(&mut self, key: KeyEvent, h: &Handles) {
         let (cur, editing) = match &self.mode {
             Mode::Settings { cursor, edit } => (*cursor, edit.clone()),
@@ -1570,110 +722,78 @@ impl App {
             }
             2 => {
                 if !val.is_empty() {
-                    // SetModel persists and echoes ModelChanged + a notice.
+                    self.model_info = val.clone();
                     let _ = h.cmd_tx.send(WorkerCmd::SetModel(val));
                 }
             }
             3 => {
-                if !val.is_empty() {
-                    self.settings.api_key = val.clone();
-                    self.settings.api_keys.insert(self.settings.provider.clone(), val.clone());
-                    self.settings.key_from_env = false;
-                    let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
-                }
+                self.settings.api_key = val.clone();
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
             }
-            9 => match val.parse::<u32>() {
-                Ok(n) if n > 0 => {
-                    self.settings.context_window = n;
-                    self.ctx_limit = n;
-                    let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ContextWindow(n)));
-                }
-                _ => self.push(Kind::ErrorK, "context window must be a positive integer".to_string()),
-            },
+            9 => {
+                let v: u32 = val.parse().unwrap_or(self.ctx_limit);
+                self.settings.context_window = v;
+                self.ctx_limit = v;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ContextWindow(v)));
+            }
             10 => {
-                let n = parse_max_tool_calls(&val);
-                self.settings.max_tool_calls = n;
-                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::MaxToolCalls(n)));
+                let v = helpers::parse_max_tool_calls(&val);
+                self.settings.max_tool_calls = v;
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::MaxToolCalls(v)));
             }
             _ => {}
         }
     }
 
-    /// Generic selection list (Mode::Select). Up/Down move, typing filters,
-    /// Enter commits the highlighted item, Esc cancels.
     fn on_key_select(&mut self, key: KeyEvent, h: &Handles) {
-        let Some(p) = &mut self.picker else {
+        let Some(ref mut picker) = self.picker else {
             self.mode = Mode::Idle;
             return;
         };
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let filtered = p.filtered();
         match key.code {
             KeyCode::Esc => {
-                self.picker = None;
                 self.mode = Mode::Idle;
+                self.picker = None;
             }
-            KeyCode::Char('c') if ctrl => {
-                self.picker = None;
-                self.mode = Mode::Idle;
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let len = picker.filtered().len();
+                if len > 0 {
+                    picker.cursor = picker.cursor.saturating_sub(1).max(0);
+                    picker.clamp(len);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let len = picker.filtered().len();
+                if len > 0 {
+                    picker.cursor = (picker.cursor + 1).min(len - 1);
+                    picker.clamp(len);
+                }
             }
             KeyCode::Enter => {
-                let chosen = filtered.get(p.cursor).map(|&i| p.items[i].clone());
-                let action = p.action;
-                self.picker = None;
-                self.mode = Mode::Idle;
-                if let Some(id) = chosen {
-                    match action {
-                        // SetModel persists and echoes ModelChanged + a notice.
+                let filtered = picker.filtered();
+                if let Some(&idx) = filtered.get(picker.cursor) {
+                    let item = picker.items[idx].clone();
+                    match picker.action {
                         PickAction::Model => {
-                            let _ = h.cmd_tx.send(WorkerCmd::SetModel(id));
+                            let _ = h.cmd_tx.send(WorkerCmd::SetModel(item));
                         }
-                        // Items are "<key>  ·  <label>"; the key is the first token.
                         PickAction::Login => {
-                            let key = id.split_whitespace().next().unwrap_or("").to_string();
-                            let _ = h.cmd_tx.send(WorkerCmd::Login(key));
-                            self.mode = Mode::Busy;
+                            let _ = h.cmd_tx.send(WorkerCmd::Login(item));
                         }
                     }
                 }
-            }
-            KeyCode::Up => {
-                let n = filtered.len();
-                if n > 0 {
-                    p.cursor = (p.cursor + n - 1) % n;
-                    p.clamp(n);
-                }
-            }
-            KeyCode::Down => {
-                let n = filtered.len();
-                if n > 0 {
-                    p.cursor = (p.cursor + 1) % n;
-                    p.clamp(n);
-                }
-            }
-            KeyCode::PageUp => {
-                p.cursor = p.cursor.saturating_sub(PICKER_VISIBLE);
-                p.clamp(filtered.len());
-            }
-            KeyCode::PageDown => {
-                p.cursor += PICKER_VISIBLE;
-                p.clamp(filtered.len());
-            }
-            KeyCode::Char('u') if ctrl => {
-                p.filter.clear();
-                p.cursor = 0;
-                p.scroll = 0;
+                self.mode = Mode::Idle;
+                self.picker = None;
             }
             KeyCode::Backspace => {
-                p.filter.pop();
-                p.cursor = 0;
-                p.scroll = 0;
+                picker.filter.pop();
+                let len = picker.filtered().len();
+                picker.clamp(len.max(1));
             }
-            KeyCode::Char(c) if !ctrl && !alt => {
-                p.filter.push(caps_char(&key, c));
-                p.cursor = 0;
-                p.scroll = 0;
+            KeyCode::Char(c) => {
+                picker.filter.push(caps_char(&key, c));
+                let len = picker.filtered().len();
+                picker.clamp(len.max(1));
             }
             _ => {}
         }
@@ -1684,237 +804,182 @@ impl App {
             Mode::ThemeSelect { cursor, prev } => (*cursor, prev.clone()),
             _ => return,
         };
-        let n = THEMES.len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.preview_theme((cursor + n - 1) % n, prev),
-            KeyCode::Down | KeyCode::Char('j') => self.preview_theme((cursor + 1) % n, prev),
-            // Number keys select instantly, mirroring the (y)/(n)/(a) hotkeys.
-            KeyCode::Char(d) if d.is_ascii_digit() => {
-                let i = d.to_digit(10).unwrap_or(0) as usize;
-                if (1..=n).contains(&i) {
-                    self.commit_theme(i - 1);
-                }
-            }
-            KeyCode::Enter => self.commit_theme(cursor),
             KeyCode::Esc => {
                 self.set_palette(palette_by_name(&prev));
                 self.mode = Mode::Idle;
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let idx = cursor.saturating_sub(1).max(0);
+                self.preview_theme(idx, prev);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let idx = (cursor + 1).min(THEMES.len() - 1);
+                self.preview_theme(idx, prev);
+            }
+            KeyCode::Enter => self.commit_theme(cursor),
             _ => {}
         }
     }
 
-    /// Busy: the composer stays live so the next message can be typed and
-    /// queued with Enter; Esc/Ctrl+C still interrupt the running turn.
     fn on_key_busy(&mut self, key: KeyEvent, h: &Handles) {
         match key.code {
-            KeyCode::Enter => self.queue_input(),
             KeyCode::Esc => self.interrupt(h),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.interrupt(h)
+            KeyCode::Char('c') | KeyCode::Char('d')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.interrupt(h);
             }
-            KeyCode::PageUp => self.scroll_up(),
-            KeyCode::PageDown => self.scroll_down(),
-            _ => {
-                self.on_key_edit(key);
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_char(caps_char(&key, c));
             }
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                    let pos = self.byte_at(self.cursor);
+                    self.input.remove(pos);
+                }
+            }
+            KeyCode::Enter => self.queue_input(),
+            _ => {}
         }
     }
 
-    /// Cancel the running turn. Queued messages won't be auto-sent into a turn
-    /// the user just killed: the first goes back into the (empty) composer,
-    /// and the rest are dropped with a notice — they were recorded in history
-    /// at queue time, so Up recalls them.
     fn interrupt(&mut self, h: &Handles) {
         h.shared.cancel.store(true, Ordering::Relaxed);
-        if self.queued.is_empty() {
-            return;
+        // Restore any queued input undone by Esc so the composer content isn't lost.
+        if let Some(pending) = self.take_input() {
+            if !pending.is_empty() {
+                self.queued.insert(0, pending);
+            }
         }
-        let mut q = std::mem::take(&mut self.queued);
-        if self.input.is_empty() {
-            self.input = q.remove(0);
-            self.cursor = self.char_len();
-        }
-        if !q.is_empty() {
-            self.push(
-                Kind::Notice,
-                format!("({} queued message(s) cleared — recall with Up)", q.len()),
-            );
-        }
+        self.clear_busy();
+        // Clear the suggestion so the user sees the hint again.
+        self.suggestion = None;
     }
 
     fn on_key_idle(&mut self, key: KeyEvent, h: &Handles) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // While the `/` palette is open, Up/Down/Tab/Enter act on it.
-        // Exception: when the user is browsing command history with Up/Down
-        // and lands on an entry that starts with '/', Up/Down should
-        // continue history navigation rather than switching to palette
-        // navigation (otherwise history browsing gets stuck).
-        let sugg = self.slash_suggestions();
-        let browsing_history = self.hist_idx < self.history.len();
-        if !sugg.is_empty() {
-            let idx = self.suggest_idx.min(sugg.len() - 1);
-            match key.code {
-                KeyCode::Down if !browsing_history => {
-                    self.suggest_idx = (idx + 1) % sugg.len();
-                    return;
+        if key.code == KeyCode::Esc || ctrl_c_or_d(&key) {
+            // Check for double-press exit (Ctrl+C / Ctrl+D style).
+            if self.input.is_empty() {
+                let now = Instant::now();
+                if let Some(t) = self.last_ctrl_c {
+                    if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
+                        self.should_quit = true;
+                        return;
+                    }
                 }
-                KeyCode::Up if !browsing_history => {
-                    self.suggest_idx = (idx + sugg.len() - 1) % sugg.len();
-                    return;
-                }
-                KeyCode::Tab => {
-                    self.input = sugg[idx].0.to_string();
-                    self.cursor = self.char_len();
-                    return;
-                }
-                KeyCode::Enter => {
-                    self.input = sugg[idx].0.to_string();
-                    self.cursor = self.char_len();
-                    self.suggest_idx = 0;
-                    self.submit(h);
-                    return;
-                }
-                _ => {}
+                self.last_ctrl_c = Some(now);
+                return;
             }
         }
-        match key.code {
-            KeyCode::Enter => self.submit(h),
-            KeyCode::Char('c') if ctrl => {
-                if self.input.is_empty() {
-                    let now = Instant::now();
-                    if let Some(t) = self.last_ctrl_c {
-                        if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
-                            self.should_quit = true;
-                            return;
-                        }
-                        // Timer expired: reset, this is a fresh first press.
-                    }
-                    self.last_ctrl_c = Some(now);
-                    self.push(
-                        Kind::Notice,
-                        "Press Ctrl+C again to exit".to_string(),
-                    );
-                } else {
-                    self.last_ctrl_c = None;
-                    self.input.clear();
-                    self.cursor = 0;
-                }
-            }
-            KeyCode::Char('d') if ctrl => {
-                if self.input.is_empty() {
-                    let now = Instant::now();
-                    if let Some(t) = self.last_ctrl_c {
-                        if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
-                            self.should_quit = true;
-                            return;
-                        }
-                        // Timer expired: reset, this is a fresh first press.
-                    }
-                    self.last_ctrl_c = Some(now);
-                    self.push(
-                        Kind::Notice,
-                        "Press Ctrl+C again to exit".to_string(),
-                    );
-                } else {
-                    // Delete character at cursor (Emacs-style Ctrl+D).
-                    if self.cursor < self.char_len() {
-                        let start = self.byte_at(self.cursor);
-                        let end = self.byte_at(self.cursor + 1);
-                        self.input.replace_range(start..end, "");
-                    }
-                }
-            }
-            KeyCode::PageUp => self.scroll_up(),
-            KeyCode::PageDown => self.scroll_down(),
-            KeyCode::Esc => {
-                // Wait briefly: terminals often encode Alt+key as ESC prefix.
-                self.esc_deadline = Some(Instant::now() + Duration::from_millis(18));
-            }
-            _ => {
-                self.on_key_edit(key);
-            }
-        }
-    }
+        self.last_ctrl_c = None;
 
-    /// Composer editing keys shared by Idle and Busy (queueing) modes.
-    fn on_key_edit(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if c == '/' && self.input.is_empty() {
+                    self.suggest_idx = 0;
+                }
+                self.insert_char(caps_char(&key, c));
+                self.suggest_idx = 0;
+            }
             KeyCode::Tab => {
-                if self.input.is_empty() {
+                if !self.input.starts_with('/') || self.input.contains(' ') {
+                    // Cycle suggestion
                     if let Some(ref s) = self.suggestion {
+                        if !self.input.is_empty() {
+                            self.complete();
+                            return;
+                        }
                         self.input = s.clone();
                         self.cursor = self.char_len();
                         self.suggestion = None;
                         return;
                     }
+                    self.complete();
+                } else {
+                    let sugg = self.slash_suggestions();
+                    if !sugg.is_empty() {
+                        let idx = self.suggest_idx.min(sugg.len() - 1);
+                        self.input = sugg[idx].0.to_string();
+                        self.cursor = self.char_len();
+                        self.suggest_idx = 0;
+                    }
                 }
-                self.complete()
             }
-            KeyCode::Char('u') if ctrl => {
-                let byte = self.byte_at(self.cursor);
-                self.input.replace_range(0..byte, "");
-                self.cursor = 0;
+            KeyCode::Backspace => self.on_key_edit(key),
+            KeyCode::Delete => self.delete_word_forward(),
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match key.code {
+                    KeyCode::Left => self.cursor = self.prev_word(),
+                    KeyCode::Right => self.cursor = self.next_word(),
+                    _ => {}
+                }
             }
-            KeyCode::Char('k') if ctrl => {
-                let byte = self.byte_at(self.cursor);
-                self.input.truncate(byte);
-            }
-            KeyCode::Char('a') if ctrl => self.cursor = 0,
-            KeyCode::Char('e') if ctrl => self.cursor = self.char_len(),
-            KeyCode::Char('w') if ctrl => self.delete_word(),
-            // macOS Option-as-Meta sends ESC b / ESC f for word motion.
-            KeyCode::Char('b') if alt => self.cursor = self.prev_word(),
-            KeyCode::Char('f') if alt => self.cursor = self.next_word(),
-            // Unhandled Ctrl/Alt chords must not type their letter into the
-            // composer (e.g. Ctrl+T would otherwise insert a stray 't').
-            KeyCode::Char(c) if !ctrl && !alt => {
-                self.last_ctrl_c = None;
-                self.insert_char(caps_char(&key, c));
-            }
-            KeyCode::Backspace if alt => self.delete_word(),
-            KeyCode::Backspace => {
+            KeyCode::Left => {
                 if self.cursor > 0 {
-                    let start = self.byte_at(self.cursor - 1);
-                    let end = self.byte_at(self.cursor);
-                    self.input.replace_range(start..end, "");
                     self.cursor -= 1;
                 }
             }
-            KeyCode::Delete if alt => self.delete_word_forward(),
-            KeyCode::Delete => {
-                if self.cursor < self.char_len() {
-                    let start = self.byte_at(self.cursor);
-                    let end = self.byte_at(self.cursor + 1);
-                    self.input.replace_range(start..end, "");
-                }
-            }
-            // macOS Cmd+Left/Right jump to start/end of line.
-            KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => self.cursor = 0,
-            KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
-                self.cursor = self.char_len()
-            }
-            KeyCode::Left if alt || ctrl => self.cursor = self.prev_word(),
-            KeyCode::Right if alt || ctrl => self.cursor = self.next_word(),
-            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right => {
                 if self.cursor < self.char_len() {
                     self.cursor += 1;
                 }
             }
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.char_len(),
-            KeyCode::Up => self.history_prev(),
-            KeyCode::Down => self.history_next(),
+            KeyCode::Up | KeyCode::Down
+                if !key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.suggest_idx = 0;
+                if key.code == KeyCode::Up {
+                    self.history_prev();
+                } else {
+                    self.history_next();
+                }
+            }
+            KeyCode::Enter => {
+                self.last_ctrl_c = None;
+                self.submit(h);
+                return;
+            }
+            KeyCode::BackTab => {
+                self.cycle_perm();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key_edit(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Backspace => {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    self.delete_word();
+                } else if self.cursor > 0 {
+                    self.cursor -= 1;
+                    let pos = self.byte_at(self.cursor);
+                    self.input.remove(pos);
+                }
+            }
+            KeyCode::Delete => {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    self.delete_word_forward();
+                } else {
+                    let pos = self.byte_at(self.cursor);
+                    if pos < self.input.len() {
+                        self.input.remove(pos);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     fn prev_word(&self) -> usize {
         let chars: Vec<char> = self.input.chars().collect();
-        let mut i = self.cursor;
+        let mut i = self.cursor.min(chars.len());
         while i > 0 && chars[i - 1].is_whitespace() {
             i -= 1;
         }
@@ -1926,88 +991,55 @@ impl App {
 
     fn next_word(&self) -> usize {
         let chars: Vec<char> = self.input.chars().collect();
-        let n = chars.len();
         let mut i = self.cursor;
-        while i < n && chars[i].is_whitespace() {
+        while i < chars.len() && !chars[i].is_whitespace() {
             i += 1;
         }
-        while i < n && !chars[i].is_whitespace() {
+        while i < chars.len() && chars[i].is_whitespace() {
             i += 1;
         }
         i
     }
 
     fn delete_word(&mut self) {
-        let i = self.prev_word();
-        let start = self.byte_at(i);
+        let target = self.prev_word();
+        let start = self.byte_at(target);
         let end = self.byte_at(self.cursor);
-        self.input.replace_range(start..end, "");
-        self.cursor = i;
+        self.input.drain(start..end);
+        self.cursor = target;
     }
 
     fn delete_word_forward(&mut self) {
-        let i = self.next_word();
+        let target = self.next_word();
         let start = self.byte_at(self.cursor);
-        let end = self.byte_at(i);
-        self.input.replace_range(start..end, "");
+        let end = self.byte_at(target);
+        self.input.drain(start..end);
     }
 
-    /// Tab completion: slash-commands at the start of the line, otherwise file
-    /// paths for the token under the cursor (with or without a leading `@`).
     fn complete(&mut self) {
-        let chars: Vec<char> = self.input.chars().collect();
-        let mut start = self.cursor;
-        while start > 0 && !chars[start - 1].is_whitespace() {
-            start -= 1;
-        }
-        let token: String = chars[start..self.cursor].iter().collect();
-
-        let (prefix_kept, search, candidates) = if start == 0 && token.starts_with('/') {
-            let s = token.clone();
-            let cands: Vec<String> = SLASH_COMMANDS
-                .iter()
-                .filter(|(c, _)| c.starts_with(&s))
-                .map(|(c, _)| c.to_string())
-                .collect();
-            ("".to_string(), s, cands)
-        } else {
-            let at = token.starts_with('@');
-            let raw = if at { &token[1..] } else { &token[..] };
-            // Only path-complete plain tokens that look like paths.
-            if !at && !raw.contains('/') && !raw.starts_with('.') && !raw.starts_with('~') {
+        if self.input.starts_with('@') {
+            let prefix = &self.input[1..];
+            let opts = complete_path(prefix);
+            if opts.is_empty() {
                 return;
             }
-            let cands = complete_path(raw);
-            ((if at { "@" } else { "" }).to_string(), raw.to_string(), cands)
-        };
-
-        if candidates.is_empty() {
-            return;
-        }
-        let common = longest_common_prefix(&candidates);
-        let completed = if common.len() > search.len() { common } else { search.clone() };
-        // Replace the token region with prefix_kept + completed.
-        let start_b = self.byte_at(start);
-        let cur_b = self.byte_at(self.cursor);
-        let mut replacement = format!("{prefix_kept}{completed}");
-        if candidates.len() == 1 {
-            // Unique: add a trailing '/' for dirs (already in candidate) or a space.
-            if !replacement.ends_with('/') {
-                replacement.push(' ');
+            if opts.len() == 1 {
+                self.input = format!("@{}", opts[0]);
+                self.cursor = self.char_len();
+                return;
             }
-        }
-        self.input.replace_range(start_b..cur_b, &replacement);
-        self.cursor = start + replacement.chars().count();
-        if candidates.len() > 1 {
-            let shown: Vec<String> = candidates.iter().take(20).cloned().collect();
-            self.push(Kind::Notice, shown.join("   "));
+            let lcp = longest_common_prefix(&opts);
+            if lcp.len() > prefix.len() {
+                self.input = format!("@{lcp}");
+                self.cursor = self.char_len();
+            }
         }
     }
 
     fn history_prev(&mut self) {
         if self.hist_idx > 0 {
             if self.hist_idx == self.history.len() {
-                self.pending = self.input.clone();
+                self.pending = std::mem::take(&mut self.input);
             }
             self.hist_idx -= 1;
             self.input = self.history[self.hist_idx].clone();
@@ -2018,39 +1050,30 @@ impl App {
     fn history_next(&mut self) {
         if self.hist_idx < self.history.len() {
             self.hist_idx += 1;
-            self.input = if self.hist_idx == self.history.len() {
-                self.pending.clone()
+            if self.hist_idx == self.history.len() {
+                self.input = std::mem::take(&mut self.pending);
             } else {
-                self.history[self.hist_idx].clone()
-            };
+                self.input = self.history[self.hist_idx].clone();
+            }
             self.cursor = self.char_len();
         }
     }
 
     pub fn mouse_scroll(&mut self, up: bool) {
         if up {
-            self.follow = false;
-            self.scrolled_up = false;
-            self.scroll = self.scroll.saturating_sub(3);
+            self.scroll_up();
         } else {
-            self.scroll = (self.scroll + 3).min(self.max_top);
-            if self.scroll >= self.max_top {
-                self.follow = true;
-                self.scrolled_up = false;
-            }
+            self.scroll_down();
         }
     }
 
     fn scroll_up(&mut self) {
         self.follow = false;
-        self.scrolled_up = false;
-        let step = (self.view_h / 2).max(1);
-        self.scroll = self.scroll.saturating_sub(step);
+        self.scroll = self.scroll.saturating_sub(3);
     }
 
     fn scroll_down(&mut self) {
-        let step = (self.view_h / 2).max(1);
-        self.scroll = (self.scroll + step).min(self.max_top);
+        self.scroll = (self.scroll + 3).min(self.max_top);
         if self.scroll >= self.max_top {
             self.follow = true;
             self.scrolled_up = false;
@@ -2058,201 +1081,188 @@ impl App {
     }
 
     fn submit(&mut self, h: &Handles) {
-        let Some(text) = self.take_input() else { return };
+        let text = std::mem::take(&mut self.input);
+        self.cursor = 0;
+        if text.is_empty() {
+            return;
+        }
+        self.history.push(text.clone());
+        self.hist_idx = self.history.len();
+        self.pending.clear();
+        self.suggestion = None;
+        self.rebuild_cmd_uses();
         self.dispatch(text, h);
     }
 
-    /// While the agent is busy, Enter queues the composer text to send after
-    /// the current turn finishes.
     fn queue_input(&mut self) {
-        let Some(text) = self.take_input() else { return };
-        self.queued.push(text);
+        if let Some(text) = self.take_input() {
+            if !text.is_empty() {
+                self.queued.push(text);
+            }
+        }
     }
 
-    /// Pull the trimmed composer text (recording it in history), or None if empty.
     fn take_input(&mut self) -> Option<String> {
-        self.suggestion = None;
-        let text = self.input.trim().to_string();
-        self.input.clear();
+        let text = std::mem::take(&mut self.input);
         self.cursor = 0;
         if text.is_empty() {
             return None;
         }
         self.history.push(text.clone());
         self.hist_idx = self.history.len();
+        self.pending.clear();
         self.rebuild_cmd_uses();
         Some(text)
     }
 
-    /// Run a slash command or send a user message to the worker.
-    fn dispatch(&mut self, text: String, h: &Handles) {
-        self.suggestion = None;
-        if let Some(cmd) = text.strip_prefix('/') {
-            self.run_command(cmd.trim(), h);
-            return;
-        }
-        self.push(Kind::User, text.clone());
-        let (expanded, attached) = expand_attachments(&text);
-        let (images, img_names) = extract_images(&text);
-        let mut all = attached;
-        all.extend(img_names);
-        if !all.is_empty() {
-            self.push(Kind::Notice, format!("attached: {}", all.join(", ")));
-        }
-        let _ = h.cmd_tx.send(WorkerCmd::User { text: expanded, images });
+
+
+    fn set_busy(&mut self) {
         self.mode = Mode::Busy;
+        self.busy_since = Some(Instant::now());
     }
 
-    /// Open the interactive subscription picker (`/login` with no argument).
-    /// Items are "<key>   <label>[   (signed in)]"; the key is the first token.
+    fn clear_busy(&mut self) {
+        self.mode = Mode::Idle;
+        self.busy_since = None;
+    }
+
+    fn dispatch(&mut self, text: String, h: &Handles) {
+        if self.mode == Mode::Busy {
+            self.queued.push(text);
+            return;
+        }
+        if let Some(cmd) = text.strip_prefix('/') {
+            self.run_command(cmd, h);
+            return;
+        }
+        self.set_busy();
+        let (task_text, images) = self.prepare_message(text);
+        let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
+    }
+
+    fn prepare_message(&self, text: String) -> (String, Vec<String>) {
+        let (task_text, _attached) = expand_attachments(&text);
+        let (images, _img_names) = extract_images(&text);
+        (task_text, images)
+    }
+
     fn open_login_picker(&mut self) {
-        let items: Vec<String> = crate::auth::supported()
-            .iter()
-            .map(|&k| {
-                let label = crate::auth::provider(k).map(|p| p.label).unwrap_or_default();
-                let signed = if self.settings.oauth.contains_key(k) { "   (signed in)" } else { "" };
-                format!("{k}   {label}{signed}")
-            })
-            .collect();
-        let mut p = Picker {
-            title: "sign in to a subscription".to_string(),
-            items,
+        use crate::auth;
+        self.picker = Some(Picker {
+            title: "Pick a provider to sign in to".into(),
+            items: auth::supported().iter().map(|s| s.to_string()).collect(),
             current: None,
             filter: String::new(),
             cursor: 0,
             scroll: 0,
             action: PickAction::Login,
-        };
-        let n = p.filtered().len();
-        p.clamp(n);
-        self.picker = Some(p);
+        });
         self.mode = Mode::Select;
     }
 
     fn run_command(&mut self, cmd: &str, h: &Handles) {
-        let (name, arg) = match cmd.split_once(char::is_whitespace) {
-            Some((a, b)) => (a, b.trim()),
-            None => (cmd, ""),
+        let (cmd, _arg) = match cmd.split_once(' ') {
+            Some((c, a)) => (c, Some(a)),
+            None => (cmd, None),
         };
-        match name {
-            "exit" | "quit" | "q" => self.should_quit = true,
-            "help" | "h" => self.show_help(),
-            "clear" => {
+        match cmd {
+            "model" => {
+                if let Some(arg) = _arg {
+                    let _ = h.cmd_tx.send(WorkerCmd::SetModel(arg.to_string()));
+                } else {
+                    let _ = h.cmd_tx.send(WorkerCmd::ListModels);
+                    self.mode = Mode::Select;
+                }
+            }
+            "login" => {
+                self.open_login_picker();
+            }
+            "new" => {
+                let _ = h.cmd_tx.send(WorkerCmd::New);
+                self.transcript.clear();
+                self.dirty();
+                self.push(Kind::Notice, "new session — fresh start.".to_string());
+            }
+            "config" => {
+                self.mode = Mode::Settings { cursor: 0, edit: None };
+            }
+            "compact" => {
+                self.set_busy();
+                let _ = h.cmd_tx.send(WorkerCmd::Compact);
+            }
+            "reset" => {
+                let _ = h.cmd_tx.send(WorkerCmd::Reset);
                 self.transcript.clear();
                 self.dirty();
             }
             "auto" => {
-                let on = self.perm() != crate::agent::PERM_AUTO;
-                self.perm.store(
-                    if on { crate::agent::PERM_AUTO } else { crate::agent::PERM_ASK },
-                    Ordering::Relaxed,
+                self.cycle_perm();
+                self.push(
+                    Kind::Notice,
+                    format!("permissions: {}", perm_name(self.perm())),
                 );
-                self.push(Kind::Notice, format!("auto-approve: {}", if on { "on" } else { "off" }));
-            }
-            "reset" => {
-                let _ = h.cmd_tx.send(WorkerCmd::Reset);
-            }
-            "new" => {
-                let _ = h.cmd_tx.send(WorkerCmd::New);
-            }
-            "compact" => {
-                let _ = h.cmd_tx.send(WorkerCmd::Compact);
-                self.mode = Mode::Busy;
             }
             "mcp" => {
                 let _ = h.cmd_tx.send(WorkerCmd::ListMcp);
-                self.mode = Mode::Busy;
-            }
-            "config" | "settings" => {
-                self.mode = Mode::Settings { cursor: 0, edit: None };
             }
             "memory" => {
-                let mem = std::fs::read_to_string(memory_path()).unwrap_or_default();
-                let mem = mem.trim();
-                self.push(Kind::Notice, if mem.is_empty() { "(no memories yet)".into() } else { mem.to_string() });
-            }
-            "login" => {
-                if arg.is_empty() {
-                    self.open_login_picker();
-                } else {
-                    let _ = h.cmd_tx.send(WorkerCmd::Login(arg.to_string()));
-                    self.mode = Mode::Busy;
-                }
-            }
-            "model" | "models" => {
-                if arg.is_empty() {
-                    self.push(Kind::Notice, "fetching models...".to_string());
-                    let _ = h.cmd_tx.send(WorkerCmd::ListModels);
-                    self.mode = Mode::Busy;
-                } else {
-                    let id = match arg.parse::<usize>() {
-                        Ok(n) if n >= 1 && n <= self.last_models.len() => self.last_models[n - 1].clone(),
-                        _ => arg.to_string(),
-                    };
-                    let _ = h.cmd_tx.send(WorkerCmd::SetModel(id));
+                match crate::tools::load_memory() {
+                    Ok(Some(text)) => self.push(Kind::Notice, format!("memory:\n{text}")),
+                    Ok(None) => self.push(Kind::Notice, String::from("no persistent memory.")),
+                    Err(e) => self.push(Kind::ErrorK, format!("{e}")),
                 }
             }
             "theme" => {
-                if arg.is_empty() {
-                    // Open the interactive picker, highlighting the current theme.
-                    let cur = THEMES
-                        .iter()
-                        .position(|t| *t == self.palette.name)
-                        .unwrap_or(0);
-                    self.mode = Mode::ThemeSelect {
-                        cursor: cur,
-                        prev: self.palette.name.to_string(),
-                    };
-                } else {
-                    let name = match arg.parse::<usize>() {
-                        Ok(n) if n >= 1 && n <= THEMES.len() => THEMES[n - 1],
-                        _ => arg,
-                    };
+                if let Some(name) = _arg {
                     let p = palette_by_name(name);
                     self.set_palette(p);
                     crate::config::Config::persist_theme(p.name);
                     self.push(Kind::Notice, format!("theme set to {}", p.name));
+                } else {
+                    let current = THEMES
+                        .iter()
+                        .position(|&n| n == self.palette.name)
+                        .unwrap_or(0);
+                    self.preview_theme(current, self.palette.name.to_string());
                 }
             }
             "init" => {
-                let prompt = "Explore the current project directory (list_files, then read key files like README, Cargo.toml, package.json, pyproject.toml, Makefile, etc.) and write a concise PICODER.md summarizing: what this project is, its structure, and how to build/run/test it. Keep it short and accurate.";
-                self.push(Kind::User, "/init".to_string());
-                let _ = h.cmd_tx.send(WorkerCmd::User { text: prompt.to_string(), images: Vec::new() });
-                self.mode = Mode::Busy;
+                self.set_busy();
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let task = format!(
+                    "Summarise this codebase into a PICODER.md (or AGENTS.md / CLAUDE.md \
+                     if one already exists) that picoder (a coding agent) can read at \
+                     startup. Include key architecture, conventions, and safety notes. \
+                     Keep it under 300 lines. Use the existing PICODER.md as a starting \
+                     point if it exists. Working directory: {}",
+                    cwd.display()
+                );
+                let _ = h.cmd_tx.send(WorkerCmd::User { text: task, images: vec![] });
             }
-            other => {
-                self.push(Kind::ErrorK, format!("unknown command: /{other}  (try /help)"));
+            "clear" => {
+                self.transcript.clear();
+                self.dirty();
             }
+            "help" => self.show_help(),
+            "exit" | "quit" | "q" => self.should_quit = true,
+            _ => self.push(Kind::ErrorK, format!("unknown command: /{cmd} (try /help)")),
         }
     }
 
     fn show_help(&mut self) {
-        let lines = [
-            "commands:",
-            "  /model [id|n]  open the model picker, or set directly by id/number",
-            "  /auto          toggle bypass-permissions (or Shift+Tab / Ctrl+P to cycle modes)",
-            "  /reset         clear conversation context",
-            "  /new           delete session, fresh start",
-            "  /compact       summarize older turns to free context (auto at 80%)",
-            "  /config        settings: provider, model, key, thinking, permissions, …",
-            "  /mcp           list configured MCP servers and their tools",
-            "  /memory        show persistent memory",
-            "  /theme [n]     open theme picker, or switch directly (Default, Apple ][, MSDOS, macOS, SUN, NeXT, SGI)",
-            "  /init          summarize this project into PICODER.md",
-            "  /clear         clear the screen transcript",
-            "  /help          show this help",
-            "  /exit          quit picoder",
-            "input: @path attaches a file | Tab autocompletes commands & paths",
-            "       typing while the agent works queues the message; Enter queues it",
-            "keys: Enter send | Shift+Tab or Ctrl+P permission mode | Up/Down history | Alt+Left/Right word | Alt+Bksp/Del word | PgUp/PgDn scroll | Ctrl-L redraw | Ctrl-C twice to quit",
-        ];
-        for l in lines {
-            self.push(Kind::Notice, l.to_string());
+        self.push(Kind::Notice, String::from("commands:"));
+        for (name, desc) in SLASH_COMMANDS {
+            self.push(Kind::Notice, format!("  {name:<12} {desc}"));
         }
+        self.push(Kind::Notice, String::from("  @file       attach a file"));
+        self.push(Kind::Notice, "  ↑/↓         browse history");
+        self.push(Kind::Notice, String::from("  Tab         autocomplete"));
+        self.push(Kind::Notice, String::from("  Shift+Tab   cycle permissions (ask / bypass / plan)"));
+        self.push(Kind::Notice, String::from("  Esc         interrupt the agent"));
+        self.push(Kind::Notice, String::from("  Ctrl+L      force clear/repaint"));
     }
 
-    /// A boot-screen banner: a PICODER block-art logo, version + tagline, and a
-    /// bordered SYSTEM panel of status lines.
     pub fn banner(&mut self, width: u16, status: Vec<String>) {
         let w = (width as usize).saturating_sub(4).max(8);
         for bl in banner_lines(w, self.ascii, &status) {
@@ -2262,8 +1272,6 @@ impl App {
                     Some(BannerColor::Rainbow(i)),
                 ),
                 BRole::Version => (Kind::Banner, None),
-                // Frame and Data share the accent color so the whole SYSTEM
-                // panel border is uniform.
                 BRole::Tagline => (Kind::BannerDim, None),
                 BRole::Frame | BRole::Data => (Kind::BannerDim, Some(BannerColor::Accent)),
             };
@@ -2292,23 +1300,40 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        matches!(self.mode, Mode::Busy)
+        self.mode == Mode::Busy
     }
 
     pub fn tick_spinner(&mut self) -> bool {
         self.spin_counter += 1;
-        if self.spin_counter % 3 == 0 {
-            self.spinner += 1;
-            return true;
+        if self.spin_counter % 6 == 0 {
+            self.spinner = (self.spinner + 1) % 10;
+            true
+        } else {
+            false
         }
-        false
     }
 
     fn spin_frame(&self) -> &'static str {
         if self.ascii {
             SPIN_A[self.spinner % SPIN_A.len()]
         } else {
-            SPIN_U[self.spinner % SPIN_U.len()]
+            SPIN_U[self.spinner]
+        }
+    }
+
+    fn working_timer(&self) -> String {
+        match self.busy_since {
+            Some(t) => {
+                let secs = t.elapsed().as_secs();
+                if secs < 60 {
+                    format!("working ({secs}s)… ")
+                } else {
+                    let m = secs / 60;
+                    let s = secs % 60;
+                    format!("working ({m}:{s:02})… ")
+                }
+            }
+            None => "working... ".to_string(),
         }
     }
 
@@ -2377,8 +1402,6 @@ impl App {
                         .into_iter()
                         .rev()
                         .collect();
-                    // An env key silently overrides whatever is saved or
-                    // edited here on the next launch — make that visible.
                     if s.key_from_env {
                         format!("…{tail} (from env — overrides the saved key)")
                     } else {
@@ -2421,25 +1444,18 @@ impl App {
 
     fn composer_rows(&self, width: u16) -> u16 {
         match &self.mode {
-            // Spinner line + queued messages + the live composer + slash palette.
             Mode::Busy => {
                 1 + self.queued.len() as u16 + self.input_rows(width)
                     + self.slash_suggestions().len() as u16
             }
-            // Description line + the (y)/(n)/(a) line below it.
             Mode::Approval(_) => 2,
-            // Header line + one line per theme.
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
-            // Header line + one line per setting.
             Mode::Settings { .. } => SETTING_LABELS.len() as u16 + 1,
-            // Header line + the visible window of choices (≥1 for "no matches").
             Mode::Select => {
                 let n = self.picker.as_ref().map(|p| p.filtered().len()).unwrap_or(0);
                 n.clamp(1, PICKER_VISIBLE) as u16 + 1
             }
-            // Prompt line + masked-input line.
             Mode::Password { .. } => 2,
-            // Wrapped question + answer line.
             Mode::Question { prompt } => {
                 let w = (width as usize).saturating_sub(2).max(1);
                 (prompt.chars().count() / w + 1).min(4) as u16 + 1
@@ -2485,16 +1501,12 @@ impl App {
 
         let width = inner.width as usize;
         self.ensure_display_cache(width);
-        // The live tail (streaming reply / reasoning) is small and changes every
-        // token, so it's rendered fresh each frame and never cached.
         let live = self.build_live_lines(width);
         let total = self.disp_cache.len() + live.len();
         self.view_h = inner.height as usize;
         self.max_top = total.saturating_sub(self.view_h);
         let top = if self.follow { self.max_top } else { self.scroll.min(self.max_top) };
         self.scroll = top;
-        // Clone only the visible window (≤ view_h lines) instead of the whole
-        // transcript: the static lines are already rendered in disp_cache.
         let mut visible: Vec<Line> = Vec::with_capacity(self.view_h);
         for ln in self.disp_cache.iter().skip(top).take(self.view_h) {
             visible.push(ln.clone());
@@ -2509,8 +1521,6 @@ impl App {
         f.render_widget(Paragraph::new(visible), inner);
     }
 
-    /// Rebuild `disp_cache` only when the transcript content (`tver`) or the
-    /// terminal `width` changed since the last build.
     fn ensure_display_cache(&mut self, width: usize) {
         if self.disp_cache_width == width && self.disp_cache_tver == self.tver {
             return;
@@ -2544,7 +1554,7 @@ impl App {
             Mode::Busy => {
                 let mut lines = vec![Line::from(vec![
                     Span::styled(format!("{} ", self.spin_frame()), Style::default().fg(self.palette.accent)),
-                    Span::styled("working... ", Style::default().fg(self.dim_text())),
+                    Span::styled(self.working_timer(), Style::default().fg(self.dim_text())),
                     Span::styled("(Esc to interrupt · Enter queues)", Style::default().fg(self.dim_text())),
                 ])];
                 let mark = if self.ascii { "->" } else { "↳" };
@@ -2556,7 +1566,6 @@ impl App {
                 }
                 let head_h = (lines.len() as u16).min(area.height);
                 f.render_widget(Paragraph::new(lines), Rect { height: head_h, ..area });
-                // Live composer below, so the next message can be typed now.
                 if area.height > head_h {
                     let comp = Rect {
                         y: area.y + head_h,
@@ -2567,8 +1576,6 @@ impl App {
                 }
             }
             Mode::Approval(desc) => {
-                // Keep the y/n/a hotkeys at the start of their own line so a long
-                // description can't push them off the right edge of the screen.
                 let desc_line = Line::from(vec![
                     Span::styled("approve ", Style::default().fg(Color::Yellow)),
                     Span::styled(desc.clone(), Style::default().add_modifier(Modifier::BOLD)),
@@ -2603,77 +1610,19 @@ impl App {
                     } else {
                         Style::default().fg(self.dim_text())
                     };
-                    lines.push(Line::from(vec![Span::styled(
-                        format!("{lead} ({}) {t}", i + 1),
-                        style,
-                    )]));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{lead}{t}"), style),
+                    ]));
                 }
                 f.render_widget(Paragraph::new(lines), area);
             }
-            Mode::Select => {
-                let Some(p) = &self.picker else { return };
-                let filtered = p.filtered();
-                let marker = if self.ascii { ">" } else { "▸" };
+            Mode::Settings { cursor, .. } => {
                 let mut lines: Vec<Line> = Vec::new();
-                let mut header = vec![
-                    Span::styled(format!("{} ", p.title), Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        "(type to filter · Enter select · Esc cancel)",
-                        Style::default().fg(self.dim_text()),
-                    ),
-                ];
-                if !p.filter.is_empty() {
-                    header.push(Span::styled(
-                        format!("  filter: {}", p.filter),
-                        Style::default().fg(self.palette.accent),
-                    ));
-                }
-                lines.push(Line::from(header));
-                if filtered.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "  (no matches — Backspace to widen)",
-                        Style::default().fg(self.dim_text()),
-                    )));
-                }
-                let end = (p.scroll + PICKER_VISIBLE).min(filtered.len());
-                for (row, &item_idx) in filtered[p.scroll..end].iter().enumerate() {
-                    let i = p.scroll + row;
-                    let sel = i == p.cursor;
-                    let lead = if sel { marker } else { " " };
-                    let cur = if Some(item_idx) == p.current { "  (current)" } else { "" };
-                    let style = if sel {
-                        Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(self.dim_text())
-                    };
-                    // Scroll hints on the window edges.
-                    let more = if row == 0 && p.scroll > 0 {
-                        if self.ascii { "  ^ more".to_string() } else { "  ↑ more".to_string() }
-                    } else if i == end - 1 && end < filtered.len() {
-                        format!("  +{} more", filtered.len() - end)
-                    } else {
-                        String::new()
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("{lead} {}{cur}{more}", p.items[item_idx]),
-                        style,
-                    )));
-                }
-                f.render_widget(Paragraph::new(lines), area);
-            }
-            Mode::Settings { cursor, edit } => {
-                let mut lines: Vec<Line> = Vec::new();
-                let hint = if self.ascii {
-                    "(up/down move - Enter/left/right change - Esc close)"
-                } else {
-                    "(↑/↓ move · Enter/←/→ change · Esc close)"
-                };
                 lines.push(Line::from(vec![
                     Span::styled("settings ", Style::default().fg(Color::Yellow)),
-                    Span::styled(hint, Style::default().fg(self.dim_text())),
+                    Span::styled("(up/down to browse, Enter to change, Esc to close)", Style::default().fg(self.dim_text())),
                 ]));
                 let marker = if self.ascii { ">" } else { "▸" };
-                let block = if self.ascii { "#" } else { "▒" };
                 for (i, label) in SETTING_LABELS.iter().enumerate() {
                     let sel = i == *cursor;
                     let lead = if sel { marker } else { " " };
@@ -2682,70 +1631,73 @@ impl App {
                     } else {
                         Style::default().fg(self.dim_text())
                     };
-                    let mut spans = vec![Span::styled(format!("{lead} {label:<15}"), label_style)];
-                    match edit {
-                        Some(buf) if sel => {
-                            // api key edits render masked, like the sudo prompt.
-                            let shown = if i == 3 {
-                                "•".repeat(buf.chars().count())
-                            } else {
-                                buf.clone()
-                            };
-                            spans.push(Span::styled(shown, Style::default().fg(self.palette.accent)));
-                            spans.push(Span::styled(block, Style::default().fg(self.palette.accent)));
-                        }
-                        _ => {
-                            spans.push(Span::styled(
-                                self.setting_value(i),
-                                Style::default().fg(if sel { self.palette.accent } else { self.dim_text() }),
-                            ));
-                        }
-                    }
-                    lines.push(Line::from(spans));
+                    let val = self.setting_value(i);
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{lead}{label:<16} "), label_style),
+                        Span::styled(val, Style::default().fg(self.palette.accent)),
+                    ]));
                 }
                 f.render_widget(Paragraph::new(lines), area);
             }
-            Mode::Question { prompt } => {
-                let block = if self.ascii { "#" } else { "▒" };
-                let mut lines: Vec<Line> = textwrap::wrap(prompt, (area.width as usize).max(1))
-                    .into_iter()
-                    .map(|piece| {
-                        Line::from(Span::styled(
-                            piece.into_owned(),
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                        ))
-                    })
-                    .collect();
-                // A very long question must not push the answer line (and its
-                // cursor) below the area — clip the question, keep the input.
-                lines.truncate((area.height as usize).saturating_sub(1));
-                lines.push(Line::from(vec![
-                    Span::styled(self.prompt_str(), Style::default().fg(self.palette.accent)),
-                    Span::raw(self.q_input.clone()),
-                    Span::styled(block, Style::default().fg(self.palette.accent)),
-                    Span::styled(
-                        "  (Enter to answer · Esc to decline)",
-                        Style::default().fg(self.dim_text()),
-                    ),
-                ]));
+            Mode::Select => {
+                let mut lines: Vec<Line> = Vec::new();
+                if let Some(ref picker) = self.picker {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{}", picker.title), Style::default().fg(Color::Yellow)),
+                        Span::styled(" (type to filter, Enter to select, Esc to cancel)", Style::default().fg(self.dim_text())),
+                    ]));
+                    let filtered = picker.filtered();
+                    if filtered.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "no matches",
+                            Style::default().fg(self.dim_text()),
+                        )));
+                    } else {
+                        let marker = if self.ascii { ">" } else { "▸" };
+                        let end = (picker.scroll + PICKER_VISIBLE).min(filtered.len());
+                        for fi in picker.scroll..end {
+                            let idx = filtered[fi];
+                            let sel = fi == picker.cursor;
+                            let lead = if sel { marker } else { " " };
+                            let mark = if Some(idx) == picker.current { " (*)" } else { "" };
+                            let style = if sel {
+                                Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(self.dim_text())
+                            };
+                            lines.push(Line::from(vec![
+                                Span::styled(format!("{lead}{}{mark}", picker.items[idx]), style),
+                            ]));
+                        }
+                    }
+                }
                 f.render_widget(Paragraph::new(lines), area);
             }
             Mode::Password { prompt } => {
-                let label = if prompt.is_empty() { "[sudo] password:" } else { prompt.as_str() };
-                let mask = if self.ascii { '*' } else { '•' };
-                let dots: String = std::iter::repeat(mask).take(self.pw_input.chars().count()).collect();
-                let prompt_line = Line::from(vec![Span::styled(
-                    label.to_string(),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                )]);
-                let input_line = Line::from(vec![
-                    Span::styled(dots, Style::default().fg(self.palette.accent)),
-                    Span::styled(
-                        "  (Enter to submit · Esc to cancel · hidden, not stored)",
-                        Style::default().fg(self.dim_text()),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(vec![prompt_line, input_line]), area);
+                let mut lines: Vec<Line> = Vec::new();
+                let masked: String = self.pw_input.chars().map(|_| '*').collect();
+                lines.push(Line::from(vec![
+                    Span::styled(prompt.clone(), Style::default().fg(self.palette.accent)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled(if masked.is_empty() { " " } else { &masked }, Style::default().fg(self.palette.accent)),
+                    Span::styled("█", Style::default().add_modifier(Modifier::REVERSED)),
+                ]));
+                f.render_widget(Paragraph::new(lines), area);
+            }
+            Mode::Question { prompt } => {
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(vec![
+                    Span::styled(prompt.clone(), Style::default().fg(self.palette.accent)),
+                ]));
+                let mut line_spans = vec![
+                    Span::styled(if self.q_input.is_empty() { " " } else { &self.q_input }, Style::default().fg(self.palette.accent)),
+                ];
+                if !self.q_input.is_empty() {
+                    line_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+                }
+                lines.push(Line::from(line_spans));
+                f.render_widget(Paragraph::new(lines), area);
             }
         }
     }
@@ -2901,354 +1853,9 @@ impl App {
     }
 }
 
-/// Apply Caps Lock to a typed character. Under the Kitty keyboard protocol
-/// (pushed in setup_terminal) the terminal reports the BASE key — 'a' even
-/// with Caps Lock on — plus a CAPS_LOCK state flag, leaving case to the app.
-/// Caps alone uppercases letters; Caps+Shift lowercases them, like a real
-/// keyboard. Legacy terminals pre-shift the char and set no state flag, so
-/// this is a no-op there.
-fn caps_char(key: &KeyEvent, c: char) -> char {
-    if !key.state.contains(KeyEventState::CAPS_LOCK) || !c.is_alphabetic() {
-        return c;
-    }
-    // Only simple 1:1 case mappings; multi-char expansions (ß → SS) keep the
-    // original — which matches real keyboards, where Caps Lock doesn't
-    // affect such keys.
-    let mapped: Vec<char> = if key.modifiers.contains(KeyModifiers::SHIFT) {
-        c.to_lowercase().collect()
-    } else {
-        c.to_uppercase().collect()
-    };
-    if mapped.len() == 1 {
-        mapped[0]
-    } else {
-        c
-    }
-}
-
-fn perm_name(p: u8) -> &'static str {
-    match p {
-        crate::agent::PERM_AUTO => "bypass",
-        crate::agent::PERM_PLAN => "plan",
-        _ => "ask",
-    }
-}
-
-/// Inset a rect by one column on each side for a small left/right margin.
-fn pad1(r: Rect) -> Rect {
-    Rect { x: r.x + 1, width: r.width.saturating_sub(2), ..r }
-}
-
-/// A solid mini progress bar. At normal usage it's the theme `accent`, then
-/// escalates to amber → red as context fills, so it both matches the theme and
-/// still warns. The empty track is a dimmed shade of the fill's hue, so the bar
-/// reads as one element.
-fn bar(frac: f64, width: usize, accent: Color) -> Vec<Span<'static>> {
-    let frac = frac.clamp(0.0, 1.0);
-    let filled = (frac * width as f64).round() as usize;
-    let fill = if frac < 0.8 {
-        accent
-    } else if frac < 0.95 {
-        Color::Rgb(220, 190, 50)
-    } else {
-        Color::Rgb(220, 70, 70)
-    };
-    // Empty track: a dark slate carrying a hint of the theme's own hue, held at
-    // a constant dark brightness so it reads as quiet chrome on every theme.
-    let track = track_color(accent);
-    let mut v = Vec::new();
-    if filled > 0 {
-        v.push(Span::styled(" ".repeat(filled), Style::default().bg(fill)));
-    }
-    if filled < width {
-        v.push(Span::styled(" ".repeat(width - filled), Style::default().bg(track)));
-    }
-    v
-}
-
-/// Scale an RGB color's brightness by `factor` (0.0–1.0), preserving hue.
-/// Non-RGB colors are returned unchanged.
-/// A dark "slate" tinted toward `accent`'s hue: a neutral floor plus a small
-/// proportional tint, so every theme's empty ctx-bar track shares ~the same
-/// dark brightness but carries its own color cast.
-fn track_color(accent: Color) -> Color {
-    const FLOOR: f64 = 10.0; // neutral dark gray base
-    const TINT: f64 = 20.0;  // hue-tint amplitude on the brightest channel
-    let (r, g, b) = color_to_rgb(accent);
-    let max = r.max(g).max(b).max(1) as f64;
-    let chan = |v: u8| (FLOOR + (v as f64 / max) * TINT).round() as u8;
-    Color::Rgb(chan(r), chan(g), chan(b))
-}
-
-fn humanize(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1e3)
-    } else {
-        n.to_string()
-    }
-}
-
-fn fmt_cost(c: f64) -> String {
-    if c < 0.01 {
-        format!("${c:.4}")
-    } else {
-        format!("${c:.2}")
-    }
-}
-
-fn expand_user(path: &str) -> std::path::PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home).join(rest);
-        }
-    }
-    std::path::PathBuf::from(path)
-}
-
-/// Strip a `@path` token: drop the `@` and any trailing sentence punctuation
-/// so "@calc.py?" resolves to calc.py. Returns None for a bare "@".
-fn attach_token(tok: &str) -> Option<&str> {
-    let p = tok.strip_prefix('@')?;
-    let p = p.trim_end_matches(|c: char| "?.,;:!)]}'\"".contains(c));
-    (!p.is_empty()).then_some(p)
-}
-
-/// Expand `@path` tokens into appended fenced file contents for the model.
-/// Image paths are skipped (handled by `extract_images`). Returns
-/// (text_to_send, attached_paths). Display text keeps the raw `@path`.
-pub fn expand_attachments(text: &str) -> (String, Vec<String>) {
-    let mut attached = Vec::new();
-    let mut blocks = String::new();
-    for tok in text.split_whitespace() {
-        let Some(p) = attach_token(tok) else { continue };
-        if crate::tools::is_image_path(p) {
-            continue;
-        }
-        if let Ok(content) = std::fs::read_to_string(expand_user(p)) {
-            let body = crate::api::truncate(&content, 20000);
-            blocks.push_str(&format!("\n\n--- {p} ---\n```\n{body}\n```"));
-            attached.push(p.to_string());
-        }
-    }
-    if attached.is_empty() {
-        (text.to_string(), attached)
-    } else {
-        (format!("{text}{blocks}"), attached)
-    }
-}
-
-/// Resolve `@image.png` tokens to base64 data URIs. Returns (uris, names) so
-/// the caller can both attach the images and report what was attached.
-pub fn extract_images(text: &str) -> (Vec<String>, Vec<String>) {
-    let mut uris = Vec::new();
-    let mut names = Vec::new();
-    for tok in text.split_whitespace() {
-        let Some(p) = attach_token(tok) else { continue };
-        if !crate::tools::is_image_path(p) {
-            continue;
-        }
-        if let Ok(uri) = crate::tools::image_data_uri(p) {
-            uris.push(uri);
-            names.push(p.to_string());
-        }
-    }
-    (uris, names)
-}
-
-/// Filesystem completions for a path prefix; dirs get a trailing '/'.
-fn complete_path(prefix: &str) -> Vec<String> {
-    let (dir, base) = match prefix.rfind('/') {
-        Some(i) => (&prefix[..=i], &prefix[i + 1..]),
-        None => ("", prefix),
-    };
-    let search_dir = if dir.is_empty() { expand_user(".") } else { expand_user(dir) };
-    let Ok(entries) = std::fs::read_dir(&search_dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with(base) {
-            continue;
-        }
-        // Hide dotfiles unless the user explicitly typed a leading dot.
-        if name.starts_with('.') && !base.starts_with('.') {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let suffix = if is_dir { "/" } else { "" };
-        out.push(format!("{dir}{name}{suffix}"));
-    }
-    out.sort();
-    out
-}
-
-fn longest_common_prefix(items: &[String]) -> String {
-    let Some(first) = items.first() else {
-        return String::new();
-    };
-    let mut end = first.chars().count();
-    for s in &items[1..] {
-        let common = first
-            .chars()
-            .zip(s.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-        end = end.min(common);
-    }
-    first.chars().take(end).collect()
-}
-
-/// Make a transcript line safe to hand to the terminal. Tool output and model
-/// text can carry control characters — a raw ESC (e.g. ANSI colors from a
-/// command) starts an escape sequence mid-frame, and a raw tab advances the
-/// real cursor further than ratatui's one-cell bookkeeping; both leave stray
-/// characters on screen that the diff never cleans up. Tabs become spaces,
-/// other control chars are dropped. With `single_width` (ASCII terminals and
-/// the framebuffer console, whose font draws every glyph in one cell), chars
-/// that aren't single-cell width (emoji, CJK) are replaced with '?' — ratatui
-/// books them as two cells, the console draws one, and the diff desyncs.
-fn clean_text(text: &str, single_width: bool) -> std::borrow::Cow<'_, str> {
-    use unicode_width::UnicodeWidthChar;
-    let dirty = |c: char| c.is_control() || (single_width && c.width() != Some(1));
-    if !text.chars().any(dirty) {
-        return std::borrow::Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c == '\t' {
-            out.push_str("    ");
-        } else if c.is_control() {
-            // drop
-        } else if single_width && c.width() != Some(1) {
-            out.push('?');
-        } else {
-            out.push(c);
-        }
-    }
-    std::borrow::Cow::Owned(out)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_tline(
-    out: &mut Vec<Line<'static>>,
-    kind: Kind,
-    text: &str,
-    lead: bool,
-    color: Option<BannerColor>,
-    width: usize,
-    g: Glyphs,
-    p: &Palette,
-    single_width: bool,
-) {
-    let text = &*clean_text(text, single_width);
-    let (indent, glyph) = layout(kind, g);
-    let (mut base, mut glyph_style) = colors(kind, p);
-    if let Some(bc) = color {
-        let rainbow = if is_16color_terminal() { APPLE_RAINBOW_16 } else { APPLE_RAINBOW };
-        let c = match bc {
-            BannerColor::Fixed(c) => c,
-            BannerColor::Rainbow(i) => banner_row_color(p, &rainbow, i),
-            BannerColor::Accent => p.accent,
-        };
-        base = base.fg(c);
-    }
-    // Highlight the user's own prompts with a full-width gray band so they
-    // stand out when scrolling back through output.
-    let bg = if kind == Kind::User {
-        Some(p.user_bg)
-    } else {
-        None
-    };
-    if let Some(c) = bg {
-        base = base.bg(c);
-        glyph_style = glyph_style.bg(c);
-    }
-    let pad_style = bg.map(|c| Style::default().bg(c)).unwrap_or_default();
-
-    let prefix_w = indent + glyph.chars().count();
-    let wrap_w = width.saturating_sub(prefix_w).max(1);
-    let no_wrap = matches!(kind, Kind::Banner | Kind::BannerDim);
-    let wrapped: Vec<String> = if text.is_empty() {
-        vec![String::new()]
-    } else if no_wrap {
-        // Block art must never word-wrap; truncate to the visible width.
-        vec![text.chars().take(wrap_w).collect()]
-    } else {
-        textwrap::wrap(text, wrap_w).into_iter().map(|c| c.into_owned()).collect()
-    };
-    for (j, piece) in wrapped.into_iter().enumerate() {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if j == 0 && lead {
-            if indent > 0 {
-                spans.push(Span::styled(" ".repeat(indent), pad_style));
-            }
-            if !glyph.is_empty() {
-                spans.push(Span::styled(glyph.to_string(), glyph_style));
-            }
-        } else {
-            spans.push(Span::styled(" ".repeat(prefix_w), pad_style));
-        }
-        let used = prefix_w + piece.chars().count();
-        spans.push(Span::styled(piece, base));
-        // Extend the gray band to the full width.
-        if bg.is_some() && used < width {
-            spans.push(Span::styled(" ".repeat(width - used), pad_style));
-        }
-        out.push(Line::from(spans));
-    }
-}
-
-/// Indentation and leading glyph per line kind (theme-independent).
-fn layout(kind: Kind, g: Glyphs) -> (usize, &'static str) {
-    match kind {
-        Kind::User => (0, g.user),
-        Kind::Assistant => (0, g.assistant),
-        Kind::Reasoning => (2, ""),
-        Kind::Tool => (2, g.tool),
-        Kind::ToolResult | Kind::ToolErr => (4, g.result),
-        Kind::DiffAdd | Kind::DiffDel | Kind::DiffCtx => (4, ""),
-        Kind::Notice => (2, ""),
-        Kind::ErrorK => (0, g.error),
-        Kind::Code => (2, ""),
-        Kind::Heading => (0, g.assistant),
-        Kind::Banner | Kind::BannerDim => (0, ""),
-    }
-}
-
-/// (text style, glyph style) per line kind, from the active theme palette.
-fn colors(kind: Kind, p: &Palette) -> (Style, Style) {
-    let s = |c: Color| Style::default().fg(c);
-    let bold = |c: Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
-    match kind {
-        Kind::User => (bold(p.accent), bold(p.accent)),
-        Kind::Assistant => (s(p.assistant), s(p.assistant_glyph)),
-        Kind::Reasoning => (s(p.reasoning), s(p.reasoning)),
-        Kind::Tool => (s(p.tool), s(p.tool)),
-        Kind::ToolResult => (s(p.tool_result), s(p.reasoning)),
-        Kind::ToolErr => (s(p.error), s(p.error)),
-        Kind::DiffAdd => (s(p.diff_add), Style::default()),
-        Kind::DiffDel => (s(p.diff_del), Style::default()),
-        Kind::DiffCtx => (s(p.diff_ctx), s(p.diff_ctx)),
-        Kind::Notice => (s(p.notice), s(p.notice)),
-        Kind::ErrorK => (s(p.error), s(p.error)),
-        Kind::Code => (s(p.code), s(p.code)),
-        Kind::Heading => (bold(p.heading), s(p.assistant_glyph)),
-        Kind::Banner => (bold(p.accent), s(p.accent)),
-        Kind::BannerDim => (s(p.notice), Style::default()),
-    }
-}
-
-/// Current terminal width in columns (for sizing the launch banner).
-pub fn term_width() -> u16 {
-    ratatui::crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::clean_text;
+    use super::helpers::clean_text;
 
     #[test]
     fn clean_text_passes_plain_text_through_borrowed() {
@@ -3258,7 +1865,6 @@ mod tests {
 
     #[test]
     fn clean_text_strips_escapes_and_expands_tabs() {
-        // ANSI color codes from tool output must not reach the terminal.
         assert_eq!(clean_text("\x1b[31mred\x1b[0m", false), "[31mred[0m");
         assert_eq!(clean_text("a\tb", false), "a    b");
         assert_eq!(clean_text("a\rb\x07", false), "ab");
@@ -3266,11 +1872,8 @@ mod tests {
 
     #[test]
     fn clean_text_ascii_replaces_non_single_width() {
-        // Wide chars (emoji/CJK) misrender on the framebuffer console.
         assert_eq!(clean_text("ok 🚀 漢", true), "ok ? ?");
-        // Single-width non-ASCII is fine: the console shows a 1-cell fallback.
         assert_eq!(clean_text("héllo", true), "héllo");
-        // Unicode terminals keep wide chars as-is.
         assert_eq!(clean_text("🚀\t", false), "🚀    ");
     }
 }
@@ -3296,8 +1899,6 @@ pub fn run<B: ratatui::backend::Backend>(
         }
         if event::poll(Duration::from_millis(30))? {
             match event::read()? {
-                // Press and Repeat (held-key autorepeat). The Kitty protocol's
-                // REPORT_EVENT_TYPES flag also emits Release events — ignore those.
                 Event::Key(k)
                     if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
@@ -3371,12 +1972,6 @@ pub fn setup_terminal() -> std::io::Result<Terminal<ratatui::backend::CrosstermB
         ratatui::crossterm::terminal::supports_keyboard_enhancement(),
         Ok(true)
     ) {
-        // Warp only disambiguates a *modified* Backspace (so Option+Backspace
-        // arrives as Alt+Backspace rather than a bare 0x7f) when ALL keys are
-        // reported as escape codes — DISAMBIGUATE_ESCAPE_CODES alone is not
-        // enough. Push the full flag set; crossterm decodes the resulting CSI-u
-        // sequences back to ordinary KeyCodes (see the Shift+Tab and Repeat
-        // handling that this enables in the event loop / on_key).
         let _ = execute!(
             std::io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::all())
@@ -3386,33 +1981,13 @@ pub fn setup_terminal() -> std::io::Result<Terminal<ratatui::backend::CrosstermB
     Ok(term)
 }
 
-/// Format max_tool_calls for display: 0 → "auto", else the number.
-fn setting_max_tool_calls(n: u32) -> String {
-    if n == 0 { "auto".to_string() } else { n.to_string() }
-}
-
-/// Parse user input for the max_tool_calls setting: "auto" → 0, number → u32.
-fn parse_max_tool_calls(s: &str) -> u32 {
-    let s = s.trim();
-    if s.eq_ignore_ascii_case("auto") {
-        0
-    } else {
-        s.parse::<u32>().unwrap_or(0)
-    }
-}
-
 pub fn restore_terminal(console: bool) {
     use ratatui::crossterm::cursor::MoveTo;
     use ratatui::crossterm::terminal::{Clear, ClearType};
     let mut out = std::io::stdout();
-    // Undo the Kitty keyboard-protocol push from setup_terminal. Harmless if we
-    // never pushed (the terminal just pops an empty stack entry).
     let _ = execute!(out, PopKeyboardEnhancementFlags);
     let _ = execute!(out, event::DisableMouseCapture, event::DisableBracketedPaste);
     ratatui::restore();
-    // The Linux framebuffer console ignores the alternate screen, so the last
-    // TUI frame is left on screen after restore. Wipe it for a clean exit.
-    // (Over SSH the alt-screen already restored the shell — don't clear that.)
     if console {
         let _ = execute!(out, Clear(ClearType::All), MoveTo(0, 0));
     }

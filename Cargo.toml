@@ -1,6 +1,6 @@
 [package]
 name = "picoder"
-version = "0.2.148"
+version = "0.2.185"
 edition = "2021"
 description = "A tiny full-screen agentic coding CLI for the Raspberry Pi Zero W"
 
@@ -20,6 +20,7 @@ similar = "2"
 textwrap = { version = "0.16", default-features = false, features = ["unicode-width", "unicode-linebreak"] }
 unicode-width = "0.2"
 anyhow = "1"
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

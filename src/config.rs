@@ -120,7 +120,7 @@ fn default_auth_mode() -> String {
     "api".to_string()
 }
 fn default_max_tool_calls() -> u32 {
-    100
+    0 // "auto" — see AUTO_STEPS in agent.rs
 }
 
 /// Provider presets: (name, base_url, default model) — the single source for
