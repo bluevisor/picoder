@@ -1,6 +1,6 @@
 //! UI types: glyphs, line kinds, modes, pickers, and config snapshots.
 
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
 use std::time::Duration;
 
