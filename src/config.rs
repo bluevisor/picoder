@@ -97,10 +97,6 @@ pub struct Config {
     /// providers that don't know the field may reject requests — turn it off.
     #[serde(default)]
     pub thinking: bool,
-    /// Does this provider accept `image_url` content parts in messages?
-    /// DeepSeek is text-only; most others support multimodal.
-    #[serde(skip)]
-    pub supports_images: bool,
     /// Default permission mode for new sessions: "ask", "bypass", or "plan".
     #[serde(default = "default_permission")]
     pub permission: String,
