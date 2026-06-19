@@ -3345,7 +3345,16 @@ pub fn run<B: ratatui::backend::Backend>(
 pub fn setup_terminal() -> std::io::Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
 {
     let mut term = ratatui::init();
-    let _ = execute!(std::io::stdout(), event::EnableBracketedPaste, event::EnableMouseCapture);
+    let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
+    // Mouse capture grabs scroll-wheel events (for transcript scrolling) but, as
+    // a side effect, prevents the terminal's own click-drag text selection.
+    // Warp on macOS has no modifier to bypass a grabbed mouse, so users can't
+    // select text at all — skip capture there and keep native selection. Other
+    // terminals (iTerm, etc.) let you hold Option/Fn to select, so capture stays.
+    let warp = std::env::var("TERM_PROGRAM").map(|v| v == "WarpTerminal").unwrap_or(false);
+    if !warp {
+        let _ = execute!(std::io::stdout(), event::EnableMouseCapture);
+    }
     // Ask the terminal to report modified keys unambiguously (Kitty keyboard
     // protocol). Without this, terminals like Warp drop the Option/Alt modifier
     // on Backspace in full-screen apps and send a bare 0x7f, so Option+Backspace
