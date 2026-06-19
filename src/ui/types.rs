@@ -260,3 +260,10 @@ pub fn caps_char(key: &KeyEvent, c: char) -> char {
         c
     }
 }
+
+/// Returns true if the key is Ctrl+C or Ctrl+D.
+pub fn ctrl_c_or_d(key: &KeyEvent) -> bool {
+    use ratatui::crossterm::event::KeyModifiers;
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+}
