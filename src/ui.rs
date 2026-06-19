@@ -17,7 +17,7 @@ use crate::config::{Config, ConfigPatch, PROVIDERS};
 use banner::{BRole, banner_lines};
 use helpers::{
     bar, complete_path, fmt_cost, humanize, longest_common_prefix, pad1,
-    perm_name, render_tline, setting_max_tool_calls,
+    perm_name, render_message, render_tline, setting_max_tool_calls,
 };
 use palette::{Palette, palette_by_name};
 use ratatui::crossterm::event::{
@@ -841,6 +841,9 @@ impl App {
                 }
             }
             KeyCode::Enter => self.queue_input(),
+            // Scroll the output transcript while the agent runs.
+            KeyCode::PageUp => self.scroll_up(),
+            KeyCode::PageDown => self.scroll_down(),
             _ => {}
         }
     }
@@ -948,6 +951,9 @@ impl App {
             KeyCode::BackTab => {
                 self.cycle_perm();
             }
+            // Scroll the output transcript; the input field is untouched.
+            KeyCode::PageUp => self.scroll_up(),
+            KeyCode::PageDown => self.scroll_down(),
             _ => {}
         }
     }
@@ -1527,7 +1533,11 @@ impl App {
         }
         let mut out: Vec<Line<'static>> = Vec::new();
         for t in &self.transcript {
-            render_tline(&mut out, t.kind, &t.text, t.lead, t.color, width, self.glyphs, &self.palette, self.single_width);
+            if t.kind == Kind::Assistant {
+                render_message(&mut out, &t.text, t.lead, width, self.glyphs, &self.palette, self.single_width);
+            } else {
+                render_tline(&mut out, t.kind, &t.text, t.lead, t.color, width, self.glyphs, &self.palette, self.single_width);
+            }
         }
         self.disp_cache = out;
         self.disp_cache_width = width;
@@ -1537,9 +1547,7 @@ impl App {
     fn build_live_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut out: Vec<Line<'static>> = Vec::new();
         if !self.live.is_empty() {
-            for (i, ln) in self.live.split('\n').enumerate() {
-                render_tline(&mut out, Kind::Assistant, ln, i == 0, None, width, self.glyphs, &self.palette, self.single_width);
-            }
+            render_message(&mut out, &self.live, true, width, self.glyphs, &self.palette, self.single_width);
         } else if !self.live_reasoning.is_empty() {
             for ln in self.live_reasoning.split('\n') {
                 render_tline(&mut out, Kind::Reasoning, ln, true, None, width, self.glyphs, &self.palette, self.single_width);
