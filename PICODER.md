@@ -196,6 +196,13 @@ Each server is spawned over stdio at launch; its tools appear as
 - **Symmetric symlink refusal** (`tools::deny_symlink`). `read`/`list` refuse
   symlinked paths just like `write`/`edit`; `expand` lexically collapses
   `.`/`..` so an approved path is the path actually used.
+- **No raw escapes reach the terminal** (`helpers::clean_text`). Model and tool
+  text is stripped of control characters before it is drawn — whole ANSI
+  sequences (CSI/OSC, not just the ESC byte), so reading a colored log can't
+  spill `[1;31m` into the transcript or corrupt the frame's colors. The composer
+  buffer is sanitized at insert time too, so pasting colored text can't desync
+  the screen either. `render_tline` splits on `\n` first, so multi-line tool
+  output keeps its line structure instead of being reflowed into one paragraph.
 
 ## CI
 
