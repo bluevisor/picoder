@@ -22,6 +22,8 @@ src/
                       web_fetch, web_search, todo, view_image, remember, recall
   agent.rs            worker thread: owns the conversation, runs the model/tool loop, sub-agents
   mcp.rs              stdio MCP client: spawn servers, JSON-RPC handshake, tools/list + tools/call
+  money.rs            Currency/Balance: keeps the cost and balance readouts in the
+                      right units (DeepSeek bills CNY accounts in CNY, prices are USD)
   ui.rs               ratatui full-screen TUI: transcript, composer, status bar
   diff.rs             unified diff for edit/write previews
   askpass.rs          sudo password support: askpass helper + in-TUI masked prompt
@@ -59,7 +61,10 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   messages that send in order as turns finish (Esc interrupts and restores them).
 - One-shot `--output FILE` writes the final reply to disk after the run.
 - Status bar: model · session tokens + cost · context-window bar · account
-  balance, each with its own currency (see `src/money.rs`).
+  balance. `money.rs` tags both figures with their ISO code whenever the
+  account's billing currency differs from `price_currency` (a CNY DeepSeek
+  account using the USD price list), and a one-time notice says how to align
+  them; prices are never converted across currencies.
 - Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
 - Auto-loads `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
 - Session persistence + resume (`picoder --continue`, per working directory).
@@ -92,7 +97,14 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   base URL, model, API key (masked), thinking mode (DeepSeek-style
   `"thinking":{"type":"enabled"}` request field; off by default), default
   permission mode (ask/bypass/plan — applies live and saves for new sessions),
-  auto-commit, theme, context window. Changes apply immediately and persist.
+  auto-commit, theme, context window, max tool calls, price currency. Changes
+  apply immediately and persist.
+- Costs and balance: `src/money.rs` formats both, tagging each with its ISO code
+  when the account's billing currency differs from `price_currency`. DeepSeek
+  reports CNY for China-region accounts, so a CNY account on the default USD
+  prices sees `$0.03 USD · … │ bal ¥135.70 CNY` plus a one-time hint to set
+  `price_currency` (and CNY prices) if they want a single unit. Nothing is ever
+  converted — an exchange rate would be a guess.
 
 ## Building (must be done on the Mac — the Pi can't compile this)
 
