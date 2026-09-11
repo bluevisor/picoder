@@ -3,6 +3,7 @@
 //! as a single static binary with no system TLS dependency.
 
 use crate::config::Config;
+use crate::money::{Balance, Currency};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
