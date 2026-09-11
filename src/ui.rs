@@ -37,9 +37,9 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use types::{
-    caps_char, ctrl_c_or_d, picker_step_for_key, BannerColor, CursorKind, Glyphs, Kind, Mode,
-    PickAction, Picker, TLine, DOUBLE_PRESS_TIMEOUT, GLYPHS_A, GLYPHS_U, MAX_SUGGEST,
-    MAX_TRANSCRIPT, PICKER_VISIBLE, SETTING_LABELS, SLASH_COMMANDS, SPIN_A, SPIN_U,
+    caps_char, ctrl_c_or_d, is_16color_terminal, picker_step_for_key, BannerColor, CursorKind,
+    Glyphs, Kind, Mode, PickAction, Picker, TLine, DOUBLE_PRESS_TIMEOUT, GLYPHS_A, GLYPHS_U,
+    MAX_SUGGEST, MAX_TRANSCRIPT, PICKER_VISIBLE, SETTING_LABELS, SLASH_COMMANDS, SPIN_A, SPIN_U,
 };
 
 /// The current working directory as a display string, with `$HOME` collapsed to
@@ -2096,7 +2096,7 @@ mod tests {
     fn a_16color_terminal_gets_a_palette_with_no_rgb_left_in_it() {
         use ratatui::style::Color;
         for theme in THEMES {
-            let safe = palette::for_16color(palette_by_name(theme));
+            let safe = super::palette::for_16color(palette_by_name(theme));
             for (name, c) in [
                 ("accent", safe.accent),
                 ("assistant", safe.assistant),
@@ -2126,7 +2126,7 @@ mod tests {
         }
         // The default theme's near-white still reads as a bright color, and the
         // dim gray still as a dim one: the snap must not collapse them together.
-        let safe = palette::for_16color(palette_by_name("Default"));
+        let safe = super::palette::for_16color(palette_by_name("Default"));
         assert_eq!(safe.assistant, Color::White);
         assert_eq!(safe.reasoning, Color::DarkGray);
     }

@@ -65,7 +65,10 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   account's billing currency differs from `price_currency` (a CNY DeepSeek
   account using the USD price list), and a one-time notice says how to align
   them; prices are never converted across currencies.
-- Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
+- Permission modes via Shift+Tab (also Ctrl+P, which the Pi's framebuffer console
+  needs since it can't report Shift+Tab): ask / bypass / plan (read-only); colored
+  diff before write/edit. Handled in every mode, and never confused with the
+  composer's Tab autocomplete.
 - Auto-loads `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
 - Session persistence + resume (`picoder --continue`, per working directory).
 - Composer: typing `/` opens a command palette (suggestions ranked by your
