@@ -63,6 +63,15 @@ fn cwd_label() -> String {
     cwd.display().to_string()
 }
 
+/// Result of `App::layout_input`: the composer text split into display rows
+/// plus where the cursor lands (row, cell column, and chars into that row).
+struct ComposerLayout {
+    rows: Vec<String>,
+    cur_row: usize,
+    cur_col: usize,
+    cur_idx: usize,
+}
+
 pub struct App {
     transcript: Vec<TLine>,
     live: String,
@@ -608,12 +617,74 @@ impl App {
             ' '
         } else if c.is_control() {
             return;
+        } else if self.single_width && unicode_width::UnicodeWidthChar::width(c) != Some(1) {
+            // The framebuffer console draws every glyph in one cell; a wide
+            // char here would desync the grid exactly like it would in the
+            // transcript (see clean_text), so it gets the same placeholder.
+            '?'
         } else {
             c
         };
         let pos = self.byte_at(self.cursor);
         self.input.insert(pos, c);
         self.cursor += 1;
+    }
+
+    /// Terminal cells a char occupies in the composer. Zero-width marks ride
+    /// on the previous cell; CJK and most emoji take two.
+    fn cell_w(&self, c: char) -> usize {
+        if self.single_width {
+            1
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+        }
+    }
+
+    fn str_w(&self, s: &str) -> usize {
+        s.chars().map(|c| self.cell_w(c)).sum()
+    }
+
+    /// Lay the composer text out in rows of at most `w` cells, wrapping a char
+    /// that would not fit onto the next row, and locate the cursor (a char
+    /// index) as a (row, cell column, chars-into-row) triple. `input_rows` and
+    /// `render_composer` both come from here, so the caret can never sit N
+    /// cells left of the glyph it belongs to on a line with wide characters.
+    fn layout_input(&self, w: usize) -> ComposerLayout {
+        let w = w.max(1);
+        let mut rows: Vec<String> = vec![String::new()];
+        let mut col = 0usize;
+        let mut idx = 0usize;
+        let (mut cur_row, mut cur_col, mut cur_idx) = (0usize, 0usize, 0usize);
+        let mut placed = false;
+        for (i, c) in self.input.chars().enumerate() {
+            let cw = self.cell_w(c);
+            if col + cw > w && col > 0 {
+                rows.push(String::new());
+                col = 0;
+                idx = 0;
+            }
+            if i == self.cursor {
+                cur_row = rows.len() - 1;
+                cur_col = col;
+                cur_idx = idx;
+                placed = true;
+            }
+            rows.last_mut().unwrap().push(c);
+            col += cw;
+            idx += 1;
+        }
+        if !placed {
+            // Cursor after the last char: a full last row spills onto a fresh one.
+            if col >= w {
+                rows.push(String::new());
+                col = 0;
+                idx = 0;
+            }
+            cur_row = rows.len() - 1;
+            cur_col = col;
+            cur_idx = idx;
+        }
+        ComposerLayout { rows, cur_row, cur_col, cur_idx }
     }
 
     fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
@@ -2037,7 +2108,7 @@ impl App {
     }
 
     fn prompt_w(&self) -> usize {
-        self.prompt_str().chars().count()
+        self.str_w(self.prompt_str())
     }
 
     /// Wrap width for an ask_user question: `inner_width` is the panel's own
@@ -2053,8 +2124,7 @@ impl App {
     /// Rows the composer text needs at this width (same in Idle and Busy).
     fn input_rows(&self, width: u16) -> u16 {
         let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
-        let rows = self.char_len() / w + 1;
-        rows.clamp(1, 5) as u16
+        self.layout_input(w).rows.len().clamp(1, 5) as u16
     }
 
     fn composer_rows(&self, width: u16) -> u16 {
@@ -2363,11 +2433,9 @@ impl App {
     fn render_composer(&self, f: &mut Frame, inner: Rect) {
         let pw = self.prompt_w();
         let w = (inner.width as usize).saturating_sub(pw).max(1);
-        let chars: Vec<char> = self.input.chars().collect();
-        let empty = chars.is_empty();
-        let total_rows = chars.len() / w + 1;
-        let cur_row = self.cursor / w;
-        let cur_col = self.cursor % w;
+        let empty = self.input.is_empty();
+        let ComposerLayout { rows, cur_row, cur_col, cur_idx } = self.layout_input(w);
+        let total_rows = rows.len();
         let max_rows = inner.height as usize;
         let start_row = if cur_row >= max_rows { cur_row - max_rows + 1 } else { 0 };
 
@@ -2380,23 +2448,23 @@ impl App {
         let mut lines: Vec<Line> = Vec::new();
         for r in start_row..(start_row + max_rows).min(total_rows.max(1)) {
             let prefix = if r == 0 { Span::styled(prompt, accent) } else { Span::raw(cont.clone()) };
-            let row: Vec<char> = chars.iter().skip(r * w).take(w).cloned().collect();
+            let row: &str = rows.get(r).map(String::as_str).unwrap_or("");
             let mut spans = vec![prefix];
             let text_style = Style::default().fg(self.palette.accent);
             if r == cur_row && cursor != CursorKind::Caret {
-                let before: String = row.iter().take(cur_col).collect();
-                let after: String = row.iter().skip(cur_col + 1).collect();
+                let before: String = row.chars().take(cur_idx).collect();
+                let after: String = row.chars().skip(cur_idx + 1).collect();
                 spans.push(Span::styled(before, text_style));
                 match cursor {
                     CursorKind::Block => spans.push(Span::styled(block, accent)),
                     _ => {
-                        let at = row.get(cur_col).map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+                        let at = row.chars().nth(cur_idx).map(|c| c.to_string()).unwrap_or_else(|| " ".into());
                         spans.push(Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)));
                     }
                 }
                 spans.push(Span::styled(after, text_style));
             } else {
-                spans.push(Span::styled(row.iter().collect::<String>(), text_style));
+                spans.push(Span::styled(row.to_string(), text_style));
             }
             if empty && r == 0 {
                 let hint = if matches!(self.mode, Mode::Busy) {
@@ -2815,6 +2883,65 @@ mod tests {
         app.mode = Mode::Idle;
         app.run_command("compact", &h);
         assert!(matches!(rx.try_recv(), Ok(WorkerCmd::Compact(None))));
+    }
+
+    #[test]
+    fn composer_layout_wraps_and_places_the_cursor_by_display_width() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.single_width = false;
+        // 日本語 are 2 cells each: 日本 (4) fits in 5, 語 (2) would overflow → wraps.
+        app.input = "日本語abc".to_string();
+        app.cursor = app.char_len();
+        let l = app.layout_input(5);
+        // Cursor after the last char of a full row spills onto a fresh row.
+        assert_eq!(l.rows, vec!["日本", "語abc", ""]);
+        assert_eq!((l.cur_row, l.cur_col, l.cur_idx), (2, 0, 0));
+        // Cursor on 語: row 1, column 0 — not char-index 2 % 5 = column 2.
+        app.cursor = 2;
+        let l = app.layout_input(5);
+        assert_eq!((l.cur_row, l.cur_col, l.cur_idx), (1, 0, 0));
+        // Cursor on `c`: 語 took 2 cells, so column 4, chars-into-row 3.
+        app.cursor = 5;
+        let l = app.layout_input(5);
+        assert_eq!((l.cur_row, l.cur_col, l.cur_idx), (1, 4, 3));
+        // Row count matches the layout: two rows with the cursor mid-text,
+        // three once it sits past the full last row.
+        assert_eq!(app.input_rows(5 + 2 + app.prompt_w() as u16), 2);
+        app.cursor = app.char_len();
+        assert_eq!(app.input_rows(5 + 2 + app.prompt_w() as u16), 3);
+        // Plain ASCII behaves exactly as the old char arithmetic did.
+        app.input = "abcdefgh".to_string();
+        app.cursor = 8;
+        let l = app.layout_input(4);
+        assert_eq!(l.rows, vec!["abcd", "efgh", ""]);
+        assert_eq!((l.cur_row, l.cur_col), (2, 0));
+        app.cursor = 6;
+        assert_eq!(app.layout_input(4).cur_col, 2);
+    }
+
+    #[test]
+    fn the_caret_lands_on_the_glyph_after_wide_characters() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.single_width = false;
+        app.palette.cursor = crate::ui::types::CursorKind::Caret;
+        app.mode = Mode::Idle;
+        app.input = "日本a".to_string();
+        app.cursor = 2; // on `a`, which sits in cell 4 after two double-width glyphs
+        let backend = ratatui::backend::TestBackend::new(60, 12);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        // pad1 insets the composer by one column; the prompt precedes the text.
+        assert_eq!(pos.x as usize, 1 + app.prompt_w() + 4);
+    }
+
+    #[test]
+    fn single_width_terminals_get_a_placeholder_for_wide_glyphs() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.single_width = true;
+        app.on_paste("a日b".to_string());
+        assert_eq!(app.input, "a?b");
+        assert_eq!(app.cell_w('日'), 1);
     }
 
     /// A `Handles` backed by throwaway channels, plus the receiver so a test
