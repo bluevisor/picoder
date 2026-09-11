@@ -1906,16 +1906,36 @@ mod tests {
         assert_eq!(clean_text("🚀\t", false), "🚀    ");
     }
 
-    /// Drives the real key path (`App::on_key` → `Mode::Select`) that the
-    /// `/model` picker uses, since a mis-guarded match arm silently swallowed
-    /// plain Up/Down while Ctrl+j/k still worked.
-    fn select_app(models: &[&str]) -> (App, Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
-        use std::sync::atomic::AtomicU8;
+    /// A `Handles` backed by throwaway channels, plus the receiver so a test
+    /// can assert what the UI sent to the worker.
+    fn test_handles() -> (Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
+        use std::sync::atomic::{AtomicBool, AtomicU8};
         use std::sync::mpsc;
         use std::sync::Arc;
 
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (appr_tx, _appr_rx) = mpsc::channel();
+        let h = Handles {
+            join: std::thread::spawn(|| {}),
+            cmd_tx,
+            appr_tx,
+            shared: crate::agent::Shared {
+                cancel: Arc::new(AtomicBool::new(false)),
+                perm: Arc::new(AtomicU8::new(0)),
+            },
+        };
+        (h, cmd_rx)
+    }
+
+    /// The real key path (`App::on_key` → `Mode::Select`) used by `/model`:
+    /// a mis-guarded match arm silently swallowed plain Up/Down while the
+    /// Ctrl+j/k aliases still worked.
+    fn select_app(models: &[&str]) -> (App, Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+
         let cfg = UiConfig {
-            model: "a".into(),
+            model: "m0".into(),
             theme: "Default".into(),
             ascii: false,
             ctx_limit: 128_000,
@@ -1925,39 +1945,13 @@ mod tests {
             settings: crate::config::Config::default(),
         };
         let mut app = App::new(cfg, Vec::new());
-        app.apply_event(
+        let (h, cmd_rx) = test_handles();
+        app.handle_event(
             UiEvent::ModelList(models.iter().map(|m| m.to_string()).collect()),
-            &dummy_handles(&[]),
+            &h,
         );
         assert!(matches!(app.mode, Mode::Select), "ModelList opens the picker");
-
-        let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (appr_tx, _appr_rx) = mpsc::channel();
-        let h = Handles {
-            join: std::thread::spawn(|| {}),
-            cmd_tx,
-            appr_tx,
-            shared: crate::agent::Shared {
-                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                perm: Arc::new(AtomicU8::new(0)),
-            },
-        };
         (app, h, cmd_rx)
-    }
-
-    fn dummy_handles(_: &[()]) -> Handles {
-        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
-        let (appr_tx, _appr_rx) = std::sync::mpsc::channel();
-        use std::sync::atomic::AtomicU8;
-        Handles {
-            join: std::thread::spawn(|| {}),
-            cmd_tx,
-            appr_tx,
-            shared: crate::agent::Shared {
-                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                perm: std::sync::Arc::new(AtomicU8::new(0)),
-            },
-        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
