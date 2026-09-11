@@ -1641,6 +1641,16 @@ impl App {
         self.prompt_str().chars().count()
     }
 
+    /// Wrap width for an ask_user question: `inner_width` is the panel's own
+    /// width (already inset by one column each side), less the `? ` lead that
+    /// hangs on the first row. The row height and the render both come from
+    /// here, so the panel can't reserve fewer rows than the question needs.
+    fn question_wrap_w(&self, inner_width: u16) -> usize {
+        (inner_width as usize)
+            .saturating_sub(helpers::QUESTION_LEAD.chars().count())
+            .max(1)
+    }
+
     /// Rows the composer text needs at this width (same in Idle and Busy).
     fn input_rows(&self, width: u16) -> u16 {
         let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
