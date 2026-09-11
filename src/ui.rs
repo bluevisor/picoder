@@ -517,6 +517,24 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent, h: &Handles) {
+        // Cycle the permission mode in any state, except while a masked prompt
+        // or an ask_user question is capturing every key. Shift+Tab is the
+        // primary binding: it arrives as BackTab on ANSI terminals, or as
+        // Tab+SHIFT under the Kitty keyboard protocol (which setup_terminal
+        // pushes) — so both spellings must be recognized, and neither may fall
+        // through to the composer's Tab autocomplete. The Pi's framebuffer
+        // console can't report Shift+Tab at all (its keymap has no shift
+        // binding for Tab), so Ctrl+P is the console-safe alias.
+        if !matches!(self.mode, Mode::Password { .. } | Mode::Question { .. }) {
+            let shift_tab = key.code == KeyCode::BackTab
+                || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+            let ctrl_p = matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+                && key.modifiers.contains(KeyModifiers::CONTROL);
+            if shift_tab || ctrl_p {
+                self.cycle_perm();
+                return;
+            }
+        }
         match self.mode {
             Mode::Password { .. } => self.on_key_password(key),
             Mode::Question { .. } => self.on_key_question(key),
