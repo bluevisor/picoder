@@ -257,8 +257,19 @@ impl App {
     }
 
     fn set_palette(&mut self, p: Palette) {
-        self.palette = p;
+        self.palette = self.terminal_safe(p);
         self.dirty();
+    }
+
+    /// Adapt a palette to what this terminal can actually display: a 16-color
+    /// console (the Pi's framebuffer) ignores truecolor escapes, so the theme's
+    /// `Rgb` shades have to be snapped to the nearest ANSI color first.
+    fn terminal_safe(&self, p: Palette) -> Palette {
+        if self.truecolor {
+            p
+        } else {
+            palette::for_16color(p)
+        }
     }
 
     fn after_push(&mut self) {
