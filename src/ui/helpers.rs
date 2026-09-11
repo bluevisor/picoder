@@ -75,6 +75,7 @@ pub fn fmt_cost(c: f64) -> String {
     }
 }
 
+
 fn expand_user(path: &str) -> std::path::PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
