@@ -159,6 +159,27 @@ pub struct App {
 /// Lines moved per arrow key / wheel notch. PgUp/PgDn move a full viewport.
 const SCROLL_STEP: isize = 3;
 
+/// Whether a blank separator line should precede an entry of kind `next` given
+/// the previous entry's kind. The transcript is made of distinct blocks — a
+/// turn's prose, its tool activity, and the next prompt — and without a gap they
+/// butt together into one wall of text. Only genuinely new blocks get a gap; a
+/// notice or an error that follows a tool stays attached to it.
+fn needs_sep(prev: Kind, next: Kind) -> bool {
+    use Kind::*;
+    let tool_like = |k: Kind| matches!(k, Tool | ToolResult | ToolErr | DiffAdd | DiffDel | DiffCtx);
+    match next {
+        // A new prompt opens a new turn: give it room above (but not above the
+        // launch banner, which already pads itself).
+        User => !matches!(prev, User | Banner | BannerDim),
+        // Separate the prose that precedes tool activity from the tools.
+        Tool => matches!(prev, Assistant | ToolResult | ToolErr | DiffAdd | DiffDel | DiffCtx),
+        // Separate the assistant's next words (prose or reasoning) from the tool
+        // activity that has just scrolled past.
+        Assistant | Reasoning => tool_like(prev),
+        _ => false,
+    }
+}
+
 /// Resolve a theme name for this terminal. A 16-color console (the Pi's
 /// framebuffer, `TERM=linux`) can't display a theme's `Rgb` shades at all — it
 /// emits the escape anyway, the console ignores the unknown parameters, and the
