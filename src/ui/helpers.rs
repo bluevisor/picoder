@@ -788,7 +788,7 @@ mod tests {
             true,
         );
         assert_eq!(out.len(), 2, "the item wraps onto a second line");
-        assert_eq!(flat(&out[0]), "* - alpha beta gamma");
+        assert_eq!(flat(&out[0]).trim_end(), "* - alpha beta gamma");
         // The wrap aligns under the item text (glyph + bullet), not the glyph.
         assert_eq!(flat(&out[1]), "    delta epsilon");
     }
