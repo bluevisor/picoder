@@ -147,8 +147,6 @@ pub struct App {
     git_checked_at: Option<Instant>,
 }
 
-const HINT_DOWN_GLYPH: &str = "down";
-
 /// Lines moved per arrow key / wheel notch. PgUp/PgDn move a full viewport.
 const SCROLL_STEP: isize = 3;
 
