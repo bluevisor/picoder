@@ -1030,9 +1030,6 @@ impl App {
                 self.submit(h);
                 return;
             }
-            KeyCode::BackTab => {
-                self.cycle_perm();
-            }
             // Scroll the output transcript; the input field is untouched.
             KeyCode::PageUp => self.scroll_page(true),
             KeyCode::PageDown => self.scroll_page(false),
