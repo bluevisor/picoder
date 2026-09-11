@@ -777,15 +777,7 @@ impl App {
         // arm guarded by `ctrl` would apply the guard to `Up` as well,
         // dropping plain arrow keys through to `_ => {}`.
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let step = match key.code {
-            KeyCode::Up => Some(-1isize),
-            KeyCode::Down => Some(1),
-            KeyCode::Char('k') if ctrl => Some(-1),
-            KeyCode::Char('j') if ctrl => Some(1),
-            KeyCode::PageUp => Some(-(PICKER_VISIBLE as isize)),
-            KeyCode::PageDown => Some(PICKER_VISIBLE as isize),
-            _ => None,
-        };
+        let step = picker_step_for_key(&key);
         if let Some(delta) = step {
             picker.step(delta);
             return;

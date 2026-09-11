@@ -281,3 +281,93 @@ pub fn ctrl_c_or_d(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
 }
+
+/// How far a key moves the `Picker` highlight, or `None` if it isn't a
+/// movement key and should be handled as filter input instead.
+///
+/// Plain arrows always work; `Ctrl+j`/`Ctrl+k` are the vi-style aliases, and
+/// the bare `j`/`k` characters deliberately stay out of it because the list is
+/// type-to-filter. PageUp/PageDown jump a whole visible window.
+pub fn picker_step_for_key(key: &KeyEvent) -> Option<isize> {
+    use ratatui::crossterm::event::KeyModifiers;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Up => Some(-1),
+        KeyCode::Down => Some(1),
+        KeyCode::Char('k') if ctrl => Some(-1),
+        KeyCode::Char('j') if ctrl => Some(1),
+        KeyCode::PageUp => Some(-(PICKER_VISIBLE as isize)),
+        KeyCode::PageDown => Some(PICKER_VISIBLE as isize),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn picker(n: usize) -> Picker {
+        Picker {
+            title: String::new(),
+            items: (0..n).map(|i| format!("m{i}")).collect(),
+            current: None,
+            filter: String::new(),
+            cursor: 0,
+            scroll: 0,
+            action: PickAction::Model,
+        }
+    }
+
+    #[test]
+    fn plain_arrows_move_the_cursor() {
+        let mut p = picker(5);
+        p.step(picker_step_for_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).unwrap());
+        assert_eq!(p.cursor, 1);
+        p.step(picker_step_for_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).unwrap());
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn plain_arrows_clamp_at_both_ends() {
+        let mut p = picker(3);
+        for _ in 0..5 {
+            p.step(picker_step_for_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).unwrap());
+        }
+        assert_eq!(p.cursor, 2);
+        for _ in 0..5 {
+            p.step(picker_step_for_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).unwrap());
+        }
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_j_k_alias_the_arrows_but_bare_j_k_are_filter_input() {
+        assert_eq!(
+            picker_step_for_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            Some(1)
+        );
+        assert_eq!(
+            picker_step_for_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            Some(-1)
+        );
+        assert_eq!(picker_step_for_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)), None);
+        assert_eq!(picker_step_for_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)), None);
+    }
+
+    #[test]
+    fn movement_respects_the_filter_and_scrolls() {
+        let mut p = picker(20);
+        p.filter = "m1".into(); // m1, m10..m19 => 11 rows
+        assert_eq!(p.filtered().len(), 11);
+        p.step(8);
+        assert_eq!(p.cursor, 8);
+        assert_eq!(p.scroll, 1, "cursor past the window scrolls the view");
+        p.step(100);
+        assert_eq!(p.cursor, 10);
+        assert_eq!(p.scroll + PICKER_VISIBLE, 11);
+        p.filter = "nope".into();
+        p.step(1);
+        assert_eq!((p.cursor, p.scroll), (0, 0), "empty filter list is safe");
+    }
+}
