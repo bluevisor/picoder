@@ -85,6 +85,12 @@ pub struct Config {
     pub price_in: f64,
     #[serde(default = "default_price_out")]
     pub price_out: f64,
+    /// Currency `price_in`/`price_out` are quoted in (ISO 4217). DeepSeek bills
+    /// China-region accounts in CNY while its published price lists are USD, so
+    /// this exists to keep the cost readout in the same units as the account
+    /// balance: set it to `CNY` together with the CNY price list.
+    #[serde(default = "default_price_currency")]
+    pub price_currency: String,
     /// MCP servers to launch, keyed by name (advertised as mcp__<name>__<tool>).
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
@@ -126,7 +132,7 @@ fn default_max_tool_calls() -> u32 {
 /// Provider presets: (name, base_url, default model) — the single source for
 /// the first-run wizard and the `/config` panel's provider row.
 pub const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
+    ("deepseek", "https://api.deepseek.com", "deepseek-v4-flash"),
     ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
     ("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"),
     ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
@@ -164,13 +170,15 @@ pub enum ConfigPatch {
     ContextWindow(u32),
     MaxToolCalls(u32),
     AuthMode(String),
+    /// ISO code the price list is quoted in (see `Config::price_currency`).
+    PriceCurrency(String),
 }
 
 fn default_theme() -> String {
     "Default".to_string()
 }
 fn default_ctx() -> u32 {
-    // Matches the default model, DeepSeek v4 Pro (1M-token context window).
+    // Matches the default model, DeepSeek v4 Flash (1M-token context window).
     1_000_000
 }
 
@@ -195,10 +203,14 @@ pub fn known_context_window(model: &str) -> u32 {
     }
 }
 fn default_price_in() -> f64 {
-    0.27
+    0.14
 }
 fn default_price_out() -> f64 {
-    1.10
+    0.28
+}
+/// The built-in prices are DeepSeek's USD list, so the default unit is USD.
+fn default_price_currency() -> String {
+    "USD".to_string()
 }
 
 impl Default for Config {
@@ -206,7 +218,7 @@ impl Default for Config {
         Config {
             provider: "deepseek".into(),
             base_url: "https://api.deepseek.com".into(),
-            model: "deepseek-v4-pro".into(),
+            model: "deepseek-v4-flash".into(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             oauth: BTreeMap::new(),
@@ -216,6 +228,7 @@ impl Default for Config {
             context_window_explicit: false,
             price_in: default_price_in(),
             price_out: default_price_out(),
+            price_currency: default_price_currency(),
             mcp_servers: BTreeMap::new(),
             auto_commit: true,
             thinking: false,
@@ -340,6 +353,16 @@ impl Config {
                 if let Some(n) = v.get("price_out").and_then(|x| x.as_f64()) {
                     cfg.price_out = n;
                 }
+                if let Some(s) = v.get("price_currency").and_then(|x| x.as_str()) {
+                    let s = s.trim().to_ascii_uppercase();
+                    // An empty or junk value keeps the documented default rather
+                    // than producing a unitless (or bogus-symbol) readout.
+                    cfg.price_currency = if s.is_empty() {
+                        default_price_currency()
+                    } else {
+                        s
+                    };
+                }
                 if let Some(m) = v.get("mcp_servers") {
                     if let Ok(servers) = serde_json::from_value(m.clone()) {
                         cfg.mcp_servers = servers;
@@ -437,6 +460,9 @@ impl Config {
         }
         if on_disk.price_out != default_price_out() {
             json["price_out"] = serde_json::json!(on_disk.price_out);
+        }
+        if on_disk.price_currency.to_ascii_uppercase() != default_price_currency() {
+            json["price_currency"] = serde_json::json!(on_disk.price_currency);
         }
         if on_disk.thinking {
             json["thinking"] = serde_json::json!(true);
@@ -540,6 +566,10 @@ impl Config {
             ConfigPatch::MaxToolCalls(n) => self.max_tool_calls = *n,
             ConfigPatch::AuthMode(m) => {
                 self.auth_mode = if m == "sub" { "sub".into() } else { "api".into() };
+            }
+            ConfigPatch::PriceCurrency(c) => {
+                let c = c.trim().to_ascii_uppercase();
+                self.price_currency = if c.is_empty() { default_price_currency() } else { c };
             }
         }
     }
