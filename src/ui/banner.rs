@@ -157,20 +157,34 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
 
     let p = palette::palette_by_name(theme);
     let w = (width as usize).saturating_sub(4).max(8);
-    let rainbow = if is_16color_terminal() { palette::APPLE_RAINBOW_16 } else { palette::APPLE_RAINBOW };
+    let sixteen = is_16color_terminal();
+    let rainbow = if sixteen { palette::APPLE_RAINBOW_16 } else { palette::APPLE_RAINBOW };
     let reset = "\x1b[0m";
 
     let mut out = String::new();
     for bl in banner_lines(w, ascii, status) {
         let prefix = match bl.role {
-            BRole::Art(i) => palette::ansi_fg(palette::banner_row_color(&p, &rainbow, i, is_16color_terminal())),
-            BRole::Version => format!("\x1b[1m{}", palette::ansi_fg(p.accent)),
-            BRole::Tagline => palette::ansi_fg(p.notice),
-            BRole::Frame | BRole::Data => palette::ansi_fg(p.accent),
+            BRole::Art(i) => palette::ansi_fg(palette::banner_row_color(&p, &rainbow, i, sixteen)),
+            // Accent/notice are the theme's own colors; on a 16-color console an
+            // `Rgb` prefix is an escape the console drops, so the frame/data
+            // text would inherit whatever color was last set.
+            BRole::Version => format!("\x1b[1m{}", palette::ansi_fg(snap(p.accent, sixteen))),
+            BRole::Tagline => palette::ansi_fg(snap(p.notice, sixteen)),
+            BRole::Frame | BRole::Data => palette::ansi_fg(snap(p.accent, sixteen)),
         };
         out.push_str(&format!("{prefix}{}{reset}\n", bl.text));
     }
     out
+}
+
+/// `nearest_16` only when this is a 16-color terminal, so a truecolor one keeps
+/// the theme's exact shades.
+fn snap(c: ratatui::style::Color, sixteen: bool) -> ratatui::style::Color {
+    if sixteen {
+        palette::nearest_16(c)
+    } else {
+        c
+    }
 }
 
 /// Push banner lines into the transcript as `TLine`s.
