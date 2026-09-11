@@ -88,9 +88,12 @@ pub struct App {
     q_input: String,
     q_reply: Option<std::sync::mpsc::Sender<Option<String>>>,
     follow: bool,
-    /// True when new content was pushed while the user was scrolled up. Shows a
-    /// "↓ new" indicator in the status bar.
+    /// True while the view is pinned above the live end: shows the scroll
+    /// affordance in the status bar.
     scrolled_up: bool,
+    /// Output arrived while the view was pinned, so the status bar hint can say
+    /// "↓ new" instead of the neutral "↓ end".
+    new_below: bool,
     scroll: usize,
     max_top: usize,
     view_h: usize,
@@ -173,6 +176,7 @@ impl App {
             q_reply: None,
             follow: true,
             scrolled_up: false,
+            new_below: false,
             scroll: 0,
             max_top: 0,
             view_h: 0,
@@ -259,6 +263,7 @@ impl App {
             self.scroll = self.max_top;
         } else {
             self.scrolled_up = true;
+            self.new_below = true;
         }
     }
 
@@ -1114,6 +1119,7 @@ impl App {
             if self.scroll >= self.max_top {
                 self.follow = true;
                 self.scrolled_up = false;
+                self.new_below = false;
             }
         }
     }
@@ -1131,6 +1137,7 @@ impl App {
     fn scroll_to_bottom(&mut self) {
         self.follow = true;
         self.scrolled_up = false;
+        self.new_below = false;
     }
 
     fn submit(&mut self, h: &Handles) {
@@ -1901,10 +1908,14 @@ impl App {
             Span::styled(format!("   picoder v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(self.dim_text())),
         ];
         if self.scrolled_up {
-            spans.push(Span::styled(
-                format!("  {down} new"),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ));
+            // "new" only when something actually arrived; a manual scroll-up
+            // just hints that the live end is below.
+            let (label, style) = if self.new_below {
+                (format!("{down} new"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else {
+                (format!("{down} end"), Style::default().fg(self.dim_text()))
+            };
+            spans.push(Span::styled(format!("  {label}"), style));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
