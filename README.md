@@ -159,7 +159,10 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | --- | --- |
 | `Enter` | send |
 | `Shift+Tab` / `Ctrl+P` | cycle permission mode |
-| `↑` / `↓` | history |
+| `↑` / `↓` | scroll the output (3 lines) |
+| `PgUp` / `PgDn` | scroll the output a page |
+| mouse wheel | scroll the output (when mouse capture is on) |
+| `Ctrl` / `Alt + ↑` / `↓` | composer history |
 | `Alt`/`Ctrl`/`Cmd + ←/→` | word / line motion |
 | `Option`/`Alt + Backspace` | delete word backward |
 | `Option`/`Alt + Delete` | delete word forward |
@@ -173,6 +176,12 @@ picoder enables the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/ke
 when the terminal supports it, so modified keys are reported unambiguously.
 Without it, some terminals (e.g. Warp in full-screen mode) flatten
 `Option+Backspace` to a plain Backspace.
+
+Mouse capture is skipped on Warp (`TERM_PROGRAM=WarpTerminal`) because it grabs
+click-drag text selection with no modifier to bypass it — Warp users scroll with
+`↑`/`↓` and `PgUp`/`PgDn` instead. Set `PICODER_MOUSE=1` to force capture on
+(wheel scrolling, at the cost of native selection), or `PICODER_MOUSE=0` to turn
+it off everywhere.
 
 ## Architecture
 
