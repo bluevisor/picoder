@@ -1318,7 +1318,9 @@ impl App {
             self.push(Kind::Notice, format!("  {name:<12} {desc}"));
         }
         self.push(Kind::Notice, String::from("  @file       attach a file"));
-        self.push(Kind::Notice, "  ↑/↓         browse history");
+        self.push(Kind::Notice, "  ↑/↓         scroll the output (3 lines)");
+        self.push(Kind::Notice, "  PgUp/PgDn   scroll the output a page");
+        self.push(Kind::Notice, "  Ctrl/Alt+↑/↓  browse history");
         self.push(Kind::Notice, String::from("  Tab         autocomplete"));
         self.push(Kind::Notice, String::from("  Shift+Tab   cycle permissions (ask / bypass / plan)"));
         self.push(Kind::Notice, String::from("  Esc         interrupt the agent"));
