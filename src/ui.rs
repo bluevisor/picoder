@@ -142,6 +142,9 @@ pub struct App {
     sess_prompt: u64,
     sess_completion: u64,
     balance: Option<money::Balance>,
+    /// True once the "balance and prices are in different currencies" notice
+    /// has been shown, so the per-turn balance refresh doesn't repeat it.
+    balance_units_flagged: bool,
     settings: Config,
     /// Current working directory shown in the output box title, with $HOME
     /// collapsed to `~`. Computed once at startup (picoder never chdirs).
@@ -211,6 +214,7 @@ impl App {
             sess_prompt: 0,
             sess_completion: 0,
             balance: None,
+            balance_units_flagged: false,
             settings: cfg.settings,
             cwd_label: cwd_label(),
             git_head: None,
@@ -395,6 +399,21 @@ impl App {
                 self.settings.auth_mode = m;
             }
             UiEvent::Balance(b) => {
+                // Point out a unit mismatch once (the balance is refetched every
+                // turn), with the fix, instead of silently printing two
+                // currencies on one line.
+                if b.currency != self.price_currency && !self.balance_units_flagged {
+                    self.balance_units_flagged = true;
+                    self.push(
+                        Kind::Notice,
+                        format!(
+                            "balance is in {} but prices are quoted in {} — set \"price_currency\": \"{}\" \
+                             and that currency's price list in ~/.config/picoder/config.json (price_in/price_out, \
+                             or the `price currency` row in /config) to compare them",
+                            b.currency.code, self.price_currency.code, b.currency.code
+                        ),
+                    );
+                }
                 self.balance = Some(b);
             }
             UiEvent::Notice(msg) => {
@@ -1967,8 +1986,8 @@ impl App {
 mod tests {
     use super::helpers::clean_text;
     use super::{
-        want_mouse_capture, App, Handles, KeyCode, KeyEvent, KeyModifiers, Mode, UiConfig, UiEvent,
-        WorkerCmd,
+        want_mouse_capture, App, ConfigPatch, Handles, KeyCode, KeyEvent, KeyModifiers, Mode,
+        UiConfig, UiEvent, WorkerCmd,
     };
 
     #[test]
@@ -2181,6 +2200,31 @@ mod tests {
         assert!(want_mouse_capture("iTerm.app", Some("maybe")));
     }
 
+    /// `/config` row 11 drives the cost unit: committing a code re-labels the
+    /// status line live and patches the worker so it also re-reads the balance
+    /// with that preference.
+    #[test]
+    fn the_config_panel_can_switch_the_price_currency() {
+        let (mut app, _h, cmd_rx) = select_app(&["m0"]);
+        app.mode = Mode::Idle;
+        app.settings.price_currency = "USD".into();
+        let (h2, cmd_rx2) = test_handles();
+
+        app.commit_setting(11, "cny".into(), &h2);
+        assert_eq!(app.price_currency.code, "CNY");
+        assert_eq!(app.settings.price_currency, "CNY");
+        assert!(
+            matches!(cmd_rx2.try_recv(), Ok(WorkerCmd::Patch(ConfigPatch::PriceCurrency(c))) if c == "CNY"),
+            "the worker is told so the balance preference follows"
+        );
+        // An unrecognized code keeps the user's text but prints it as-is, so the
+        // line is never silently mislabelled as dollars.
+        app.commit_setting(11, "xyz".into(), &h2);
+        assert_eq!(app.price_currency.code, "XYZ");
+        assert!(app.price_currency.symbol.is_empty());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
     /// The status line's two money readouts, as drawn. This is the bug being
     /// guarded: a hardcoded `$` on the cost while the balance rendered as `¥`.
     #[test]
@@ -2205,7 +2249,7 @@ mod tests {
         app.balance = Some(bal("CNY", "135.70"));
         let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
         let screen = draw(&mut app, &mut term);
-        assert!(screen.contains("$0.0280 USD"), "cost is unit-labelled:\n{screen}");
+        assert!(screen.contains("$0.03 USD"), "cost is unit-labelled:\n{screen}");
         assert!(screen.contains("bal ¥135.70 CNY"), "balance is too:\n{screen}");
 
         // Set the price currency to CNY (and use DeepSeek's CNY list) and the
@@ -2214,19 +2258,26 @@ mod tests {
         app.price_in = 1.0;
         app.price_out = 2.0;
         let screen = draw(&mut app, &mut term);
-        assert!(screen.contains("¥0.2000 · 150.0k tok"), "cost in CNY:\n{screen}");
+        assert!(screen.contains("¥0.20 · 150.0k tok"), "cost in CNY:\n{screen}");
         assert!(screen.contains("bal ¥135.70"), "balance in CNY:\n{screen}");
         assert!(!screen.contains("USD"), "no leftover USD:\n{screen}");
 
-        // A USD account with the default prices reads plainly, as before.
+        // A USD account with the default prices reads plainly, as before: no
+        // currency tags, because there is nothing to disambiguate.
         app.price_currency = crate::money::Currency::usd();
         app.price_in = 0.14;
         app.price_out = 0.28;
         app.balance = Some(bal("USD", "12.34"));
         let screen = draw(&mut app, &mut term);
-        assert!(screen.contains("$0.0280 · 150.0k tok"), "cost:\n{screen}");
+        assert!(screen.contains("$0.03 · 150.0k tok"), "cost:\n{screen}");
         assert!(screen.contains("bal $12.34"), "balance:\n{screen}");
         assert!(!screen.contains("CNY") && !screen.contains("USD"), "untagged when aligned:\n{screen}");
+
+        // Sub-cent sessions keep four decimals so a short turn isn't "$0.00".
+        app.sess_prompt = 10_000;
+        app.sess_completion = 0;
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("$0.0014 · 10.0k tok"), "sub-cent cost:\n{screen}");
     }
 
     /// The real render path: an overflowing transcript, a small screen, and the
