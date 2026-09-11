@@ -417,6 +417,8 @@ pub fn colors(kind: Kind, p: &Palette) -> (Style, Style) {
         Kind::DiffCtx => (s(p.diff_ctx), s(p.diff_ctx)),
         Kind::Notice => (s(p.notice), s(p.notice)),
         Kind::ErrorK => (s(p.error), s(p.error)),
+        // A separator line carries no text — style it like the page itself.
+        Kind::Blank => (Style::default(), Style::default()),
         Kind::Code => (s(p.code), s(p.code)),
         Kind::Heading => (bold(p.heading), s(p.assistant_glyph)),
         Kind::Banner => (bold(p.accent), s(p.accent)),

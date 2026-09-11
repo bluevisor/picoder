@@ -666,6 +666,7 @@ pub fn layout(kind: Kind, g: Glyphs) -> (usize, &'static str) {
         Kind::DiffAdd | Kind::DiffDel | Kind::DiffCtx => (4, ""),
         Kind::Notice => (2, ""),
         Kind::ErrorK => (0, g.error),
+        Kind::Blank => (0, ""),
         Kind::Code => (2, ""),
         Kind::Heading => (0, g.assistant),
         Kind::Banner | Kind::BannerDim => (0, ""),

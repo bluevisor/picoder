@@ -28,6 +28,8 @@ pub enum Kind {
     DiffCtx,
     Notice,
     ErrorK,
+    /// A deliberate blank separator line between transcript blocks.
+    Blank,
     #[allow(dead_code)] Code,
     #[allow(dead_code)] Heading,
     #[allow(dead_code)] Banner,
