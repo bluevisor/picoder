@@ -243,7 +243,31 @@ fn eat_escape(it: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Render one transcript entry. The text may carry embedded newlines (tool
+/// results, diffs, error dumps), so it is split first: each source line is
+/// wrapped on its own, and only the very first gets the leading glyph. Handing
+/// the whole multi-line string to the wrapper would collapse the newlines into
+/// spaces and reflow the entry into a single paragraph, which garbles anything
+/// line-structured like `ls` or a stack trace.
+#[allow(clippy::too_many_arguments)]
 pub fn render_tline(
+    out: &mut Vec<Line<'static>>,
+    kind: Kind,
+    text: &str,
+    lead: bool,
+    color: Option<BannerColor>,
+    width: usize,
+    g: Glyphs,
+    p: &Palette,
+    single_width: bool,
+) {
+    for (i, raw) in text.split('\n').enumerate() {
+        render_one_line(out, kind, raw, lead && i == 0, color, width, g, p, single_width);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_one_line(
     out: &mut Vec<Line<'static>>,
     kind: Kind,
     text: &str,
