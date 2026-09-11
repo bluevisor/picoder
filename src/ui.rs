@@ -2116,7 +2116,9 @@ mod tests {
     fn sending_a_message_echoes_the_prompt_into_the_transcript() {
         let (mut app, h) = scrollable_app();
         app.mode = Mode::Idle;
-        app.submit_text("rename the field", &h);
+        app.input = "rename the field".to_string();
+        app.cursor = app.input.chars().count();
+        app.submit(&h);
         let echoed = app
             .transcript
             .iter()
