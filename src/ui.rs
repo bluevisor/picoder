@@ -542,16 +542,7 @@ impl App {
             .sum()
     }
 
-    /// The palette the App starts with, already adapted to the terminal: on a
-    /// 16-color console the theme's RGB shades are snapped to ANSI colors.
-    fn initial_palette(theme: &str) -> Palette {
-        let p = palette_by_name(theme);
-        if detect_truecolor() {
-            p
-        } else {
-            palette::for_16color(p)
-        }
-    }
+    fn char_len(&self) -> usize {
         self.input.chars().count()
     }
 
