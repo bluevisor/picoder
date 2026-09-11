@@ -1263,12 +1263,6 @@ impl App {
         let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
     }
 
-    fn prepare_message(&self, text: String) -> (String, Vec<String>) {
-        let (task_text, _attached) = expand_attachments(&text);
-        let (images, _img_names) = extract_images(&text);
-        (task_text, images)
-    }
-
     fn open_login_picker(&mut self) {
         use crate::auth;
         self.picker = Some(Picker {
