@@ -860,9 +860,12 @@ impl App {
                 }
             }
             KeyCode::Enter => self.queue_input(),
-            // Scroll the output transcript while the agent runs.
-            KeyCode::PageUp => self.scroll_up(),
-            KeyCode::PageDown => self.scroll_down(),
+            // Scroll the output transcript while the agent runs; the queued
+            // composer line stays put.
+            KeyCode::Up => self.scroll_lines(-SCROLL_STEP),
+            KeyCode::Down => self.scroll_lines(SCROLL_STEP),
+            KeyCode::PageUp => self.scroll_page(true),
+            KeyCode::PageDown => self.scroll_page(false),
             _ => {}
         }
     }
@@ -931,13 +934,18 @@ impl App {
             }
             KeyCode::Backspace => self.on_key_edit(key),
             KeyCode::Delete => self.delete_word_forward(),
+            // Modified arrows: Alt/Ctrl+←/→ move by word, Alt/Ctrl+↑/↓ walk the
+            // composer history (plain arrows are the transcript scroll below).
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
                 if key.modifiers.contains(KeyModifiers::ALT)
                     || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.suggest_idx = 0;
                 match key.code {
                     KeyCode::Left => self.cursor = self.prev_word(),
                     KeyCode::Right => self.cursor = self.next_word(),
+                    KeyCode::Up => self.history_prev(),
+                    KeyCode::Down => self.history_next(),
                     _ => {}
                 }
             }
@@ -951,17 +959,11 @@ impl App {
                     self.cursor += 1;
                 }
             }
-            KeyCode::Up | KeyCode::Down
-                if !key.modifiers.contains(KeyModifiers::ALT)
-                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.suggest_idx = 0;
-                if key.code == KeyCode::Up {
-                    self.history_prev();
-                } else {
-                    self.history_next();
-                }
-            }
+            // Plain arrows roll the transcript output. This is the gesture that
+            // works on every terminal — Warp (and any terminal where we skip
+            // mouse capture) delivers no scroll-wheel events at all.
+            KeyCode::Up => self.scroll_lines(-SCROLL_STEP),
+            KeyCode::Down => self.scroll_lines(SCROLL_STEP),
             KeyCode::Enter => {
                 self.last_ctrl_c = None;
                 self.submit(h);
@@ -971,8 +973,8 @@ impl App {
                 self.cycle_perm();
             }
             // Scroll the output transcript; the input field is untouched.
-            KeyCode::PageUp => self.scroll_up(),
-            KeyCode::PageDown => self.scroll_down(),
+            KeyCode::PageUp => self.scroll_page(true),
+            KeyCode::PageDown => self.scroll_page(false),
             _ => {}
         }
     }
