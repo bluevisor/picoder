@@ -1905,6 +1905,103 @@ mod tests {
         assert_eq!(clean_text("héllo", true), "héllo");
         assert_eq!(clean_text("🚀\t", false), "🚀    ");
     }
+
+    /// Drives the real key path (`App::on_key` → `Mode::Select`) that the
+    /// `/model` picker uses, since a mis-guarded match arm silently swallowed
+    /// plain Up/Down while Ctrl+j/k still worked.
+    fn select_app(models: &[&str]) -> (App, Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
+        use std::sync::atomic::AtomicU8;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+
+        let cfg = UiConfig {
+            model: "a".into(),
+            theme: "Default".into(),
+            ascii: false,
+            ctx_limit: 128_000,
+            price_in: 0.0,
+            price_out: 0.0,
+            perm: Arc::new(AtomicU8::new(0)),
+            settings: crate::config::Config::default(),
+        };
+        let mut app = App::new(cfg, Vec::new());
+        app.apply_event(
+            UiEvent::ModelList(models.iter().map(|m| m.to_string()).collect()),
+            &dummy_handles(&[]),
+        );
+        assert!(matches!(app.mode, Mode::Select), "ModelList opens the picker");
+
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (appr_tx, _appr_rx) = mpsc::channel();
+        let h = Handles {
+            join: std::thread::spawn(|| {}),
+            cmd_tx,
+            appr_tx,
+            shared: crate::agent::Shared {
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                perm: Arc::new(AtomicU8::new(0)),
+            },
+        };
+        (app, h, cmd_rx)
+    }
+
+    fn dummy_handles(_: &[()]) -> Handles {
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let (appr_tx, _appr_rx) = std::sync::mpsc::channel();
+        use std::sync::atomic::AtomicU8;
+        Handles {
+            join: std::thread::spawn(|| {}),
+            cmd_tx,
+            appr_tx,
+            shared: crate::agent::Shared {
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                perm: std::sync::Arc::new(AtomicU8::new(0)),
+            },
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn model_picker_moves_with_arrows_and_enters_the_highlighted_model() {
+        let (mut app, h, cmd_rx) = select_app(&["m0", "m1", "m2"]);
+
+        app.on_key(key(KeyCode::Down), &h);
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.picker.as_ref().unwrap().cursor, 2, "Down moves down");
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.picker.as_ref().unwrap().cursor, 1, "Up moves back up");
+
+        app.on_key(key(KeyCode::Enter), &h);
+        assert!(matches!(app.mode, Mode::Idle), "Enter closes the picker");
+        assert!(app.picker.is_none());
+        assert!(
+            matches!(cmd_rx.try_recv(), Ok(WorkerCmd::SetModel(m)) if m == "m1"),
+            "Enter selects the highlighted model"
+        );
+    }
+
+    #[test]
+    fn model_picker_arrows_still_work_above_the_first_row() {
+        let (mut app, h, _rx) = select_app(&["m0", "m1"]);
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.picker.as_ref().unwrap().cursor, 0, "clamped at the top");
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT), &h);
+        assert_eq!(app.picker.as_ref().unwrap().cursor, 1, "shifted arrows work too");
+    }
+
+    #[test]
+    fn model_picker_types_to_filter_without_stealing_j_k() {
+        let (mut app, h, _rx) = select_app(&["deepseek-chat", "gpt-4o", "kimi-k2"]);
+        for c in "kimi".chars() {
+            app.on_key(key(KeyCode::Char(c)), &h);
+        }
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.filter, "kimi");
+        assert_eq!(p.filtered(), vec![2], "'k' filtered instead of moving up");
+    }
 }
 
 /// The UI event loop. Owns the terminal; returns when the user quits.
