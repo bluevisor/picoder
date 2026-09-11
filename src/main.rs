@@ -399,6 +399,7 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     let ctx_limit = cfg.context_window;
     let price_in = cfg.price_in;
     let price_out = cfg.price_out;
+    let price_currency = money::Currency::parse(&cfg.price_currency);
     let settings = cfg.clone();
     let perm_start = if auto {
         agent::PERM_AUTO
@@ -430,6 +431,7 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
             ctx_limit,
             price_in,
             price_out,
+            price_currency,
             perm: h.shared.perm.clone(),
             settings,
         },
