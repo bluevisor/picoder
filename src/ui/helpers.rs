@@ -270,15 +270,18 @@ pub const QUESTION_MAX_ROWS: usize = 6;
 /// A prompt longer than the cap ends in an ellipsis, so a clipped question is
 /// never mistaken for the whole thing.
 pub fn question_lines(prompt: &str, width: usize, single_width: bool) -> Vec<String> {
-    let clean = clean_text(prompt, single_width);
     let w = width.max(1);
     let mut out: Vec<String> = Vec::new();
-    for raw in clean.split('\n') {
-        if raw.is_empty() {
+    // Split *before* cleaning: `clean_text` drops control characters, so a
+    // newline handed to it first would be eaten and the question would collapse
+    // into one run-on paragraph.
+    for raw in prompt.split('\n') {
+        let clean = clean_text(raw, single_width);
+        if clean.is_empty() {
             out.push(String::new());
             continue;
         }
-        out.extend(textwrap::wrap(raw, w).into_iter().map(|c| c.into_owned()));
+        out.extend(textwrap::wrap(&clean, w).into_iter().map(|c| c.into_owned()));
     }
     if out.is_empty() {
         out.push(String::new());
