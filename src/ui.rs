@@ -2042,6 +2042,22 @@ mod tests {
         assert!(app.follow, "returning to the live end resumes following");
         assert!(!app.scrolled_up);
 
+        app.on_key(key(KeyCode::Up), &h);
+        assert!(app.scrolled_up);
+        assert!(!app.new_below, "a manual scroll-up has nothing new below");
+
+        // New output while pinned flags the hint as "new" and leaves the
+        // user's reading position alone.
+        app.handle_event(UiEvent::Token("streaming".into()), &h);
+        app.handle_event(UiEvent::AssistantCommit, &h);
+        assert!(app.new_below, "arriving output is flagged as new");
+        assert!(!app.follow, "...without yanking the view to the bottom");
+        assert_eq!(app.scroll, 37, "the reading position is preserved");
+
+        app.on_key(key(KeyCode::Down), &h);
+        assert!(app.follow);
+        assert!(!app.scrolled_up && !app.new_below, "hint clears at the end");
+
         // Ctrl+Up is where history recall lives now.
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), &h);
         assert_eq!(app.input, "second", "Ctrl+Up recalls the previous prompt");
@@ -2070,6 +2086,7 @@ mod tests {
         app.max_top = 0;
         app.follow = true;
         app.scrolled_up = false;
+        app.new_below = false;
         app.on_key(key(KeyCode::Up), &h);
         assert_eq!((app.scroll, app.follow, app.scrolled_up), (0, true, false));
     }
@@ -2097,6 +2114,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &h);
         assert!(app.follow, "Enter returns to the live end for the reply");
         assert!(!app.scrolled_up, "and drops the new-output hint");
+        assert!(!app.new_below);
     }
 
     #[test]
