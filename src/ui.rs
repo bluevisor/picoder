@@ -1496,7 +1496,8 @@ impl App {
         self.push(Kind::Notice, "  Ctrl/Alt+↑/↓  browse history");
         self.push(Kind::Notice, String::from("  Tab         autocomplete"));
         self.push(Kind::Notice, String::from("  Shift+Tab   cycle permissions (ask / bypass / plan)"));
-        self.push(Kind::Notice, String::from("  Esc         interrupt the agent"));
+        self.push(Kind::Notice, String::from("  Esc         interrupt the agent / clear the line"));
+        self.push(Kind::Notice, String::from("  Ctrl+C      clear the line (twice = quit)"));
         self.push(Kind::Notice, String::from("  Ctrl+L      force clear/repaint"));
     }
 

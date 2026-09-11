@@ -57,6 +57,9 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Streaming with a Claude-style composer (`›`, reverse-block cursor, placeholder).
 - Context compaction: `/compact` summarizes older turns (keeping the system
   prefix and latest exchange); auto-triggers at 80% of the context window.
+- `Ctrl+C` clears a draft line and quits on a second press inside the
+  double-press window (a non-empty composer used to swallow it entirely);
+  `Esc` clears the line too.
 - Queued input: the composer stays live while the agent works — Enter queues
   messages that send in order as turns finish (Esc interrupts and restores them).
 - One-shot `--output FILE` writes the final reply to disk after the run.

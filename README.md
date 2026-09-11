@@ -200,7 +200,7 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `Tab` | autocomplete commands / paths |
 | `Ctrl+L` | redraw screen |
 | `Esc` | interrupt turn / clear line |
-| `Ctrl+C` | quit (press twice) |
+| `Ctrl+C` | clear line, or quit (press twice) |
 
 picoder enables the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
 when the terminal supports it, so modified keys are reported unambiguously.
