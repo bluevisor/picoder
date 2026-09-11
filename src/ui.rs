@@ -2010,40 +2010,6 @@ mod tests {
         assert_eq!(clean_text("🚀\t", false), "🚀    ");
     }
 
-    #[test]
-    fn zz_debug_dump_colors() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let mut app = App::new(test_ui_config(), Vec::new());
-        app.transcript.clear();
-        app.push(crate::ui::types::Kind::User, "hello there user".to_string());
-        app.transcript.push(crate::ui::types::TLine {
-            kind: crate::ui::types::Kind::Assistant,
-            text: "# Heading\nnormal **bold** and `code` text\n- a bullet item\n```\nlet x = 1;\n```\ntrailing para".to_string(),
-            lead: true,
-            color: None,
-        });
-        app.push(crate::ui::types::Kind::Tool, "bash ls -la".to_string());
-        app.push(crate::ui::types::Kind::ToolResult, "file1 file2".to_string());
-        app.push(crate::ui::types::Kind::Notice, "a notice line".to_string());
-        let mut term = Terminal::new(TestBackend::new(60, 24)).unwrap();
-        term.draw(|f| app.render(f)).unwrap();
-        let buf = term.backend().buffer();
-        let area = *buf.area();
-        for y in 0..area.height {
-            let mut row = String::new();
-            for x in 0..area.width {
-                let c = &buf[(x, y)];
-                row.push_str(&format!("{:?}/{:?}", c.fg, c.bg));
-                row.push('|');
-            }
-            let sym: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
-            println!("y{y:2} {sym:?}");
-            println!("      {row}");
-        }
-    }
-
     /// A `Handles` backed by throwaway channels, plus the receiver so a test
     /// can assert what the UI sent to the worker.
     fn test_handles() -> (Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
