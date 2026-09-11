@@ -2109,8 +2109,16 @@ pub fn setup_terminal() -> std::io::Result<Terminal<ratatui::backend::CrosstermB
     // Warp on macOS has no modifier to bypass a grabbed mouse, so users can't
     // select text at all — skip capture there and keep native selection. Other
     // terminals (iTerm, etc.) let you hold Option/Fn to select, so capture stays.
-    let warp = std::env::var("TERM_PROGRAM").map(|v| v == "WarpTerminal").unwrap_or(false);
-    if !warp {
+    // PICODER_MOUSE=1 forces capture on anyway (wheel scrolling beats native
+    // selection for some users); PICODER_MOUSE=0 forces it off everywhere.
+    let prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let warp = prog == "WarpTerminal";
+    let mouse = match std::env::var("PICODER_MOUSE").ok().as_deref() {
+        Some("1") | Some("true") | Some("on") | Some("yes") => true,
+        Some("0") | Some("false") | Some("off") | Some("no") => false,
+        _ => !warp,
+    };
+    if mouse {
         let _ = execute!(std::io::stdout(), event::EnableMouseCapture);
     }
     // Ask the terminal to report modified keys unambiguously (Kitty keyboard
