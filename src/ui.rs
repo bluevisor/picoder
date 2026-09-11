@@ -1885,6 +1885,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::helpers::clean_text;
+    use super::{App, Handles, KeyCode, KeyEvent, KeyModifiers, Mode, UiEvent, UiConfig, WorkerCmd};
 
     #[test]
     fn clean_text_passes_plain_text_through_borrowed() {
