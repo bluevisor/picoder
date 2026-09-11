@@ -771,29 +771,35 @@ impl App {
             self.mode = Mode::Idle;
             return;
         };
+        // Plain arrows move the cursor; Ctrl+j/k are the vi-style aliases
+        // (bare j/k stay filter input, since the list is type-to-filter).
+        // This runs before the key match below because an `Up | Char('k')`
+        // arm guarded by `ctrl` would apply the guard to `Up` as well,
+        // dropping plain arrow keys through to `_ => {}`.
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let step = match key.code {
+            KeyCode::Up => Some(-1isize),
+            KeyCode::Down => Some(1),
+            KeyCode::Char('k') if ctrl => Some(-1),
+            KeyCode::Char('j') if ctrl => Some(1),
+            KeyCode::PageUp => Some(-(PICKER_VISIBLE as isize)),
+            KeyCode::PageDown => Some(PICKER_VISIBLE as isize),
+            _ => None,
+        };
+        if let Some(delta) = step {
+            let len = picker.filtered().len();
+            if len > 0 {
+                let last = len as isize - 1;
+                picker.cursor = (picker.cursor as isize + delta).clamp(0, last) as usize;
+            }
+            picker.clamp(len);
+            return;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Idle;
                 self.picker = None;
-            }
-            // Plain arrows move the cursor; Ctrl+j/k are the vi-style
-            // aliases (bare j/k are filter input, since the list is
-            // type-to-filter).
-            KeyCode::Up
-            | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let len = picker.filtered().len();
-                if len > 0 {
-                    picker.cursor = picker.cursor.saturating_sub(1).max(0);
-                    picker.clamp(len);
-                }
-            }
-            KeyCode::Down
-            | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let len = picker.filtered().len();
-                if len > 0 {
-                    picker.cursor = (picker.cursor + 1).min(len - 1);
-                    picker.clamp(len);
-                }
             }
             KeyCode::Enter => {
                 let filtered = picker.filtered();
@@ -816,7 +822,8 @@ impl App {
                 let len = picker.filtered().len();
                 picker.clamp(len.max(1));
             }
-            KeyCode::Char(c) => {
+            // Ctrl-modified chars are shortcuts, not filter input.
+            KeyCode::Char(c) if !ctrl => {
                 picker.filter.push(caps_char(&key, c));
                 let len = picker.filtered().len();
                 picker.clamp(len.max(1));
