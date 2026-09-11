@@ -23,18 +23,27 @@ pub fn pad1(r: Rect) -> Rect {
 /// A solid mini progress bar. At normal usage it's the theme `accent`, then
 /// escalates to amber → red as context fills, so it both matches the theme and
 /// still warns. The empty track is a dimmed shade of the fill's hue, so the bar
-/// reads as one element.
+/// reads as one element. On a 16-color terminal the amber/red and the track are
+/// named ANSI colors instead: an RGB would be emitted as an escape sequence the
+/// console ignores, leaving the bar in whatever color was last set.
 pub fn bar(frac: f64, width: usize, accent: Color) -> Vec<Span<'static>> {
     let frac = frac.clamp(0.0, 1.0);
     let filled = (frac * width as f64).round() as usize;
+    let sixteen = is_16color_terminal();
     let fill = if frac < 0.8 {
         accent
     } else if frac < 0.95 {
-        Color::Rgb(220, 190, 50)
+        if sixteen {
+            Color::Yellow
+        } else {
+            Color::Rgb(220, 190, 50)
+        }
+    } else if sixteen {
+        Color::Red
     } else {
         Color::Rgb(220, 70, 70)
     };
-    let track = track_color(accent);
+    let track = if sixteen { Color::Black } else { track_color(accent) };
     let mut v = Vec::new();
     if filled > 0 {
         v.push(Span::styled(" ".repeat(filled), Style::default().bg(fill)));
