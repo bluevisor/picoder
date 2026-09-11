@@ -462,6 +462,19 @@ impl App {
     }
 
     fn insert_char(&mut self, c: char) {
+        // Never let a control character into the composer buffer. A pasted
+        // snippet copied from a colored terminal (or a log file) carries raw
+        // ESC sequences; drawn into the frame they desync the terminal from
+        // ratatui's cell grid, so the rest of the screen — transcript included —
+        // comes out in the wrong colors until a full repaint. Tabs are kept as
+        // spaces for the same reason clean_text expands them.
+        let c = if c == '\t' {
+            ' '
+        } else if c.is_control() {
+            return;
+        } else {
+            c
+        };
         let pos = self.byte_at(self.cursor);
         self.input.insert(pos, c);
         self.cursor += 1;
