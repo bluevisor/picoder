@@ -2129,6 +2129,70 @@ mod tests {
         assert!(matches!(app.mode, Mode::Busy), "still busy, not interrupted");
     }
 
+    /// The real render path: an overflowing transcript, a small screen, and the
+    /// status bar read back from the backend buffer. Guards against the scroll
+    /// state being right while nothing visible changes.
+    fn draw(app: &mut App, term: &mut ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        term.draw(|f| app.render(f)).unwrap();
+        let buf = term.backend().buffer();
+        let area = *buf.area();
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_output_actually_moves_and_the_hint_shows_in_the_rendered_screen() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (mut app, h) = scrollable_app();
+        app.max_top = 0;
+        app.view_h = 0;
+        for i in 0..80 {
+            app.note(format!("transcript line {i}"));
+        }
+        let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
+
+        let first = draw(&mut app, &mut term); // sets max_top from the real layout
+        assert!(app.max_top > 0, "the test transcript overflows the view");
+        assert!(first.contains("transcript line 79"), "the live end is visible");
+        assert!(!first.contains("end"), "no hint while following");
+
+        app.on_key(key(KeyCode::Up), &h);
+        let scrolled = draw(&mut app, &mut term);
+        assert!(
+            !scrolled.contains("transcript line 79"),
+            "the live end scrolled off the bottom"
+        );
+        assert!(
+            scrolled.contains("↓ end"),
+            "the status bar advertises the live end below:\n{scrolled}"
+        );
+        assert!(!scrolled.contains("↓ new"), "nothing new arrived yet");
+
+        // Streaming while pinned keeps the position and flips the hint to "new".
+        let before = app.scroll;
+        app.handle_event(UiEvent::Token("a fresh reply".into()), &h);
+        app.handle_event(UiEvent::AssistantCommit, &h);
+        let streaming = draw(&mut app, &mut term);
+        assert_eq!(app.scroll, before, "the reading position is preserved");
+        assert!(
+            streaming.contains("↓ new"),
+            "new output is called out:\n{streaming}"
+        );
+
+        app.on_key(key(KeyCode::PageDown), &h);
+        let bottom = draw(&mut app, &mut term);
+        assert!(bottom.contains("a fresh reply"), "PgDn returns to the live end");
+        assert!(!bottom.contains("end") && !bottom.contains("new"));
+    }
+
     #[test]
     fn model_picker_moves_with_arrows_and_enters_the_highlighted_model() {
         let (mut app, h, cmd_rx) = select_app(&["m0", "m1", "m2"]);
