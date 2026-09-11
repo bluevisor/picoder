@@ -298,6 +298,82 @@ pub fn color_to_rgb(c: Color) -> (u8, u8, u8) {
     }
 }
 
+/// The sixteen ANSI colors with their conventional RGB values (the xterm
+/// defaults), used to snap a theme color onto a palette the terminal can show.
+pub const ANSI16: [(Color, (u8, u8, u8)); 16] = [
+    (Color::Black, (0, 0, 0)),
+    (Color::Red, (205, 0, 0)),
+    (Color::Green, (0, 205, 0)),
+    (Color::Yellow, (205, 205, 0)),
+    (Color::Blue, (0, 0, 238)),
+    (Color::Magenta, (205, 0, 205)),
+    (Color::Cyan, (0, 205, 205)),
+    (Color::Gray, (229, 229, 229)),
+    (Color::DarkGray, (127, 127, 127)),
+    (Color::LightRed, (255, 0, 0)),
+    (Color::LightGreen, (0, 255, 0)),
+    (Color::LightYellow, (255, 255, 0)),
+    (Color::LightBlue, (92, 92, 255)),
+    (Color::LightMagenta, (255, 0, 255)),
+    (Color::LightCyan, (0, 255, 255)),
+    (Color::White, (255, 255, 255)),
+];
+
+/// Snap an arbitrary color to the nearest of the sixteen ANSI colors. A terminal
+/// with only 16 colors can't display an `Rgb` value at all: crossterm still
+/// writes the `ESC[38;2;…m` sequence, the console ignores the unknown
+/// parameters, and every cell that asked for a specific shade keeps whatever
+/// color was last in effect — which is precisely how a themed UI ends up with
+/// "random" colors on the Pi's framebuffer console. Named colors and `Reset` are
+/// already safe, so they pass through.
+pub fn nearest_16(c: Color) -> Color {
+    if !matches!(c, Color::Rgb(..)) {
+        return c;
+    }
+    let (r, g, b) = color_to_rgb(c);
+    let dist = |(r2, g2, b2): (u8, u8, u8)| {
+        let d = |x: u8, y: u8| (x as i32 - y as i32).pow(2);
+        d(r, r2) + d(g, g2) + d(b, b2)
+    };
+    ANSI16
+        .iter()
+        .min_by_key(|(_, rgb)| dist(*rgb))
+        .map(|(col, _)| *col)
+        .unwrap_or(c)
+}
+
+/// Down-convert every truecolor in a palette for a 16-color terminal, so a
+/// theme still reads (green stays green, dim stays dim) instead of relying on
+/// escape sequences the console silently drops. `user_bg` is special-cased to
+/// `DarkGray`: the nearest-color metric would pick black for every theme's very
+/// dark band, erasing the highlight entirely, whereas a gray band is what the
+/// MSDOS palette already uses by hand.
+pub fn for_16color(mut p: Palette) -> Palette {
+    p.accent = nearest_16(p.accent);
+    p.assistant = nearest_16(p.assistant);
+    p.assistant_glyph = nearest_16(p.assistant_glyph);
+    p.reasoning = nearest_16(p.reasoning);
+    p.tool = nearest_16(p.tool);
+    p.tool_result = nearest_16(p.tool_result);
+    p.notice = nearest_16(p.notice);
+    p.code = nearest_16(p.code);
+    p.heading = nearest_16(p.heading);
+    p.diff_add = nearest_16(p.diff_add);
+    p.diff_del = nearest_16(p.diff_del);
+    p.diff_ctx = nearest_16(p.diff_ctx);
+    p.error = nearest_16(p.error);
+    p.mono_banner = p.mono_banner.map(nearest_16);
+    p.chrome = nearest_16(p.chrome);
+    p.secondary = nearest_16(p.secondary);
+    p.user_bg = if p.user_bg == Color::Reset { Color::Reset } else { Color::DarkGray };
+    // A themed background must not be left as an unshaded RGB either — but
+    // black is the only 16-color choice that stays out of the way, and it is
+    // what every one of these themes is approximating.
+    p.bg = if p.bg == Color::Reset { Color::Reset } else { Color::Black };
+    p
+}
+
+
 /// Darken `c` by the row-`i` shade factor for the banner gradient.
 pub fn shade(c: Color, i: usize) -> Color {
     let (r, g, b) = color_to_rgb(c);
