@@ -351,8 +351,14 @@ mod picker_tests {
             picker_step_for_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
             Some(-1)
         );
-        assert_eq!(picker_step_for_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)), None);
-        assert_eq!(picker_step_for_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)), None);
+        assert_eq!(
+            picker_step_for_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            picker_step_for_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            None
+        );
     }
 
     #[test]
