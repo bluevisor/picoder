@@ -251,6 +251,51 @@ fn eat_escape(it: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
+/// Lead glyph for the ask_user question panel: the model is asking, the answer
+/// goes on the row below it. Both the panel's height and its wrap width derive
+/// from this, so the two can't drift apart.
+pub const QUESTION_LEAD: &str = "? ";
+
+/// Most rows an ask_user question panel shows before it clips. The panel shares
+/// the screen with the transcript, so one runaway question can't be allowed to
+/// eat the whole view.
+pub const QUESTION_MAX_ROWS: usize = 6;
+
+/// The wrapped, sanitized rows of an ask_user question, at most
+/// [`QUESTION_MAX_ROWS`] of them. The prompt is model text, so it goes through
+/// [`clean_text`] like every other drawn string (a raw newline or ANSI escape
+/// in a question would either break the frame or spill its colors), and it
+/// keeps its own line structure — the same split-then-wrap rule transcript
+/// entries follow, so a multi-line question isn't reflowed into one paragraph.
+/// A prompt longer than the cap ends in an ellipsis, so a clipped question is
+/// never mistaken for the whole thing.
+pub fn question_lines(prompt: &str, width: usize, single_width: bool) -> Vec<String> {
+    let clean = clean_text(prompt, single_width);
+    let w = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for raw in clean.split('\n') {
+        if raw.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        out.extend(textwrap::wrap(raw, w).into_iter().map(|c| c.into_owned()));
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    if out.len() > QUESTION_MAX_ROWS {
+        out.truncate(QUESTION_MAX_ROWS);
+        let ellipsis = if single_width { "..." } else { "…" };
+        let last = out.last_mut().unwrap();
+        // Trim the clipped row so the marker itself still fits the width.
+        while last.chars().count() + ellipsis.chars().count() > w {
+            last.pop();
+        }
+        last.push_str(ellipsis);
+    }
+    out
+}
+
 /// Render one transcript entry. The text may carry embedded newlines (tool
 /// results, diffs, error dumps), so it is split first: each source line is
 /// wrapped on its own, and only the very first gets the leading glyph. Handing
