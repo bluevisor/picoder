@@ -128,6 +128,7 @@ pub const SETTING_LABELS: &[&str] = &[
     "theme",
     "context window",
     "max tool calls",
+    "price currency",
 ];
 
 #[derive(Clone, Copy)]
@@ -247,6 +248,8 @@ pub struct UiConfig {
     pub ctx_limit: u32,
     pub price_in: f64,
     pub price_out: f64,
+    /// Unit `price_in`/`price_out` are quoted in (ISO 4217).
+    pub price_currency: crate::money::Currency,
     pub perm: std::sync::Arc<std::sync::atomic::AtomicU8>,
     /// Snapshot for the `/config` panel; kept in sync as patches are sent.
     pub settings: crate::config::Config,
