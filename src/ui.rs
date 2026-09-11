@@ -164,9 +164,32 @@ pub struct App {
 /// Lines moved per arrow key / wheel notch. PgUp/PgDn move a full viewport.
 const SCROLL_STEP: isize = 3;
 
+/// Whether the terminal advertises 24-bit color. `COLORTERM=truecolor|24bit` is
+/// the signal every modern terminal sends; the 16-color consoles (`linux`,
+/// `dumb`, `vt100`) never set it. A truecolor-capable terminal that leaves
+/// `COLORTERM` unset is still handled, just with the palette snapped to ANSI —
+/// visible, if less pretty, which beats emitting escapes the terminal drops.
+fn detect_truecolor() -> bool {
+    matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor") | Ok("24bit"))
+        || matches!(std::env::var("TERM").as_deref(), Ok(t) if t.contains("truecolor") || t.contains("direct"))
+}
+
+/// Resolve a theme name for this terminal: a 16-color console gets the theme
+/// with its RGB shades snapped to the nearest ANSI colors (see
+/// `palette::for_16color`).
+fn palette_for(theme: &str, truecolor: bool) -> Palette {
+    let p = palette_by_name(theme);
+    if truecolor {
+        p
+    } else {
+        palette::for_16color(p)
+    }
+}
+
 impl App {
     pub fn new(cfg: UiConfig, history: Vec<String>) -> App {
         let hist_idx = history.len();
+        let truecolor = detect_truecolor();
         let mut app = App {
             transcript: Vec::new(),
             live: String::new(),
@@ -203,10 +226,10 @@ impl App {
             force_clear: false,
             single_width: cfg.ascii
                 || matches!(std::env::var("TERM").as_deref(), Ok("linux")),
-            truecolor: detect_truecolor(),
+            truecolor,
             glyphs: if cfg.ascii { GLYPHS_A } else { GLYPHS_U },
             ascii: cfg.ascii,
-            palette: palette_by_name(&cfg.theme),
+            palette: palette_for(&cfg.theme, truecolor),
             disp_cache: Vec::new(),
             disp_cache_width: usize::MAX,
             disp_cache_tver: u64::MAX,
@@ -544,17 +567,6 @@ impl App {
 
     fn char_len(&self) -> usize {
         self.input.chars().count()
-    }
-
-    /// The palette the App starts with, already adapted to the terminal: on a
-    /// 16-color console the theme's RGB shades are snapped to ANSI colors.
-    fn initial_palette(&self, theme: &str) -> Palette {
-        let p = palette_by_name(theme);
-        if self.truecolor {
-            p
-        } else {
-            palette::for_16color(p)
-        }
     }
 
     pub fn on_key(&mut self, key: KeyEvent, h: &Handles) {
