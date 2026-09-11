@@ -2057,9 +2057,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::helpers::clean_text;
+    use super::palette::palette_by_name;
     use super::{
-        want_mouse_capture, App, ConfigPatch, Handles, KeyCode, KeyEvent, KeyModifiers, Mode,
-        UiConfig, UiEvent, WorkerCmd,
+        palette_for, want_mouse_capture, App, ConfigPatch, Handles, KeyCode, KeyEvent,
+        KeyModifiers, Mode, THEMES, UiConfig, UiEvent, WorkerCmd,
     };
 
     #[test]
