@@ -859,4 +859,42 @@ mod tests {
         // Non-list prose keeps the plain glyph-column indent (2), no hang.
         assert!(flat(&out[1]).starts_with("  ") && !flat(&out[1]).starts_with("   "));
     }
+
+    /// A question is model text like any other drawn string, so it must be
+    /// sanitized (an escape sequence or a raw newline in a one-row Span either
+    /// spills colors or breaks the frame) and it must keep its line structure.
+    #[test]
+    fn a_question_is_sanitized_and_keeps_its_own_lines() {
+        let rows = question_lines("first line\x1b[31m\nsecond line", 40, false);
+        assert_eq!(rows, vec!["first line", "second line"]);
+        // Tabs become spaces, control characters are dropped, never drawn.
+        let rows = question_lines("a\tb\x07c", 40, false);
+        assert_eq!(rows, vec!["a    bc"]);
+    }
+
+    #[test]
+    fn a_question_wraps_to_the_width_it_is_given() {
+        let rows = question_lines("alpha beta gamma delta", 10, false);
+        assert_eq!(rows, vec!["alpha beta", "gamma", "delta"]);
+        // A single overlong token is hard-split rather than clipped.
+        let rows = question_lines("abcdefghijkl", 5, false);
+        assert_eq!(rows.join(""), "abcdefghijkl");
+    }
+
+    #[test]
+    fn a_runaway_question_is_clipped_and_marked() {
+        let long = (0..40).map(|i| format!("row{i}")).collect::<Vec<_>>().join("\n");
+        let rows = question_lines(&long, 20, false);
+        assert_eq!(rows.len(), QUESTION_MAX_ROWS);
+        assert_eq!(rows[0], "row0");
+        assert!(
+            rows.last().unwrap().ends_with('…'),
+            "a clipped question says so: {rows:?}"
+        );
+        // On a single-width terminal the marker is ASCII (an ellipsis would be
+        // turned into '?'), and it still fits the width.
+        let rows = question_lines(&long, 20, true);
+        assert!(rows.last().unwrap().ends_with("..."));
+        assert!(rows.iter().all(|r| r.chars().count() <= 20));
+    }
 }
