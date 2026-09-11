@@ -2307,25 +2307,33 @@ pub fn run<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+/// Whether to grab the mouse (needed for scroll-wheel events). Capture is on by
+/// default, but skipped on Warp: it grabs click-drag text selection and Warp has
+/// no modifier to bypass a grabbed mouse, so users couldn't copy anything. Other
+/// terminals (iTerm, …) let you hold Option/Fn to select, so capture stays.
+///
+/// `PICODER_MOUSE` overrides either way: a truthy value (`1`/`true`/`on`/`yes`)
+/// forces wheel scrolling on even under Warp, a falsy one (`0`/`false`/`off`/
+/// `no`) turns capture off everywhere. Anything else means "decide from the
+/// terminal". Scrolling is also on ↑/↓ and PgUp/PgDn, so a terminal without
+/// capture still has a way to move through the transcript.
+pub fn want_mouse_capture(term_program: &str, override_env: Option<&str>) -> bool {
+    match override_env.map(str::to_ascii_lowercase).as_deref() {
+        Some("1") | Some("true") | Some("on") | Some("yes") => true,
+        Some("0") | Some("false") | Some("off") | Some("no") => false,
+        _ => term_program != "WarpTerminal",
+    }
+}
+
 /// Enter alt-screen + raw mode with bracketed paste; returns a ready Terminal.
 pub fn setup_terminal() -> std::io::Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
 {
     let mut term = ratatui::init();
     let _ = execute!(std::io::stdout(), event::EnableBracketedPaste);
-    // Mouse capture grabs scroll-wheel events (for transcript scrolling) but, as
-    // a side effect, prevents the terminal's own click-drag text selection.
-    // Warp on macOS has no modifier to bypass a grabbed mouse, so users can't
-    // select text at all — skip capture there and keep native selection. Other
-    // terminals (iTerm, etc.) let you hold Option/Fn to select, so capture stays.
-    // PICODER_MOUSE=1 forces capture on anyway (wheel scrolling beats native
-    // selection for some users); PICODER_MOUSE=0 forces it off everywhere.
-    let prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    let warp = prog == "WarpTerminal";
-    let mouse = match std::env::var("PICODER_MOUSE").ok().as_deref() {
-        Some("1") | Some("true") | Some("on") | Some("yes") => true,
-        Some("0") | Some("false") | Some("off") | Some("no") => false,
-        _ => !warp,
-    };
+    let mouse = want_mouse_capture(
+        &std::env::var("TERM_PROGRAM").unwrap_or_default(),
+        std::env::var("PICODER_MOUSE").ok().as_deref(),
+    );
     if mouse {
         let _ = execute!(std::io::stdout(), event::EnableMouseCapture);
     }
