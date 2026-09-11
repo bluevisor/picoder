@@ -1931,7 +1931,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::helpers::clean_text;
-    use super::{App, Handles, KeyCode, KeyEvent, KeyModifiers, Mode, UiEvent, UiConfig, WorkerCmd};
+    use super::{
+        want_mouse_capture, App, Handles, KeyCode, KeyEvent, KeyModifiers, Mode, UiConfig, UiEvent,
+        WorkerCmd,
+    };
 
     #[test]
     fn clean_text_passes_plain_text_through_borrowed() {
