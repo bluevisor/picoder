@@ -365,6 +365,10 @@ pub fn render_message(
 ) {
     let mut in_code = false;
     let mut lead_left = lead;
+    // Models habitually start and end a reply with a newline. Rendered literally
+    // those become stray empty rows above the glyph and — worse — an extra blank
+    // on top of the block separator, so both ends are trimmed here.
+    let text = text.trim_matches(['\n', '\r']);
     for raw in text.split('\n') {
         if raw.trim_start().starts_with("```") {
             in_code = !in_code;
