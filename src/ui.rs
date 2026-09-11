@@ -546,6 +546,17 @@ impl App {
         self.input.chars().count()
     }
 
+    /// The palette the App starts with, already adapted to the terminal: on a
+    /// 16-color console the theme's RGB shades are snapped to ANSI colors.
+    fn initial_palette(&self, theme: &str) -> Palette {
+        let p = palette_by_name(theme);
+        if self.truecolor {
+            p
+        } else {
+            palette::for_16color(p)
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent, h: &Handles) {
         // Cycle the permission mode in any state, except while a masked prompt
         // or an ask_user question is capturing every key. Shift+Tab is the
