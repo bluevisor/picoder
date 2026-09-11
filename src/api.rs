@@ -513,7 +513,10 @@ fn pick_balance(v: &serde_json::Value, prefer: &Currency) -> Option<Balance> {
         let code = info.get("currency")?.as_str()?;
         Some((
             value,
-            Balance { amount, currency: Currency::parse(code) },
+            Balance {
+                amount,
+                currency: Currency::parse(code),
+            },
         ))
     };
     v.get("balance_infos")?
@@ -524,9 +527,7 @@ fn pick_balance(v: &serde_json::Value, prefer: &Currency) -> Option<Balance> {
             a.0.partial_cmp(&b.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 // Tie (e.g. every bucket at 0.00): prefer the price currency.
-                .then_with(|| {
-                    (a.1.currency == *prefer).cmp(&(b.1.currency == *prefer))
-                })
+                .then_with(|| (a.1.currency == *prefer).cmp(&(b.1.currency == *prefer)))
         })
         .map(|(_, bal)| bal)
 }
@@ -598,4 +599,64 @@ pub fn truncate(s: &str, limit: usize) -> String {
     let head: String = s.chars().take(limit.saturating_sub(40)).collect();
     let dropped = s.chars().count() - limit + 40;
     format!("{head}\n... [truncated {dropped} chars] ...")
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shape DeepSeek actually returns for a China-region account: a funded
+    /// CNY bucket next to an empty USD one.
+    fn payload() -> serde_json::Value {
+        json!({
+            "is_available": true,
+            "balance_infos": [
+                {"currency": "CNY", "total_balance": "135.70", "granted_balance": "0.00", "topped_up_balance": "135.70"},
+                {"currency": "USD", "total_balance": "0.00", "granted_balance": "0.00", "topped_up_balance": "0.00"}
+            ]
+        })
+    }
+
+    #[test]
+    fn picks_the_funded_bucket_and_keeps_its_currency() {
+        let bal = pick_balance(&payload(), &Currency::default()).unwrap();
+        assert_eq!(bal.currency.code, "CNY");
+        assert_eq!(bal.render(), "¥135.70");
+        // The digits are the provider's, not a re-formatted float.
+        assert_eq!(bal.amount, "135.70");
+    }
+
+    #[test]
+    fn a_usd_account_still_reports_usd() {
+        let v = json!({"balance_infos": [
+            {"currency": "USD", "total_balance": "12.34"},
+            {"currency": "CNY", "total_balance": "0.00"}
+        ]});
+        let bal = pick_balance(&v, &Currency::default()).unwrap();
+        assert_eq!(bal.render(), "$12.34");
+    }
+
+    #[test]
+    fn ties_prefer_the_currency_the_price_list_is_quoted_in() {
+        let v = json!({"balance_infos": [
+            {"currency": "CNY", "total_balance": "0.00"},
+            {"currency": "USD", "total_balance": "0.00"}
+        ]});
+        // All buckets empty: report one in the currency the cost readout uses,
+        // so the status line at least stays in one unit.
+        let code = |c: &Currency| pick_balance(&v, c).unwrap().currency.code;
+        assert_eq!(code(&Currency::default()), "USD");
+        assert_eq!(code(&Currency::parse("cny")), "CNY");
+    }
+
+    #[test]
+    fn a_payload_without_buckets_is_not_an_error() {
+        assert!(pick_balance(&json!({}), &Currency::default()).is_none());
+        assert!(pick_balance(&json!({"balance_infos": []}), &Currency::default()).is_none());
+        // A currency we have no symbol for still renders with its code.
+        let v = json!({"balance_infos": [{"currency": "GBP", "total_balance": "3.50"}]});
+        let bal = pick_balance(&v, &Currency::default()).unwrap();
+        assert_eq!(bal.render(), "£3.50");
+    }
 }

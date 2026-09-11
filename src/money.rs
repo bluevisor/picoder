@@ -41,6 +41,13 @@ const SYMBOLS: &[(&str, &str)] = &[
     ("CHF", "CHF"),
 ];
 
+/// USD, the unit of the built-in price list.
+impl Default for Currency {
+    fn default() -> Self {
+        Currency::parse("USD")
+    }
+}
+
 impl Currency {
     /// Build from an ISO code, case-insensitively. An empty or unknown code
     /// keeps the code as the prefix (so `$` is never assumed) — except that a
@@ -56,10 +63,6 @@ impl Currency {
             .map(|(_, s)| s.to_string())
             .unwrap_or_default();
         Currency { code, symbol }
-    }
-
-    pub fn usd() -> Currency {
-        Currency::parse("USD")
     }
 
     /// `$0.0123`. `decimals` controls how many places are shown.
@@ -147,7 +150,7 @@ mod tests {
 
     #[test]
     fn cost_keeps_four_decimals_below_a_cent() {
-        let usd = Currency::usd();
+        let usd = Currency::default();
         assert_eq!(fmt_cost(0.0, &usd), "$0.0000");
         assert_eq!(fmt_cost(0.0034, &usd), "$0.0034");
         assert_eq!(fmt_cost(0.01, &usd), "$0.01");
@@ -167,7 +170,7 @@ mod tests {
 
         let od = Balance {
             amount: "0.00".into(),
-            currency: Currency::usd(),
+            currency: Currency::default(),
         };
         assert_eq!(od.render(), "$0.00");
     }

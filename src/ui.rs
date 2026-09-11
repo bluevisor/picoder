@@ -2044,7 +2044,7 @@ mod tests {
             ctx_limit: 128_000,
             price_in: 0.0,
             price_out: 0.0,
-            price_currency: crate::money::Currency::usd(),
+            price_currency: crate::money::Currency::default(),
             perm: Arc::new(AtomicU8::new(0)),
             settings: crate::config::Config::default(),
         }
@@ -2200,6 +2200,49 @@ mod tests {
         assert!(want_mouse_capture("iTerm.app", Some("maybe")));
     }
 
+    /// The mismatch notice: fired once, only when the units actually differ,
+    /// and worded so the fix is obvious.
+    #[test]
+    fn a_balance_in_another_currency_is_flagged_once_with_the_fix() {
+        let bal = |code: &str| crate::money::Balance {
+            amount: "135.70".into(),
+            currency: crate::money::Currency::parse(code),
+        };
+        let (mut app, h) = scrollable_app();
+        let notices = |app: &App| {
+            app.transcript
+                .iter()
+                .filter(|l| l.text.contains("balance is in"))
+                .count()
+        };
+
+        // Aligned (USD prices, USD account): no notice at all.
+        app.handle_event(UiEvent::Balance(bal("USD")), &h);
+        assert_eq!(notices(&app), 0);
+        assert_eq!(app.balance.as_ref().unwrap().render(), "$135.70");
+
+        // Mismatch: one notice naming both currencies and the config key, and
+        // the balance still updates on later refreshes without re-noticing.
+        app.handle_event(UiEvent::Balance(bal("CNY")), &h);
+        assert_eq!(notices(&app), 1);
+        let text = app
+            .transcript
+            .iter()
+            .find(|l| l.text.contains("balance is in"))
+            .unwrap()
+            .text
+            .clone();
+        assert!(text.contains("CNY") && text.contains("USD"), "{text}");
+        assert!(
+            text.contains("price_currency"),
+            "it says how to fix it: {text}"
+        );
+        assert_eq!(app.balance.as_ref().unwrap().render(), "¥135.70");
+
+        app.handle_event(UiEvent::Balance(bal("CNY")), &h);
+        assert_eq!(notices(&app), 1, "not repeated on every turn");
+    }
+
     /// `/config` row 11 drives the cost unit: committing a code re-labels the
     /// status line live and patches the worker so it also re-reads the balance
     /// with that preference.
@@ -2249,8 +2292,14 @@ mod tests {
         app.balance = Some(bal("CNY", "135.70"));
         let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
         let screen = draw(&mut app, &mut term);
-        assert!(screen.contains("$0.03 USD"), "cost is unit-labelled:\n{screen}");
-        assert!(screen.contains("bal ¥135.70 CNY"), "balance is too:\n{screen}");
+        assert!(
+            screen.contains("$0.03 USD"),
+            "cost is unit-labelled:\n{screen}"
+        );
+        assert!(
+            screen.contains("bal ¥135.70 CNY"),
+            "balance is too:\n{screen}"
+        );
 
         // Set the price currency to CNY (and use DeepSeek's CNY list) and the
         // readouts line up in one currency, with no tags.
@@ -2258,26 +2307,35 @@ mod tests {
         app.price_in = 1.0;
         app.price_out = 2.0;
         let screen = draw(&mut app, &mut term);
-        assert!(screen.contains("¥0.20 · 150.0k tok"), "cost in CNY:\n{screen}");
+        assert!(
+            screen.contains("¥0.20 · 150.0k tok"),
+            "cost in CNY:\n{screen}"
+        );
         assert!(screen.contains("bal ¥135.70"), "balance in CNY:\n{screen}");
         assert!(!screen.contains("USD"), "no leftover USD:\n{screen}");
 
         // A USD account with the default prices reads plainly, as before: no
         // currency tags, because there is nothing to disambiguate.
-        app.price_currency = crate::money::Currency::usd();
+        app.price_currency = crate::money::Currency::default();
         app.price_in = 0.14;
         app.price_out = 0.28;
         app.balance = Some(bal("USD", "12.34"));
         let screen = draw(&mut app, &mut term);
         assert!(screen.contains("$0.03 · 150.0k tok"), "cost:\n{screen}");
         assert!(screen.contains("bal $12.34"), "balance:\n{screen}");
-        assert!(!screen.contains("CNY") && !screen.contains("USD"), "untagged when aligned:\n{screen}");
+        assert!(
+            !screen.contains("CNY") && !screen.contains("USD"),
+            "untagged when aligned:\n{screen}"
+        );
 
         // Sub-cent sessions keep four decimals so a short turn isn't "$0.00".
         app.sess_prompt = 10_000;
         app.sess_completion = 0;
         let screen = draw(&mut app, &mut term);
-        assert!(screen.contains("$0.0014 · 10.0k tok"), "sub-cent cost:\n{screen}");
+        assert!(
+            screen.contains("$0.0014 · 10.0k tok"),
+            "sub-cent cost:\n{screen}"
+        );
     }
 
     /// The real render path: an overflowing transcript, a small screen, and the
@@ -2369,7 +2427,11 @@ mod tests {
         app.on_key(key(KeyCode::Up), &h);
         assert_eq!(app.picker.as_ref().unwrap().cursor, 0, "clamped at the top");
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT), &h);
-        assert_eq!(app.picker.as_ref().unwrap().cursor, 1, "shifted arrows work too");
+        assert_eq!(
+            app.picker.as_ref().unwrap().cursor,
+            1,
+            "shifted arrows work too"
+        );
     }
 
     #[test]

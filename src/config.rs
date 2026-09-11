@@ -417,6 +417,19 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let dir = config_dir();
         std::fs::create_dir_all(&dir).context("create config dir")?;
+        let json = self.to_disk_json();
+        let path = config_path();
+        atomic_write(&path, serde_json::to_string_pretty(&json)?.as_bytes())
+            .context("write config")?;
+        set_private(&path);
+        Ok(())
+    }
+
+    /// The exact JSON `save` writes: the core fields plus every user
+    /// customization that differs from its default, so a model/theme rewrite
+    /// can't drop the rest of the file. Split out from `save` so the
+    /// preserve-what-the-user-set rules are testable without touching disk.
+    fn to_disk_json(&self) -> serde_json::Value {
         let mut on_disk = self.clone();
         // Update the per-provider map with the current effective key (unless env-sourced).
         if !self.key_from_env && !self.api_key.is_empty() {
@@ -476,11 +489,7 @@ impl Config {
         if on_disk.max_tool_calls != default_max_tool_calls() {
             json["max_tool_calls"] = serde_json::json!(on_disk.max_tool_calls);
         }
-        let path = config_path();
-        atomic_write(&path, serde_json::to_string_pretty(&json)?.as_bytes())
-            .context("write config")?;
-        set_private(&path);
-        Ok(())
+        json
     }
 
     /// Update only the model field on disk, preserving the rest of the file.
@@ -569,7 +578,11 @@ impl Config {
             }
             ConfigPatch::PriceCurrency(c) => {
                 let c = c.trim().to_ascii_uppercase();
-                self.price_currency = if c.is_empty() { default_price_currency() } else { c };
+                self.price_currency = if c.is_empty() {
+                    default_price_currency()
+                } else {
+                    c
+                };
             }
         }
     }
@@ -614,6 +627,36 @@ mod tests {
         assert_eq!(c.context_window, 1);
         // Pinning the window through the panel marks it explicit so it sticks.
         assert!(c.context_window_explicit);
+    }
+
+    #[test]
+    fn price_currency_is_normalized_and_persisted_only_when_set() {
+        let mut c = Config::default();
+        assert_eq!(
+            c.price_currency, "USD",
+            "prices are quoted in USD by default"
+        );
+        assert!(
+            c.to_disk_json().get("price_currency").is_none(),
+            "the default stays out of the file, like the other price fields"
+        );
+
+        c.apply_patch(&ConfigPatch::PriceCurrency("cny".into()));
+        assert_eq!(c.price_currency, "CNY", "case is normalized on the way in");
+        assert_eq!(c.to_disk_json()["price_currency"], "CNY");
+
+        // A blank entry falls back to the documented default rather than
+        // leaving the status line with no unit at all.
+        c.apply_patch(&ConfigPatch::PriceCurrency("   ".into()));
+        assert_eq!(c.price_currency, "USD");
+        assert!(c.to_disk_json().get("price_currency").is_none());
+    }
+
+    #[test]
+    fn a_hand_edited_price_currency_is_read_back() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"price_currency": "cny"}"#).unwrap();
+        let code = v.get("price_currency").and_then(|x| x.as_str()).unwrap();
+        assert_eq!(crate::money::Currency::parse(code).symbol, "¥");
     }
 
     #[test]

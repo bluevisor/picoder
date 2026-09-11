@@ -147,8 +147,9 @@ list:
 ```
 
 Prices are never converted between currencies (that would need an exchange
-rate), and an unrecognized code prints as a `CODE 12.34` prefix rather than
-guessing a symbol.
+rate), so put the numbers in the account's currency yourself — DeepSeek
+publishes a CNY price list alongside its USD one. An unrecognized code prints as
+a `CODE 12.34` prefix rather than guessing a symbol.
 
 To expose [MCP](https://modelcontextprotocol.io) tools, add an `mcp_servers`
 block to `config.json`; each entry is launched over stdio at start and its
