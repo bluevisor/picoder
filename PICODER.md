@@ -58,7 +58,8 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Queued input: the composer stays live while the agent works — Enter queues
   messages that send in order as turns finish (Esc interrupts and restores them).
 - One-shot `--output FILE` writes the final reply to disk after the run.
-- Status bar: model · session tokens + $ cost · context-window bar · account balance.
+- Status bar: model · session tokens + cost · context-window bar · account
+  balance, each with its own currency (see `src/money.rs`).
 - Permission modes via Shift+Tab: ask / bypass / plan (read-only); colored diff before write/edit.
 - Auto-loads `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
 - Session persistence + resume (`picoder --continue`, per working directory).

@@ -59,12 +59,15 @@ dependencies.
   usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
   (commands + paths), history, word-skip and word-delete, code-block
   highlighting.
-- **Status bar** — model · session tokens + $ cost · context-window bar ·
-  account balance.
+- **Status bar** — model · session tokens + cost · context-window bar ·
+  account balance. Both money figures carry their own currency, and the ISO
+  code is added when they differ (DeepSeek bills China-region accounts in CNY
+  while its published price lists are USD), with a one-time hint on how to
+  align them.
 - **Settings panel** (`/config`) — provider preset, base URL, model, API key,
   auth mode, thinking mode, default permission mode, auto-commit, theme, context
-  window, and max tool calls, edited in-TUI; changes apply live and persist to
-  `config.json`.
+  window, max tool calls, and price currency, edited in-TUI; changes apply live
+  and persist to `config.json`.
 - **Themes** (`/theme`) — `Default`, `Apple ][` (green phosphor), `MSDOS`,
   `macOS`, `SUN`, `NeXT`, and `SGI`.
 - **Tuned for the Pi framebuffer console** — ASCII fallback and clear-on-exit
@@ -114,11 +117,38 @@ in `~/.config/picoder/`:
 
 ```
 config.json   provider / model / key, auth_mode, oauth tokens (0600),
-              max_tool_calls (+ optional mcp_servers)
+              max_tool_calls, prices (+ optional mcp_servers)
 memory.md     remember/recall store
 history       composer history
 sessions/     per-directory session transcripts
 ```
+
+### Currency
+
+The status line shows the session cost and the account balance. The cost comes
+from `price_in` / `price_out` (per 1M tokens) and is quoted in
+`price_currency`, which defaults to `USD` — the unit of the built-in prices.
+The balance comes from the provider and carries whatever currency the account
+is billed in: DeepSeek answers `CNY` for China-region accounts and `USD`
+elsewhere.
+
+When the two differ, both figures are tagged with their ISO code rather than
+printed as bare symbols, so `$0.03 USD` can't be read as ¥0.03 next to a
+`bal ¥135.70 CNY`. To make them line up, set both sides to the account's
+currency — the `price currency` row in `/config`, plus that currency's price
+list:
+
+```json
+{
+  "price_currency": "CNY",
+  "price_in": 1.0,
+  "price_out": 2.0
+}
+```
+
+Prices are never converted between currencies (that would need an exchange
+rate), and an unrecognized code prints as a `CODE 12.34` prefix rather than
+guessing a symbol.
 
 To expose [MCP](https://modelcontextprotocol.io) tools, add an `mcp_servers`
 block to `config.json`; each entry is launched over stdio at start and its
