@@ -263,8 +263,25 @@ impl App {
         if text.is_empty() && kind != Kind::Banner && kind != Kind::BannerDim {
             return;
         }
+        self.separate(kind);
         self.transcript.push(TLine { kind, text, lead: true, color: None });
         self.after_push();
+    }
+
+    /// Insert a blank separator line when `kind` opens a new block (see
+    /// `needs_sep`), so turns, prose, and tool activity don't run together into
+    /// one unreadable wall of text.
+    fn separate(&mut self, kind: Kind) {
+        if let Some(last) = self.transcript.last() {
+            if needs_sep(last.kind, kind) {
+                self.transcript.push(TLine {
+                    kind: Kind::Blank,
+                    text: String::new(),
+                    lead: true,
+                    color: None,
+                });
+            }
+        }
     }
 
     fn dirty(&mut self) {
@@ -315,10 +332,12 @@ impl App {
 
     fn flush_live(&mut self) {
         if !self.live.is_empty() {
+            self.separate(Kind::Assistant);
             self.transcript.push(TLine { kind: Kind::Assistant, text: std::mem::take(&mut self.live), lead: true, color: None });
             self.after_push();
         }
         if !self.live_reasoning.is_empty() {
+            self.separate(Kind::Reasoning);
             self.transcript.push(TLine { kind: Kind::Reasoning, text: std::mem::take(&mut self.live_reasoning), lead: true, color: None });
             self.after_push();
         }
@@ -2656,6 +2675,38 @@ mod tests {
         assert_eq!(p.filter, "kimi");
         assert_eq!(p.filtered(), vec![2], "'k' filtered instead of moving up");
     }
+
+    #[test]
+    fn zz_dump_render() {
+        use crate::ui::types::{Kind, TLine};
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let push = |app: &mut App, k: Kind, t: &str| {
+            app.transcript.push(TLine { kind: k, text: t.to_string(), lead: true, color: None });
+        };
+        push(&mut app, Kind::User, "rename the field in parser.rs");
+        push(&mut app, Kind::Assistant, "Sure. Let me look at the file first.\n\nHere is what I plan:\n- read `parser.rs`\n- rename the field\n");
+        push(&mut app, Kind::Tool, "read {\"path\":\"src/parser.rs\"}");
+        push(&mut app, Kind::ToolResult, "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}");
+        push(&mut app, Kind::Tool, "edit {\"path\":\"src/parser.rs\"}");
+        push(&mut app, Kind::DiffAdd, "+ let y = 2;");
+        push(&mut app, Kind::DiffDel, "- let x = 1;");
+        push(&mut app, Kind::DiffCtx, "  fn main() {");
+        push(&mut app, Kind::ToolResult, "edited src/parser.rs");
+        push(&mut app, Kind::ToolErr, "bash: command not found");
+        push(&mut app, Kind::Notice, "context 85% full — compacting automatically…");
+        push(&mut app, Kind::ErrorK, "HTTP 429: rate limited");
+        push(&mut app, Kind::Reasoning, "I should check the imports first.\nThen verify the rename.");
+        push(&mut app, Kind::Assistant, "## Done\n\nRenamed `x` to `y` in 2 places.");
+        app.ensure_display_cache(60);
+        println!("----BEGIN----");
+        for l in &app.disp_cache {
+            let mut s = String::new();
+            for sp in &l.spans { s.push_str(&sp.content); }
+            println!("[{}]", s.trim_end());
+        }
+        println!("----END----");
+    }
+
 }
 
 /// The UI event loop. Owns the terminal; returns when the user quits.
