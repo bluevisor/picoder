@@ -348,7 +348,22 @@ impl App {
                 self.mode = Mode::Question { prompt };
             }
             UiEvent::ModelList(ids) => {
+                let current = ids.iter().position(|m| *m == self.model_info);
+                self.picker = Some(Picker {
+                    title: "Pick a model (type to filter)".into(),
+                    items: ids.clone(),
+                    current,
+                    filter: String::new(),
+                    cursor: current.unwrap_or(0),
+                    scroll: 0,
+                    action: PickAction::Model,
+                });
+                if let Some(p) = self.picker.as_mut() {
+                    let len = p.items.len();
+                    p.clamp(len); // scroll the current model into view
+                }
                 self.last_models = ids;
+                self.mode = Mode::Select;
             }
             UiEvent::ModelChanged(m) => {
                 self.model_info = m;
@@ -378,7 +393,13 @@ impl App {
             }
             UiEvent::TurnDone => {
                 self.flush_live();
-                self.clear_busy();
+                // Keep an open picker alive: the worker sends TurnDone right
+                // after ModelList, and clear_busy would drop back to Idle.
+                if matches!(self.mode, Mode::Select) && self.picker.is_some() {
+                    self.busy_since = None;
+                } else {
+                    self.clear_busy();
+                }
                 // The worker may reply with Bypass toggled; sync the UI.
                 self.perm = h.shared.perm.clone();
                 // Dispatch the next queued message, if any.
@@ -755,14 +776,19 @@ impl App {
                 self.mode = Mode::Idle;
                 self.picker = None;
             }
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Plain arrows move the cursor; Ctrl+j/k are the vi-style
+            // aliases (bare j/k are filter input, since the list is
+            // type-to-filter).
+            KeyCode::Up
+            | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let len = picker.filtered().len();
                 if len > 0 {
                     picker.cursor = picker.cursor.saturating_sub(1).max(0);
                     picker.clamp(len);
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Down
+            | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let len = picker.filtered().len();
                 if len > 0 {
                     picker.cursor = (picker.cursor + 1).min(len - 1);
