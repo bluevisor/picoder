@@ -2017,9 +2017,24 @@ mod tests {
 
     #[test]
     fn clean_text_strips_escapes_and_expands_tabs() {
-        assert_eq!(clean_text("\x1b[31mred\x1b[0m", false), "[31mred[0m");
+        // ANSI color codes from tool output must not reach the terminal — and
+        // neither may their parameter bytes: `ls --color` emits `ESC [ 1 ; 31 m`
+        // and dropping only the ESC leaves `[1;31m` on screen as literal text.
+        assert_eq!(clean_text("\x1b[31mred\x1b[0m", false), "red");
+        assert_eq!(clean_text("\x1b[1;31mERROR\x1b[0m: disk full", false), "ERROR: disk full");
         assert_eq!(clean_text("a\tb", false), "a    b");
         assert_eq!(clean_text("a\rb\x07", false), "ab");
+    }
+
+    #[test]
+    fn clean_text_eats_whole_escape_sequences() {
+        // OSC title, two-character charset, and an unterminated trailing ESC.
+        assert_eq!(clean_text("\x1b]0;title\x07x", false), "x");
+        assert_eq!(clean_text("\x1b]0;t\x1b\\x", false), "x");
+        assert_eq!(clean_text("\x1b(Bbold", false), "bold");
+        assert_eq!(clean_text("dangling\x1b", false), "dangling");
+        // A CSI without its final byte must not eat the rest of the line.
+        assert_eq!(clean_text("\x1b[32mok", false), "ok");
     }
 
     #[test]
