@@ -251,7 +251,6 @@ fn eat_escape(it: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Render one transcript entry. The text may carry embedded newlines (tool
 /// results, diffs, error dumps), so it is split first: each source line is
 /// wrapped on its own, and only the very first gets the leading glyph. Handing
