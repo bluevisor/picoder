@@ -1868,11 +1868,26 @@ impl App {
         }
 
         let tokens = self.sess_prompt + self.sess_completion;
+        // The cost is quoted in the configured price currency; the balance is
+        // whatever the provider bills the account in. They can legitimately
+        // differ (a CNY account using the USD price list), so when they do both
+        // figures get their ISO code and the line never implies they're
+        // comparable.
+        let aligned = self
+            .balance
+            .as_ref()
+            .map(|b| b.currency == self.price_currency)
+            .unwrap_or(true);
         if tokens > 0 {
             let cost = self.sess_prompt as f64 / 1e6 * self.price_in
                 + self.sess_completion as f64 / 1e6 * self.price_out;
+            let cost = if aligned {
+                money::fmt_cost(cost, &self.price_currency)
+            } else {
+                money::fmt_cost_tagged(cost, &self.price_currency)
+            };
             spans.push(sep());
-            spans.push(Span::styled(format!("{} · {} tok", fmt_cost(cost), humanize(tokens)), gray));
+            spans.push(Span::styled(format!("{cost} · {} tok", humanize(tokens)), gray));
         }
 
         spans.push(sep());
@@ -1886,7 +1901,8 @@ impl App {
 
         if let Some(b) = &self.balance {
             spans.push(sep());
-            spans.push(Span::styled(format!("bal {b}"), gray));
+            let bal = if aligned { b.render() } else { b.render_tagged() };
+            spans.push(Span::styled(format!("bal {bal}"), gray));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
