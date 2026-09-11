@@ -188,10 +188,15 @@ fn default_ctx() -> u32 {
 /// version suffixes need no enumerating. Conservative 128k fallback.
 pub fn known_context_window(model: &str) -> u32 {
     let m = model.to_ascii_lowercase();
-    if m.contains("deepseek-v4") {
-        1_000_000 // v4-pro and v4-flash both advertise 1M
-    } else if m.contains("deepseek") {
-        128_000 // V3 / chat / reasoner
+    if m.contains("deepseek") {
+        // The API exposes v4 Flash under the bare alias `deepseek-flash` (no
+        // "v4"), so match the family by either tag — otherwise the ctx bar and
+        // auto-compaction would treat a 1M model as 128k and saturate 8x early.
+        if m.contains("v4") || m.contains("flash") {
+            1_000_000 // v4-pro and v4-flash both advertise 1M
+        } else {
+            128_000 // V3 / chat / reasoner
+        }
     } else if m.contains("glm-5") {
         1_000_000 // GLM-5 / 5.1 / 5.2 all advertise 1M
     } else if m.contains("glm-4-plus") {
@@ -663,7 +668,12 @@ mod tests {
     fn context_window_table_by_model() {
         assert_eq!(known_context_window("deepseek-v4-pro"), 1_000_000);
         assert_eq!(known_context_window("deepseek-v4-flash"), 1_000_000);
+        // `deepseek-flash` is the API's own alias for v4 Flash — also 1M.
+        assert_eq!(known_context_window("deepseek-flash"), 1_000_000);
         assert_eq!(known_context_window("deepseek-chat"), 128_000);
+        assert_eq!(known_context_window("deepseek-reasoner"), 128_000);
+        // A non-DeepSeek "flash" (GLM-4-Flash) must not inherit the 1M window.
+        assert_eq!(known_context_window("glm-4-flash"), 128_000);
         // Unknown models fall back to the conservative default.
         assert_eq!(known_context_window("gpt-4o-mini"), default_ctx());
         // A fresh config auto-derives, and stays non-explicit so it keeps
