@@ -174,8 +174,12 @@ fn needs_sep(prev: Kind, next: Kind) -> bool {
         // Separate the prose that precedes tool activity from the tools.
         Tool => matches!(prev, Assistant | ToolResult | ToolErr | DiffAdd | DiffDel | DiffCtx),
         // Separate the assistant's next words (prose or reasoning) from the tool
-        // activity that has just scrolled past.
-        Assistant | Reasoning => tool_like(prev),
+        // activity that has just scrolled past, and set the answer apart from the
+        // reasoning that produced it.
+        Assistant => tool_like(prev) || prev == Reasoning,
+        Reasoning => tool_like(prev),
+        // An agent-level failure is its own block, not a footnote to a tool.
+        ErrorK => tool_like(prev) || matches!(prev, Assistant | Reasoning),
         _ => false,
     }
 }
@@ -382,6 +386,11 @@ impl App {
                 if let Some(last) = self.transcript.last() {
                     if last.kind == Kind::Assistant && last.text.is_empty() {
                         self.transcript.pop();
+                        // Drop the separator that was inserted for the entry we
+                        // just removed, so no stray blank is left behind.
+                        if self.transcript.last().map(|l| l.kind) == Some(Kind::Blank) {
+                            self.transcript.pop();
+                        }
                     }
                 }
             }
@@ -2715,23 +2724,20 @@ mod tests {
     fn zz_dump_render() {
         use crate::ui::types::{Kind, TLine};
         let mut app = App::new(test_ui_config(), Vec::new());
-        let push = |app: &mut App, k: Kind, t: &str| {
-            app.transcript.push(TLine { kind: k, text: t.to_string(), lead: true, color: None });
-        };
+        let push = |app: &mut App, k: Kind, t: &str| app.push(k, t.to_string());
         push(&mut app, Kind::User, "rename the field in parser.rs");
-        push(&mut app, Kind::Assistant, "Sure. Let me look at the file first.\n\nHere is what I plan:\n- read `parser.rs`\n- rename the field\n");
-        push(&mut app, Kind::Tool, "read {\"path\":\"src/parser.rs\"}");
+        push(&mut app, Kind::Assistant, "Sure. Let me look at the file first.\n\nHere is what I plan:\n- read `parser.rs`\n- rename the field");
+        push(&mut app, Kind::Tool, "read src/parser.rs");
         push(&mut app, Kind::ToolResult, "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}");
-        push(&mut app, Kind::Tool, "edit {\"path\":\"src/parser.rs\"}");
-        push(&mut app, Kind::DiffAdd, "+ let y = 2;");
-        push(&mut app, Kind::DiffDel, "- let x = 1;");
-        push(&mut app, Kind::DiffCtx, "  fn main() {");
+        push(&mut app, Kind::Tool, "edit src/parser.rs");
+        app.transcript.push(TLine { kind: Kind::DiffAdd, text: "+ let y = 2;".into(), lead: true, color: None });
+        app.transcript.push(TLine { kind: Kind::DiffDel, text: "- let x = 1;".into(), lead: true, color: None });
+        app.transcript.push(TLine { kind: Kind::DiffCtx, text: "  fn main() {".into(), lead: true, color: None });
         push(&mut app, Kind::ToolResult, "edited src/parser.rs");
-        push(&mut app, Kind::ToolErr, "bash: command not found");
-        push(&mut app, Kind::Notice, "context 85% full — compacting automatically…");
         push(&mut app, Kind::ErrorK, "HTTP 429: rate limited");
         push(&mut app, Kind::Reasoning, "I should check the imports first.\nThen verify the rename.");
         push(&mut app, Kind::Assistant, "## Done\n\nRenamed `x` to `y` in 2 places.");
+        push(&mut app, Kind::User, "now run the tests");
         app.ensure_display_cache(60);
         println!("----BEGIN----");
         for l in &app.disp_cache {
