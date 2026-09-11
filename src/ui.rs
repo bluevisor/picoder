@@ -738,6 +738,10 @@ impl App {
             }
             9 => self.mode = edit_with(self.settings.context_window.to_string()),
             10 => self.mode = edit_with(setting_max_tool_calls(self.settings.max_tool_calls)),
+            // Prices below are quoted in this currency; set it to match the
+            // account's billing currency (see the balance readout) so the cost
+            // and balance figures line up.
+            11 => self.mode = edit_with(self.settings.price_currency.clone()),
             _ => {}
         }
     }
@@ -773,6 +777,14 @@ impl App {
                 let v = helpers::parse_max_tool_calls(&val);
                 self.settings.max_tool_calls = v;
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::MaxToolCalls(v)));
+            }
+            11 => {
+                let code = money::Currency::parse(&val).code;
+                self.settings.price_currency = code.clone();
+                // Take effect immediately: the status line re-reads it, so the
+                // cost figure switches units as soon as the row is committed.
+                self.price_currency = money::Currency::parse(&code);
+                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::PriceCurrency(code)));
             }
             _ => {}
         }
@@ -1491,6 +1503,7 @@ impl App {
             8 => self.palette.name.to_string(),
             9 => s.context_window.to_string(),
             10 => setting_max_tool_calls(s.max_tool_calls),
+            11 => s.price_currency.clone(),
             _ => String::new(),
         }
     }
