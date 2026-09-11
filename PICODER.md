@@ -113,12 +113,22 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   `config.json`, `.picoder/settings.json`, `.picoder/settings.local.json`. Deny is checked
   before the permission mode (so it holds in bypass), allow skips the prompt in ask mode.
   The approval prompt offers **P** — persist a suggested rule (`bash(cargo test:*)`,
-  `edit_file(src/**)`) to `settings.local.json` (or config.json outside a repo).
+  `edit_file(src/**)`) to `settings.local.json` (or config.json outside a repo). **N** denies
+  and lets the model continue; **Esc** denies and interrupts the turn. Bash rules split on
+  `&& || ; | &`; `$(…)`/backticks/`sh -c`/`sudo`/`xargs` never auto-allow. Path rules match the
+  lexically normalized path (`tools::expand`), so `..`/`./`/`~` spellings can't dodge a deny.
 - Hooks (`hooks.rs`): Claude-Code-shaped `hooks` block; each hook is `sh -c` with a JSON
   payload on stdin. Exit 2 blocks (PreToolUse → tool not run; UserPromptSubmit → turn
   skipped; Stop → stderr fed back and the loop continues, max 3 times). stdout becomes context.
 - Thrashing guard: the third consecutive identical tool call (same name + args) is answered
   with an error instead of executed.
+- History hygiene: `agent::repair_orphans` answers tool_calls that never got a result (panic
+  mid-round, session saved by a crash) so the next request isn't a 400; `wait_reply` makes
+  approval/ask_user prompts give up when the turn is cancelled, so quitting never hangs `join`.
+- Edits match raw text first and fall back to NFC only when that fails, so a file with
+  decomposed characters isn't rewritten wholesale; `apply_write` and `multi_edit` refuse
+  symlinks (O_NOFOLLOW) like `edit_file`; auto-commit commits only the edited paths, never the
+  user's own staged changes.
 - One-shot scripting: piped stdin is appended as `<stdin>` context (or is the task);
   `--json` prints a final `{result, usage, cost, tool_calls, duration_ms, errors}` object,
   `--stream-json` prints JSON-lines events (`token`, `tool_start`, `tool_result`, `notice`,

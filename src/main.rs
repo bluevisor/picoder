@@ -180,7 +180,7 @@ fn main() {
     // with no task argument it *is* the task. A terminal stdin is left alone.
     let piped = if std::io::stdin().is_terminal() {
         String::new()
-    } else if !args.is_empty() && !stdin_ready(300) {
+    } else if !args.is_empty() && !stdin_is_pipe() && !stdin_ready(300) {
         // A non-tty stdin that nobody is writing to (a supervisor's idle pipe,
         // a socket) must not wedge a scripted `picoder "task"`: with a task
         // given, only read stdin when data or EOF is already there.
@@ -304,10 +304,13 @@ fn load_project_context() -> Option<(Message, String)> {
 
 fn load_session() -> Option<Vec<Message>> {
     let text = std::fs::read_to_string(config::session_path()).ok()?;
-    let msgs: Vec<Message> = serde_json::from_str(&text).ok()?;
+    let mut msgs: Vec<Message> = serde_json::from_str(&text).ok()?;
     if msgs.is_empty() {
         None
     } else {
+        // A session saved mid tool-round (crash, kill) has tool_calls with no
+        // results; answer them so the first request on resume isn't a 400.
+        agent::repair_orphans(&mut msgs);
         Some(msgs)
     }
 }
@@ -320,6 +323,24 @@ enum OutputMode {
     Text,
     Json,
     StreamJson,
+}
+
+/// True when stdin is a pipe (`cmd | picoder …`). A pipe's writer will close
+/// it, so reading to EOF is safe even when the producer is slow — unlike a
+/// supervisor's socket or an inherited tty-less device, which we only read
+/// when data is already waiting.
+fn stdin_is_pipe() -> bool {
+    #[cfg(unix)]
+    {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fd 0 and a valid, zeroed stat buffer.
+        if unsafe { libc::fstat(0, &mut st) } == 0 {
+            return (st.st_mode & libc::S_IFMT) == libc::S_IFIFO;
+        }
+        return false;
+    }
+    #[allow(unreachable_code)]
+    false
 }
 
 /// True when stdin has data (or EOF) to read within `timeout_ms`.
@@ -390,9 +411,21 @@ fn run_oneshot(
                 at_line_start = t.ends_with('\n');
                 live.push_str(&t);
             }
-            UiEvent::ResetLive | UiEvent::AssistantCommit => {
-                // Tool calls are starting, or the reply finished — capture the
-                // text accumulated so far as a candidate for the final result.
+            UiEvent::ResetLive => {
+                // The worker is retrying the request: what streamed so far was
+                // a failed attempt and will be re-sent, so it is not a result
+                // candidate. Tell JSON consumers to discard it; in text mode a
+                // newline at least separates the repeat from the fragment.
+                live.clear();
+                if text_mode && !at_line_start {
+                    println!();
+                    at_line_start = true;
+                }
+                emit(serde_json::json!({"type": "reset"}));
+            }
+            UiEvent::AssistantCommit => {
+                // The reply (or the text before a tool round) finished — it is
+                // the latest candidate for the final result.
                 if !live.trim().is_empty() {
                     final_text = std::mem::take(&mut live);
                 } else {

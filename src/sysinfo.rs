@@ -215,15 +215,12 @@ fn parse_kb(s: &str) -> u64 {
 fn wifi_state() -> String {
     if cfg!(target_os = "macos") {
         // Associated (name possibly hidden by macOS privacy) vs not.
-        return if macos_ssid_raw().is_some() { "OK".into() } else { "n/a".into() };
+        return if macos_ssid_raw().is_some() { "Online".into() } else { "Offline".into() };
     }
-    let interpret = |s: &str| {
-        let s = s.trim();
-        if s == "up" {
-            "OK".to_string()
-        } else {
-            s.to_uppercase()
-        }
+    let interpret = |s: &str| match s.trim() {
+        "up" => "Online".to_string(),
+        "down" | "dormant" | "lowerlayerdown" => "Offline".to_string(),
+        other => other.to_uppercase(),
     };
     if let Ok(s) = std::fs::read_to_string("/sys/class/net/wlan0/operstate") {
         return interpret(&s);

@@ -140,10 +140,11 @@ impl Hooks {
             h.event == event
                 && match &h.matcher {
                     None => true,
-                    Some(m) => m
-                        .split('|')
-                        .map(str::trim)
-                        .any(|p| crate::policy::wild_match(p, &tool)),
+                    // Claude Code spellings (`Bash`, `Edit`) are accepted like in rules.
+                    Some(m) => m.split('|').map(str::trim).any(|p| {
+                        let p = if p.contains(['*', '?']) { p.to_string() } else { crate::policy::canonical_tool(p) };
+                        crate::policy::wild_match(&p, &tool)
+                    }),
                 }
         })
     }
@@ -306,6 +307,11 @@ mod tests {
             Outcome::Continue {
                 context: "bash-hook\nany-hook".into()
             }
+        );
+        let claude = hooks(r#"{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit","command":"echo cc"}]}}"#);
+        assert_eq!(
+            claude.run("PreToolUse", "edit_file", &serde_json::json!({})),
+            Outcome::Continue { context: "cc".into() }
         );
         let out = h.run("PreToolUse", "mcp__fs__read", &serde_json::json!({}));
         assert_eq!(

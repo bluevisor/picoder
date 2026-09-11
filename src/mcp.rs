@@ -215,7 +215,10 @@ impl Mcp {
         };
         match do_call(&mut self.servers) {
             Ok(result) => result,
-            Err(e) if e.contains("closed") || e.contains("write failed") => {
+            // Only a *transport* failure means the process died. A tool's own
+            // error text ("connection closed by peer" from a DB tool) must not
+            // restart a healthy server and re-run a side-effecting call.
+            Err(e) if e == "server closed the connection" || e.starts_with("write failed:") => {
                 // Process likely crashed — try to restart it once.
                 let cfg = match self.configs.get(&tool.server) {
                     Some(c) => c.clone(),

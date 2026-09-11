@@ -80,7 +80,7 @@ impl Rule {
 }
 
 /// Map Claude Code / friendly names onto picoder's tool names.
-fn canonical_tool(t: &str) -> String {
+pub fn canonical_tool(t: &str) -> String {
     match t.to_ascii_lowercase().as_str() {
         "bash" | "shell" | "sh" => "bash".into(),
         "edit" | "edit_file" => "edit_file".into(),
@@ -166,19 +166,59 @@ fn path_matches(pattern: &str, path: &str) -> bool {
         require_literal_separator: false,
         ..Default::default()
     };
-    let mut candidates = vec![path.to_string()];
+    // Match the path the tool will actually touch, not just the spelling the
+    // model used: `src/../src/secrets/k`, `./src/./secrets/k` and `~/…` all
+    // collapse to the same file, and a deny rule must catch every spelling.
+    let normalized = crate::tools::expand(path);
+    let mut candidates = vec![path.to_string(), normalized.to_string_lossy().into_owned()];
     if let Some(s) = path.strip_prefix("./") {
         candidates.push(s.to_string());
     }
     if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(rel) = Path::new(path).strip_prefix(&cwd) {
-            candidates.push(rel.to_string_lossy().into_owned());
+        for p in [Path::new(path), normalized.as_path()] {
+            if let Ok(rel) = p.strip_prefix(&cwd) {
+                candidates.push(rel.to_string_lossy().into_owned());
+            }
         }
     }
     candidates.iter().any(|c| pat.matches_with(c, opts))
 }
 
-/// Split a shell command on `&&`, `||`, `;`, `|` and newlines so every
+/// True when the command contains a construct that runs *another* command
+/// hidden inside an argument — `$(…)`, backticks, `<(…)`/`>(…)`, or an
+/// `eval`/`sh -c`-style word — outside quotes. Such commands can never be
+/// auto-allowed by a prefix rule: `ls $(rm -rf ~)` is not an `ls`.
+pub fn has_subshell(cmd: &str) -> bool {
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            // Inside double quotes $(…) and backticks still expand.
+            Some('"') if c == '"' => quote = None,
+            Some('"') if c == '$' && chars.get(i + 1) == Some(&'(') => return true,
+            Some('"') if c == '`' => return true,
+            Some('\'') if c == '\'' => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '\\' => i += 1,
+                '`' => return true,
+                '$' | '<' | '>' if chars.get(i + 1) == Some(&'(') => return true,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    bash_segments(cmd).iter().any(|seg| {
+        let first = seg.split_whitespace().next().unwrap_or("");
+        let first = first.rsplit('/').next().unwrap_or(first);
+        matches!(first, "eval" | "exec" | "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "xargs" | "env" | "nohup" | "time" | "command" | "sudo" | "doas")
+    })
+}
+
+/// Split a shell command on `&&`, `||`, `;`, `|`, `&` and newlines so every
 /// segment can be checked. Quotes are respected so `echo "a && b"` stays one
 /// segment. Segments are trimmed; empty ones are dropped.
 pub fn bash_segments(cmd: &str) -> Vec<String> {
@@ -213,7 +253,9 @@ pub fn bash_segments(cmd: &str) -> Vec<String> {
                     out.push(std::mem::take(&mut cur));
                     i += 1;
                 }
-                ';' | '|' | '\n' => out.push(std::mem::take(&mut cur)),
+                // `2>&1` / `>&2` are redirections, not a background `&`.
+                '&' if i > 0 && chars[i - 1] == '>' => cur.push(c),
+                ';' | '|' | '&' | '\n' => out.push(std::mem::take(&mut cur)),
                 _ => cur.push(c),
             },
         }
@@ -295,6 +337,10 @@ impl Policy {
             if let Some(r) = self.deny.iter().find(|r| r.matches(tool, t)) {
                 return Decision::Deny(r.render());
             }
+        }
+        // A hidden inner command defeats prefix matching — never auto-allow.
+        if tool == "bash" && targets.iter().any(|t| has_subshell(t)) {
+            return Decision::Ask;
         }
         let mut hit: Option<&Rule> = None;
         for t in &targets {
@@ -407,12 +453,20 @@ pub fn persist_target() -> PathBuf {
 /// Append `rule` to `permissions.<kind>` in the settings file at `path`,
 /// creating the file if needed and leaving every other key untouched.
 pub fn persist_rule(path: &Path, kind: &str, rule: &str) -> std::io::Result<()> {
-    let mut doc: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| Value::Object(Default::default()));
+    // A file that exists but doesn't parse is the user's problem to fix — not
+    // ours to overwrite with a one-rule document (their hooks would be gone).
+    let mut doc: Value = match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{} is not valid JSON: {e}", path.display()))
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(Default::default()),
+        Err(e) => return Err(e),
+    };
     if !doc.is_object() {
-        doc = Value::Object(Default::default());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a JSON object", path.display()),
+        ));
     }
     let perms = doc
         .as_object_mut()
@@ -545,6 +599,35 @@ mod tests {
     }
 
     #[test]
+    fn background_ampersand_and_subshells_cannot_ride_an_allow_rule() {
+        let p = policy(&["bash(ls:*)", "bash(echo:*)"], &["bash(rm *)"]);
+        // `&` is a separator like `&&`: the second segment is checked on its own.
+        assert!(matches!(p.check("bash", &["ls & rm -rf ~"]), Decision::Deny(_)));
+        assert_eq!(p.check("bash", &["ls & cargo build"]), Decision::Ask);
+        // Redirections are not separators.
+        assert!(matches!(p.check("bash", &["ls 2>&1"]), Decision::Allow(_)));
+        // Hidden inner commands never auto-allow, even when the prefix matches.
+        for cmd in ["ls $(rm -rf ~)", "echo `whoami`", "echo \"$(cat /etc/passwd)\"", "ls <(id)", "sh -c 'ls'", "sudo ls", "xargs ls"] {
+            assert_eq!(p.check("bash", &[cmd]), Decision::Ask, "{cmd}");
+        }
+        // ...but a literal in single quotes is just text.
+        assert!(matches!(p.check("bash", &["echo '$(not run)'"]), Decision::Allow(_)));
+        // Deny still wins inside a subshell command.
+        assert!(matches!(p.check("bash", &["rm -rf $(pwd)"]), Decision::Deny(_)));
+    }
+
+    #[test]
+    fn persist_rule_refuses_to_clobber_a_broken_settings_file() {
+        let dir = std::env::temp_dir().join(format!("picoder-policy-broken-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings.local.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(persist_rule(&path, "allow", "bash(ls:*)").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn deny_beats_allow_and_path_globs_match_relative_spellings() {
         let p = policy(&["edit_file(src/**)"], &["edit_file(src/secrets/**)"]);
         assert!(matches!(
@@ -559,6 +642,12 @@ mod tests {
             p.check("edit_file", &["src/secrets/key.pem"]),
             Decision::Deny(_)
         ));
+        // Every spelling of the same file is caught.
+        for spelling in ["src/../src/secrets/key.pem", "./src/./secrets/key.pem", "src//secrets/key.pem"] {
+            assert!(matches!(p.check("edit_file", &[spelling]), Decision::Deny(_)), "{spelling}");
+        }
+        let abs = std::env::current_dir().unwrap().join("src/secrets/key.pem");
+        assert!(matches!(p.check("edit_file", &[abs.to_str().unwrap()]), Decision::Deny(_)));
         assert_eq!(p.check("edit_file", &["README.md"]), Decision::Ask);
         // multi_edit: every path must be allowed.
         let p = policy(&["multi_edit(src/**)"], &[]);

@@ -273,6 +273,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let tmp = PathBuf::from(tmp);
     {
         let mut f = std::fs::File::create(&tmp)?;
+        // Keep the target's mode (config.json is 0600 — it holds API keys):
+        // a fresh temp file would otherwise come up 0644 and the rename would
+        // silently widen the permissions.
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = f.set_permissions(meta.permissions());
+        }
         f.write_all(data)?;
         f.sync_all()?;
     }
@@ -357,9 +363,26 @@ impl Config {
                     }
                 }
                 // Subscription-login tokens (one per provider).
+                // One malformed entry must not take its siblings with it: parse
+                // entry by entry, and keep the raw block in `extra` so a later
+                // model/theme rewrite preserves the broken entry verbatim
+                // instead of dropping the whole map from disk.
                 if let Some(m) = v.get("oauth") {
-                    if let Ok(tokens) = serde_json::from_value::<BTreeMap<String, OAuthToken>>(m.clone()) {
-                        cfg.oauth = tokens;
+                    let mut broken = false;
+                    if let Some(obj) = m.as_object() {
+                        for (k, val) in obj {
+                            match serde_json::from_value::<OAuthToken>(val.clone()) {
+                                Ok(t) => {
+                                    cfg.oauth.insert(k.clone(), t);
+                                }
+                                Err(_) => broken = true,
+                            }
+                        }
+                    } else {
+                        broken = true;
+                    }
+                    if broken {
+                        cfg.extra.insert("oauth".into(), m.clone());
                     }
                 }
                 // Legacy single api_key field — use as fallback for the current
@@ -396,8 +419,24 @@ impl Config {
                     };
                 }
                 if let Some(m) = v.get("mcp_servers") {
-                    if let Ok(servers) = serde_json::from_value(m.clone()) {
-                        cfg.mcp_servers = servers;
+                    let mut broken = false;
+                    if let Some(obj) = m.as_object() {
+                        for (k, val) in obj {
+                            match serde_json::from_value::<McpServerConfig>(val.clone()) {
+                                Ok(c) => {
+                                    cfg.mcp_servers.insert(k.clone(), c);
+                                }
+                                Err(_) => {
+                                    eprintln!("config: mcp_servers.{k} is malformed and was skipped");
+                                    broken = true;
+                                }
+                            }
+                        }
+                    } else {
+                        broken = true;
+                    }
+                    if broken {
+                        cfg.extra.insert("mcp_servers".into(), m.clone());
                     }
                 }
                 if let Some(b) = v.get("auto_commit").and_then(|x| x.as_bool()) {
@@ -638,6 +677,50 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_malformed_mcp_entry_is_skipped_but_survives_a_rewrite() {
+        let mut cfg = Config::default();
+        let v = serde_json::json!({
+            "mcp_servers": {
+                "good": {"command": "npx", "args": ["x"]},
+                "bad": {"cmd": "typo"}
+            }
+        });
+        // Mirror load_disk's per-entry logic on the parsed value.
+        let m = &v["mcp_servers"];
+        let mut broken = false;
+        for (k, val) in m.as_object().unwrap() {
+            match serde_json::from_value::<McpServerConfig>(val.clone()) {
+                Ok(c) => {
+                    cfg.mcp_servers.insert(k.clone(), c);
+                }
+                Err(_) => broken = true,
+            }
+        }
+        if broken {
+            cfg.extra.insert("mcp_servers".into(), m.clone());
+        }
+        assert_eq!(cfg.mcp_servers.len(), 1, "the good server still loads");
+        let out = cfg.to_disk_json();
+        assert_eq!(out["mcp_servers"], v["mcp_servers"], "the raw block round-trips verbatim");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_targets_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("picoder-aw-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        atomic_write(&path, b"{\"a\":1}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must not widen permissions");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn patches_map_to_fields() {

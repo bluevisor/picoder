@@ -74,6 +74,10 @@ pub struct App {
     pending: String,
     /// Messages typed while the agent was busy, sent in order as turns finish.
     queued: Vec<String>,
+    /// Set by Esc: the interrupted turn's TurnDone must not fire the queue —
+    /// the user stopped the agent, so queued follow-ups wait for their next
+    /// message before they resume sending.
+    queue_paused: bool,
     /// Suggested next prompt from the agent, shown as a dimmed hint.
     suggestion: Option<String>,
     /// Highlighted row of the `/` command palette (clamped at use).
@@ -221,6 +225,7 @@ impl App {
             hist_idx,
             pending: String::new(),
             queued: Vec::new(),
+            queue_paused: false,
             suggestion: None,
             suggest_idx: 0,
             picker: None,
@@ -537,11 +542,21 @@ impl App {
                 }
                 // The worker may reply with Bypass toggled; sync the UI.
                 self.perm = h.shared.perm.clone();
-                // Dispatch the next queued message, if any.
-                if let Some(next) = self.queued.first() {
-                    let _ = h.cmd_tx.send(WorkerCmd::User { text: next.clone(), images: vec![] });
-                    self.queued.remove(0);
-                    self.set_busy();
+                // Dispatch the next queued message, if any — through `dispatch`
+                // so it is echoed, `@file`s attach, and `/cmd` / `!cmd` route
+                // exactly as if typed now. Not after an Esc: the user stopped
+                // the agent, so the queue waits for their next message.
+                if self.queue_paused {
+                    self.queue_paused = false;
+                    if !self.queued.is_empty() {
+                        self.push(
+                            Kind::Notice,
+                            format!("{} queued message(s) held — they send after your next message.", self.queued.len()),
+                        );
+                    }
+                } else if !self.queued.is_empty() && self.mode == Mode::Idle {
+                    let next = self.queued.remove(0);
+                    self.dispatch(next, h);
                 }
             }
             UiEvent::Suggestion(s) => {
@@ -556,11 +571,28 @@ impl App {
     }
 
     pub fn on_paste(&mut self, s: String) {
-        for c in s.chars() {
-            if c == '\n' || c == '\r' {
-                // ignore; pasted newlines shouldn't submit
-            } else {
-                self.insert_char(c);
+        // Newlines never submit; control characters never enter any buffer
+        // (the composer path runs `insert_char`, which also expands tabs).
+        let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\t').collect();
+        // Paste goes to whichever prompt owns the keyboard. A password pasted
+        // from a manager must land in the masked prompt — not in the hidden
+        // composer, where it would later show in clear and go to the model.
+        match &mut self.mode {
+            Mode::Password { .. } => self.pw_input.extend(clean.chars().filter(|c| *c != '\t')),
+            Mode::Question { .. } => self.q_input.extend(clean.chars().filter(|c| *c != '\t')),
+            Mode::Select => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.filter.extend(clean.chars().filter(|c| *c != '\t'));
+                    p.cursor = 0;
+                    p.scroll = 0;
+                }
+            }
+            Mode::Settings { edit: Some(buf), .. } => buf.extend(clean.chars().filter(|c| *c != '\t')),
+            Mode::Settings { edit: None, .. } | Mode::Approval(_) | Mode::ThemeSelect { .. } => {}
+            Mode::Idle | Mode::Busy => {
+                for c in clean.chars() {
+                    self.insert_char(c);
+                }
             }
         }
     }
@@ -653,6 +685,15 @@ impl App {
                 return;
             }
         }
+        // Ctrl+L: full repaint in every mode (advertised in /help; recovers
+        // from a desynced screen after e.g. a background job wrote to the tty).
+        if matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.force_clear = true;
+            self.dirty();
+            return;
+        }
         match self.mode {
             Mode::Password { .. } => self.on_key_password(key),
             Mode::Question { .. } => self.on_key_question(key),
@@ -671,7 +712,7 @@ impl App {
             Mode::Question { .. } => self.cancel_question(),
             Mode::Approval(_) => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
-                self.clear_busy();
+                self.interrupt(h);
             }
             Mode::Settings { .. } | Mode::Select | Mode::ThemeSelect { .. } => {
                 self.clear_busy();
@@ -693,7 +734,7 @@ impl App {
                 if let Some(tx) = self.pw_reply.take() {
                     let _ = tx.send(Some(val));
                 }
-                self.mode = Mode::Idle;
+                self.resume_busy();
             }
             KeyCode::Backspace => {
                 self.pw_input.pop();
@@ -709,7 +750,8 @@ impl App {
         if let Some(tx) = self.pw_reply.take() {
             let _ = tx.send(None);
         }
-        self.mode = Mode::Idle;
+        self.pw_input.clear();
+        self.resume_busy();
     }
 
     fn on_key_question(&mut self, key: KeyEvent) {
@@ -720,7 +762,7 @@ impl App {
                 if let Some(tx) = self.q_reply.take() {
                     let _ = tx.send(Some(val));
                 }
-                self.mode = Mode::Idle;
+                self.resume_busy();
             }
             KeyCode::Backspace => {
                 self.q_input.pop();
@@ -736,7 +778,8 @@ impl App {
         if let Some(tx) = self.q_reply.take() {
             let _ = tx.send(None);
         }
-        self.mode = Mode::Idle;
+        self.q_input.clear();
+        self.resume_busy();
     }
 
     fn cycle_perm(&self) {
@@ -774,8 +817,10 @@ impl App {
                 }
             }
             KeyCode::Esc => {
+                // Esc = deny AND stop the turn (Claude Code / Codex semantics);
+                // N denies but lets the model carry on.
                 let _ = h.appr_tx.send(ApprovalResponse::No);
-                self.clear_busy();
+                self.interrupt(h);
             }
             _ => {}
         }
@@ -929,7 +974,7 @@ impl App {
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ApiKey(val)));
             }
             9 => {
-                let v: u32 = val.parse().unwrap_or(self.ctx_limit);
+                let v: u32 = val.parse().map(|n: u32| n.max(1)).unwrap_or(self.ctx_limit);
                 self.settings.context_window = v;
                 self.ctx_limit = v;
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::ContextWindow(v)));
@@ -1071,12 +1116,10 @@ impl App {
 
     fn interrupt(&mut self, h: &Handles) {
         h.shared.cancel.store(true, Ordering::Relaxed);
-        // Restore any queued input undone by Esc so the composer content isn't lost.
-        if let Some(pending) = self.take_input() {
-            if !pending.is_empty() {
-                self.queued.insert(0, pending);
-            }
-        }
+        // The half-typed draft stays in the composer (it used to be queued,
+        // which sent it as the next prompt the moment the turn ended), and
+        // queued follow-ups are held until the user speaks again.
+        self.queue_paused = true;
         self.clear_busy();
         // Clear the suggestion so the user sees the hint again.
         self.suggestion = None;
@@ -1140,7 +1183,7 @@ impl App {
                 }
             }
             KeyCode::Backspace => self.on_key_edit(key),
-            KeyCode::Delete => self.delete_word_forward(),
+            KeyCode::Delete => self.on_key_edit(key),
             // Modified arrows: Alt/Ctrl+←/→ move by word, Alt/Ctrl+↑/↓ walk the
             // composer history (plain arrows are the transcript scroll below).
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
@@ -1390,6 +1433,15 @@ impl App {
         self.busy_since = Some(Instant::now());
     }
 
+    /// Back to Busy after a mid-turn prompt (approval, question, password)
+    /// without restarting the elapsed timer — the turn never stopped.
+    fn resume_busy(&mut self) {
+        self.mode = Mode::Busy;
+        if self.busy_since.is_none() {
+            self.busy_since = Some(Instant::now());
+        }
+    }
+
     fn clear_busy(&mut self) {
         self.mode = Mode::Idle;
         self.busy_since = None;
@@ -1420,10 +1472,16 @@ impl App {
 
     /// Start a turn with `text` as the user's prompt (attachments expanded).
     fn send_prompt(&mut self, text: String, h: &Handles) {
+        self.send_prompt_as(text.clone(), text, h);
+    }
+
+    /// Like `send_prompt`, but the transcript shows `shown` (e.g. `/review`)
+    /// instead of the full expanded template the worker receives.
+    fn send_prompt_as(&mut self, shown: String, text: String, h: &Handles) {
         // Echo the prompt into the transcript (with its full-width band) before
         // the turn starts, so the user can see what they asked for while
         // scrolling back — and so the attachments they referenced are named.
-        self.push(Kind::User, text.clone());
+        self.push(Kind::User, shown);
         let (task_text, attached) = expand_attachments(&text);
         let (images, img_names) = extract_images(&text);
         let mut all = attached;
@@ -1450,9 +1508,11 @@ impl App {
     }
 
     fn run_command(&mut self, cmd: &str, h: &Handles) {
-        let (cmd, _arg) = match cmd.split_once(' ') {
-            Some((c, a)) => (c, Some(a)),
-            None => (cmd, None),
+        // `/model ` (trailing space) must not become `SetModel("")` and persist
+        // an empty model name; a blank argument is no argument.
+        let (cmd, _arg) = match cmd.trim().split_once(char::is_whitespace) {
+            Some((c, a)) => (c, Some(a.trim()).filter(|a| !a.is_empty())),
+            None => (cmd.trim(), None),
         };
         match cmd {
             "model" => {
@@ -1500,7 +1560,8 @@ impl App {
                      with a one-line verdict: ship / fix first."
                 );
                 self.push(Kind::Notice, format!("reviewing changes vs {base}…"));
-                self.send_prompt(task, h);
+                let shown = format!("/review{}", _arg.map(|a| format!(" {}", a.trim())).unwrap_or_default());
+                self.send_prompt_as(shown, task, h);
             }
             "permissions" | "perms" => self.permissions_command(_arg, h),
             "hooks" => {
@@ -1586,8 +1647,9 @@ impl App {
             _ => {
                 if let Some(c) = self.custom_cmds.iter().find(|c| c.name == cmd) {
                     let body = crate::commands::expand(&c.body, _arg.unwrap_or(""));
-                    self.push(Kind::Notice, format!("/{} → {}", c.name, c.source.display()));
-                    self.send_prompt(body, h);
+                    let shown = format!("/{}{}", c.name, _arg.map(|a| format!(" {}", a.trim())).unwrap_or_default());
+                    self.push(Kind::Notice, format!("{shown} → {}", c.source.display()));
+                    self.send_prompt_as(shown, body, h);
                 } else {
                     self.push(Kind::ErrorK, format!("unknown command: /{cmd} (try /help)"));
                 }

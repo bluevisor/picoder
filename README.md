@@ -176,8 +176,11 @@ Per-project settings live in `.picoder/` inside the working directory:
 
 A rule is `tool` or `tool(pattern)`. For `bash`, `prefix:*` matches the prefix
 alone or followed by more words, a plain pattern is a prefix, and `*` is a
-wildcard; compound commands (`a && b`) are allowed only if every segment is and
-denied if any is. File tools take globs on the path. Claude Code's `Bash(...)`,
+wildcard; compound commands (`a && b`, `a; b`, `a | b`, `a & b`) are allowed
+only if every segment is and denied if any is, and a command that hides
+another command (`$(…)`, backticks, `<(…)`, `sh -c`, `sudo`, `xargs`, `eval`)
+is never auto-allowed. File tools take globs on the normalized path, so
+`src/../src/x` and `./src/x` are the same file to a rule. Claude Code's `Bash(...)`,
 `Edit(...)`, `Read(...)`, `Write(...)` spellings are accepted. Hooks get a JSON
 payload (`hook_event_name`, `tool_name`, `tool_input`, `tool_response`, `cwd`)
 on stdin; exit `0` continues (stdout becomes extra context), exit `2` blocks
@@ -266,7 +269,8 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `Option`/`Alt + Delete` | delete word forward |
 | `Tab` | autocomplete commands / paths |
 | `Ctrl+L` | redraw screen |
-| `Esc` | interrupt turn / clear line |
+| `Esc` | interrupt turn / clear line; on an approval prompt: deny and stop |
+| `Y` / `N` / `P` / `A` | approval prompt: yes / no (model continues) / don't ask again for this pattern / bypass all |
 | `Ctrl+C` | clear line, or quit (press twice) |
 
 picoder enables the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)

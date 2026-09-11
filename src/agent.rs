@@ -18,6 +18,7 @@ use std::thread::JoinHandle;
 /// Fallback limit used when max_tool_calls is 0 ("auto"). High enough to let
 /// the model converge naturally; low enough to catch runaway loops.
 const AUTO_STEPS: usize = 500;
+const SESSION_START_TAG: &str = "SessionStart hook context:";
 
 /// Permission modes (cycled with Shift+Tab in the UI).
 pub const PERM_ASK: u8 = 0; // prompt before each write/edit/bash
@@ -178,9 +179,12 @@ pub fn spawn(
         }
         if hooks.has("SessionStart") {
             if let Outcome::Continue { context } = hooks.run("SessionStart", "", &serde_json::json!({})) {
+                // A resumed session carries the previous launch's copy; replace
+                // it rather than stacking one per launch.
+                messages.retain(|m| !(m.role == "system" && m.content.starts_with(SESSION_START_TAG)));
                 if !context.trim().is_empty() {
                     let at = system_prefix_len(&messages);
-                    messages.insert(at, Message::system(format!("SessionStart hook context:\n{context}")));
+                    messages.insert(at, Message::system(format!("{SESSION_START_TAG}\n{context}")));
                 }
             }
         }
@@ -367,6 +371,9 @@ pub fn spawn(
                     }));
                     if result.is_err() {
                         let _ = w.ui.send(UiEvent::Error("internal error in agent turn".into()));
+                        // A panic mid tool-round leaves tool_calls without
+                        // results; the API would reject every later request.
+                        repair_orphans(&mut w.messages);
                     }
                     w.save_session();
                     w.refresh_balance(); // reflect spend after the turn
@@ -577,13 +584,23 @@ impl Worker {
         }
         // Keep the latest exchange (from the last user message on) verbatim —
         // unless it IS the whole conversation, then summarize everything.
-        let tail_start = self.messages[self.system_len..]
+        let mut tail_start = self.messages[self.system_len..]
             .iter()
             .rposition(|m| m.role == "user")
             .map(|i| i + self.system_len)
             .filter(|&i| i > self.system_len)
             .unwrap_or(n);
+        // When the latest exchange is itself what blew the window (one turn
+        // with hundreds of tool calls), keeping it verbatim compacts nothing
+        // and the next request still fails — summarize it too.
+        let limit = self.cfg.context_window.max(1) as usize;
+        if tail_start < n && estimate_tokens(&self.messages[tail_start..]) as usize > limit / 2 {
+            tail_start = n;
+        }
         let rendered = render_for_summary(&self.messages[self.system_len..tail_start]);
+        // The summary request must itself fit the model: ~4 chars per token,
+        // leave room for the reply.
+        let rendered = api::truncate(&rendered, (limit * 4).saturating_sub(8_000).max(20_000));
         if rendered.trim().is_empty() {
             let _ = self.ui.send(UiEvent::Notice("nothing to compact yet.".into()));
             return false;
@@ -854,6 +871,8 @@ impl Worker {
         let saved_len = self.system_len;
         let saved_prompt = self.last_prompt;
         let saved_tools = std::mem::replace(&mut self.tools, sub_tools);
+        let saved_calls = std::mem::take(&mut self.recent_calls);
+        let saved_images = std::mem::take(&mut self.pending_images);
         self.system_len = 1;
         self.quiet = true;
 
@@ -867,6 +886,8 @@ impl Worker {
         self.last_prompt = saved_prompt;
         self.tools = saved_tools;
         self.messages = saved_msgs;
+        self.recent_calls = saved_calls;
+        self.pending_images = saved_images;
         let _ = self.ui.send(UiEvent::Context(saved_prompt));
 
         match result {
@@ -1104,7 +1125,7 @@ impl Worker {
             "ask_user" => {
                 let (tx, rx) = mpsc::channel();
                 let _ = self.ui.send(UiEvent::Question { prompt: s("question").to_string(), reply: tx });
-                let r = match rx.recv() {
+                let r = match self.wait_reply(&rx) {
                     Ok(Some(ans)) if !ans.trim().is_empty() => {
                         format!("User answered: {}", ans.trim())
                     }
@@ -1282,12 +1303,29 @@ impl Worker {
         let _ = self.ui.send(UiEvent::ToolResult { ok, preview: preview(result, 12) });
     }
 
+    /// Block on a UI reply channel, but give up when the turn is cancelled
+    /// (Esc, or quitting) so the worker can never hang on a prompt nobody will
+    /// answer — that used to wedge `join()` at exit.
+    fn wait_reply<T>(&self, rx: &Receiver<T>) -> Result<T, ()> {
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(v) => return Ok(v),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return Err(());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(()),
+            }
+        }
+    }
+
     fn approve(&mut self, desc: &str, rule: Option<String>) -> bool {
         if self.perm.load(Ordering::Relaxed) == PERM_AUTO {
             return true;
         }
         let _ = self.ui.send(UiEvent::Approval { desc: desc.to_string(), rule });
-        match self.appr_rx.recv() {
+        match self.wait_reply(&self.appr_rx) {
             Ok(ApprovalResponse::Yes) => true,
             Ok(ApprovalResponse::Always) => {
                 self.perm.store(PERM_AUTO, Ordering::Relaxed);
@@ -1314,6 +1352,30 @@ impl Worker {
                 true
             }
             _ => false,
+        }
+    }
+}
+
+/// Answer every `tool_call` in the last assistant message that has no `tool`
+/// result following it, so the history is valid for the next request. Used
+/// after a panic mid tool-round and when loading a session from disk.
+pub fn repair_orphans(messages: &mut Vec<Message>) {
+    let Some(ai) = messages.iter().rposition(|m| m.role == "assistant") else { return };
+    let Some(calls) = messages[ai].tool_calls.clone() else { return };
+    let answered: Vec<String> = messages[ai + 1..]
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    // Results must directly follow their call; insert after the last tool result.
+    let mut at = ai + 1;
+    while at < messages.len() && messages[at].role == "tool" {
+        at += 1;
+    }
+    for c in calls {
+        if !answered.contains(&c.id) {
+            messages.insert(at, Message::tool(c.id.clone(), "(interrupted: tool did not run)".into()));
+            at += 1;
         }
     }
 }
@@ -1431,6 +1493,30 @@ fn preview(s: &str, maxlines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repair_orphans_answers_unanswered_tool_calls_only() {
+        use crate::api::{FunctionCall, ToolCall};
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall { name: "bash".into(), arguments: "{}".into() },
+        };
+        let mut msgs = vec![
+            Message::system("s"),
+            Message::user("u"),
+            Message { role: "assistant".into(), content: String::new(), images: vec![], tool_calls: Some(vec![call("a"), call("b"), call("c")]), tool_call_id: None },
+            Message::tool("a".into(), "done".into()),
+        ];
+        repair_orphans(&mut msgs);
+        let ids: Vec<_> = msgs.iter().filter(|m| m.role == "tool").map(|m| m.tool_call_id.clone().unwrap()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert_eq!(msgs[3].content, "done", "the real result is kept");
+        // Idempotent, and a no-op on a healthy history.
+        let before = msgs.len();
+        repair_orphans(&mut msgs);
+        assert_eq!(msgs.len(), before);
+    }
 
     #[test]
     fn system_prefix_counts_leading_system_only() {

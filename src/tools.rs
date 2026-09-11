@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     let raw = if let Some(rest) = path.strip_prefix("~/") {
         match std::env::var("HOME") {
             Ok(home) => PathBuf::from(home).join(rest),
@@ -363,6 +363,14 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
         (s, e) => {
             let s = s.unwrap_or(1).max(1) as usize;
             let e = e.map(|x| x as usize).unwrap_or(lines.len());
+            // An out-of-range or inverted range is an error, not "(empty file)"
+            // — the model must not conclude the file is blank and overwrite it.
+            if s > lines.len() && !lines.is_empty() {
+                return format!("ERROR: start_line {s} is beyond the end of the file ({} lines).", lines.len());
+            }
+            if e < s {
+                return format!("ERROR: end_line {e} is before start_line {s}.");
+            }
             let lo = (s - 1).min(lines.len());
             let hi = e.min(lines.len()).max(lo);
             (&lines[lo..hi], s)
@@ -503,6 +511,7 @@ pub struct EditReq {
 }
 
 /// A validated multi-file edit, ready to apply.
+#[derive(Debug)]
 pub struct MultiEditPlan {
     /// Combined diff across all touched files, for the approval preview.
     pub diff: String,
@@ -521,48 +530,30 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
     let mut originals: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut current: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
+    // Key every map by the normalized path: `src/a.rs` and `./src/a.rs` are one
+    // file, and two spellings used to load it twice and let the later write
+    // clobber the earlier edit.
+    let mut shown: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (i, e) in edits.iter().enumerate() {
-        if !current.contains_key(&e.path) {
-            let disk = std::fs::read_to_string(expand(&e.path))
-                .map_err(|err| format!("ERROR: edit {}: {} ({err})", i + 1, e.path))?;
-            // NFC-normalize disk content so the model's composed codepoints
-            // match against possibly decomposed file text.
-            let disk_nfc: String = unicode_normalization::UnicodeNormalization::nfc(disk.chars())
-                .collect();
-            originals.insert(e.path.clone(), disk.clone());
-            current.insert(e.path.clone(), disk_nfc);
-            order.push(e.path.clone());
+        let key = expand(&e.path).to_string_lossy().into_owned();
+        if !current.contains_key(&key) {
+            let disk = read_for_edit(&expand(&e.path), &e.path)
+                .map_err(|err| format!("{} (edit {}: {})", err.trim_end_matches('.'), i + 1, e.path))?;
+            originals.insert(key.clone(), disk.clone());
+            current.insert(key.clone(), disk);
+            shown.insert(key.clone(), e.path.clone());
+            order.push(key.clone());
         }
-        let cur = current.get(&e.path).unwrap();
-        let old_nfc: String = unicode_normalization::UnicodeNormalization::nfc(e.old_text.chars())
-            .collect();
-        // Refuse no-op edits (old == new). They'd succeed but make no change
-        // and still trigger a git commit — a wasted checkpoint.
-        if old_nfc == e.new_text {
-            return Err(format!(
-                "ERROR: edit {}: old_text and new_text are identical (no change)",
-                i + 1
-            ));
-        }
-        let n = cur.matches(&old_nfc).count();
-        if n == 0 {
-            return Err(format!("ERROR: edit {}: old_text not found in {}", i + 1, e.path));
-        }
-        if n > 1 {
-            return Err(format!(
-                "ERROR: edit {}: old_text matches {n} times in {}; make it unique",
-                i + 1,
-                e.path
-            ));
-        }
-        let updated = cur.replacen(&old_nfc, &e.new_text, 1);
-        current.insert(e.path.clone(), updated);
+        let cur = current.get(&key).unwrap();
+        let updated = splice_edit(cur, &e.old_text, &e.new_text, &format!("edit {} ({}): ", i + 1, e.path))?;
+        current.insert(key, updated);
     }
     let mut diff = String::new();
     let mut files = Vec::new();
-    for path in &order {
-        let old = &originals[path];
-        let new = &current[path];
+    for key in &order {
+        let old = &originals[key];
+        let new = &current[key];
+        let path = &shown[key];
         diff.push_str(&format!("--- {path}\n"));
         diff.push_str(&crate::diff::unified(old, new, 300));
         diff.push('\n');
@@ -570,67 +561,101 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
     }
     Ok(MultiEditPlan { diff, files })
 }
-pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
-    let p = expand(path);
-    // Open with O_NOFOLLOW so symlinks are refused atomically.
+/// Locate `old_text` in `data` and splice in `new_text`. Matches the raw bytes
+/// first so a file is never rewritten wholesale; only when that fails does it
+/// fall back to NFC-normalized matching (the model may emit composed
+/// codepoints for a decomposed file), in which case the whole file comes back
+/// normalized — the diff shows it. Errors are the model-facing messages.
+fn splice_edit(data: &str, old_text: &str, new_text: &str, where_: &str) -> std::result::Result<String, String> {
+    if old_text == new_text {
+        return Err(format!("ERROR: {where_}old_text and new_text are identical (no change)."));
+    }
+    let count = |hay: &str, needle: &str| if needle.is_empty() { 0 } else { hay.matches(needle).count() };
+    match count(data, old_text) {
+        1 => return Ok(data.replacen(old_text, new_text, 1)),
+        n if n > 1 => return Err(format!("ERROR: {where_}old_text matches {n} times; make it unique.")),
+        _ => {}
+    }
+    let data_nfc: String = unicode_normalization::UnicodeNormalization::nfc(data.chars()).collect();
+    let old_nfc: String = unicode_normalization::UnicodeNormalization::nfc(old_text.chars()).collect();
+    match count(&data_nfc, &old_nfc) {
+        0 => Err(format!("ERROR: {where_}old_text not found.")),
+        1 => Ok(data_nfc.replacen(&old_nfc, new_text, 1)),
+        n => Err(format!("ERROR: {where_}old_text matches {n} times; make it unique.")),
+    }
+}
+
+/// Read a file for editing, refusing symlinks atomically (O_NOFOLLOW).
+fn read_for_edit(p: &Path, shown: &str) -> std::result::Result<String, String> {
     #[cfg(unix)]
-    let data = {
+    {
         use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&p) {
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p) {
             Ok(mut f) => {
                 let mut s = String::new();
-                if let Err(e) = std::io::Read::read_to_string(&mut f, &mut s) {
-                    return EditPreview::Err(format!("ERROR: {e}"));
-                }
-                s
+                std::io::Read::read_to_string(&mut f, &mut s).map_err(|e| format!("ERROR: {e}"))?;
+                Ok(s)
             }
             Err(e) => {
-                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                if let Ok(meta) = std::fs::symlink_metadata(p) {
                     if meta.file_type().is_symlink() {
-                        return EditPreview::Err(format!("DENIED: {path} is a symlink; edit the real path instead."));
+                        return Err(format!("DENIED: {shown} is a symlink; edit the real path instead."));
                     }
                 }
-                return EditPreview::Err(format!("ERROR: {e}"));
+                Err(format!("ERROR: {e}"))
             }
         }
-    };
+    }
     #[cfg(not(unix))]
-    let data = {
-        if let Some(err) = deny_symlink(&p, path, "edit") {
-            return EditPreview::Err(err);
+    {
+        if let Some(err) = deny_symlink(p, shown, "edit") {
+            return Err(err);
         }
-        match std::fs::read_to_string(&p) {
-            Ok(d) => d,
-            Err(e) => return EditPreview::Err(format!("ERROR: {e}")),
-        }
+        std::fs::read_to_string(p).map_err(|e| format!("ERROR: {e}"))
+    }
+}
+
+pub fn edit_preview(path: &str, old_text: &str, new_text: &str) -> EditPreview {
+    let p = expand(path);
+    let data = match read_for_edit(&p, path) {
+        Ok(d) => d,
+        Err(e) => return EditPreview::Err(e),
     };
-    // NFC-normalize both sides before substring matching: the model may emit
-    // composed codepoints while the file uses decomposed forms (e.g. "é" as
-    // U+00E9 vs. "é" as e + combining acute). Normalizing makes them match.
-    let data_nfc = unicode_normalization::UnicodeNormalization::nfc(data.chars())
-        .collect::<String>();
-    let old_nfc = unicode_normalization::UnicodeNormalization::nfc(old_text.chars())
-        .collect::<String>();
-    // Refuse no-op edits.
-    if old_nfc == new_text {
-        return EditPreview::Err("ERROR: old_text and new_text are identical (no change).".into());
+    match splice_edit(&data, old_text, new_text, "") {
+        Ok(new_content) => {
+            let diff = crate::diff::unified(&data, &new_content, 300);
+            EditPreview::Ok { diff, new_content }
+        }
+        Err(e) => EditPreview::Err(e),
     }
-    let n = data_nfc.matches(&old_nfc).count();
-    if n == 0 {
-        return EditPreview::Err("ERROR: old_text not found.".into());
-    }
-    if n > 1 {
-        return EditPreview::Err(format!("ERROR: old_text matches {n} times; make it unique."));
-    }
-    let new_content = data_nfc.replacen(&old_nfc, new_text, 1);
-    let diff = crate::diff::unified(&data, &new_content, 300);
-    EditPreview::Ok { diff, new_content }
 }
 
 pub fn apply_write(path: &str, content: &str) -> String {
     let p = expand(path);
-    match std::fs::write(&p, content) {
+    // O_NOFOLLOW: the preview refused symlinks, the write must too (a link
+    // could be swapped in between, and multi_edit has no other guard).
+    #[cfg(unix)]
+    let res = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&p)
+            .and_then(|mut f| f.write_all(content.as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let res = match deny_symlink(&p, path, "edit") {
+        Some(err) => return err,
+        None => std::fs::write(&p, content),
+    };
+    match res {
         Ok(()) => format!("OK edited {}", p.display()),
+        Err(e) if std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) => {
+            format!("DENIED: {path} is a symlink; edit the real path instead. ({e})")
+        }
         Err(e) => format!("ERROR: {e}"),
     }
 }
@@ -642,12 +667,6 @@ pub fn in_git_repo(dir: &Path) -> bool {
     git_cmd(dir, &["rev-parse", "--is-inside-work-tree"], 10)
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Run a git subprocess with a timeout. Returns the exit status, or an error
-/// (timeout or spawn failure). Stderr is captured so callers can inspect it.
-fn git_status(dir: &Path, args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::ExitStatus> {
-    git_cmd(dir, args, timeout_secs)
 }
 
 fn git_cmd(dir: &Path, args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::ExitStatus> {
@@ -760,10 +779,20 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         return String::new();
     }
 
-    // Only bump Cargo.toml when the edited files actually changed.
-    let staged = git_status(dir, &["diff", "--cached", "--quiet"], 10)
-        .map(|s| !s.success()) // --quiet exits 1 when there ARE differences
-        .unwrap_or(false);
+    // Only bump Cargo.toml when the edited files actually changed. Scope the
+    // check to those files: anything the user had staged themselves is not
+    // ours to judge (or, below, to commit).
+    let staged = {
+        let mut c = Command::new("git");
+        c.arg("-C").arg(dir).args(["diff", "--cached", "--quiet", "--"]);
+        for p in &paths {
+            c.arg(p);
+        }
+        c.stdout(Stdio::null()).stderr(Stdio::null());
+        run_proc(&mut c, 10)
+            .map(|o| !o.status.success()) // --quiet exits 1 when there ARE differences
+            .unwrap_or(false)
+    };
     if !staged {
         return String::new(); // nothing changed
     }
@@ -790,8 +819,16 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         if ident {
             c.args(["-c", "user.name=picoder", "-c", "user.email=picoder@localhost"]);
         }
-        // Commit all staged changes (the edited files + optional Cargo.toml bump).
-        c.args(["commit", "--no-verify", "-m", message]);
+        // Commit only the edited files (+ the Cargo.toml bump): with explicit
+        // paths git ignores whatever else the user has staged, so a checkpoint
+        // never sweeps their half-prepared commit into a "picoder: edit" one.
+        c.args(["commit", "--no-verify", "-m", message, "--"]);
+        for p in &paths {
+            c.arg(p);
+        }
+        if version_bumped.is_some() {
+            c.arg(&cargo_toml);
+        }
         run_proc(&mut c, 30).map(|o| {
             (o.status.success(), String::from_utf8_lossy(&o.stderr).trim().to_string())
         }).unwrap_or_default()
@@ -1384,6 +1421,20 @@ fn lock_acquire(lock_path: &std::path::Path) -> std::io::Result<()> {
         {
             Ok(_) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A lock left behind by a killed process (or a power cut — the
+                // SD-card scenario this codebase designs for) would otherwise
+                // break `remember` forever; an append takes milliseconds, so a
+                // lock older than a few seconds is stale.
+                let stale = std::fs::metadata(lock_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|age| age > std::time::Duration::from_secs(10))
+                    .unwrap_or(false);
+                if stale {
+                    let _ = std::fs::remove_file(lock_path);
+                    continue;
+                }
                 if delay > std::time::Duration::from_millis(200) {
                     return Err(e);
                 }
@@ -1532,6 +1583,97 @@ mod tests {
         // Nothing applied — file unchanged.
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "keep me\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn edits_match_raw_text_first_and_only_normalize_as_a_fallback() {
+        // Decomposed "é" (e + U+0301) elsewhere in the file must survive an
+        // unrelated edit untouched.
+        let data = "caf\u{65}\u{301} au lait\nfoo = 1\n";
+        let out = splice_edit(data, "foo = 1", "foo = 2", "").unwrap();
+        assert_eq!(out, "caf\u{65}\u{301} au lait\nfoo = 2\n");
+        // Composed old_text against a decomposed file still matches (fallback).
+        let out = splice_edit(data, "caf\u{e9}", "tea", "").unwrap();
+        assert!(out.starts_with("tea au lait"));
+        assert!(splice_edit(data, "nope", "x", "").unwrap_err().contains("not found"));
+        assert!(splice_edit("a a", "a", "b", "").unwrap_err().contains("2 times"));
+        assert!(splice_edit(data, "foo", "foo", "").unwrap_err().contains("identical"));
+    }
+
+    #[test]
+    fn multi_edit_treats_two_spellings_of_one_file_as_one_file() {
+        let dir = std::env::temp_dir().join(format!("picoder-me-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.txt");
+        std::fs::write(&f, "one two three\n").unwrap();
+        let spelled = format!("{}/./a.txt", dir.display());
+        let plan = multi_edit_plan(&[
+            EditReq { path: f.to_string_lossy().into_owned(), old_text: "one".into(), new_text: "1".into() },
+            EditReq { path: spelled, old_text: "three".into(), new_text: "3".into() },
+        ])
+        .unwrap();
+        assert_eq!(plan.files.len(), 1, "one file, both edits");
+        assert_eq!(plan.files[0].1, "1 two 3\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multi_edit_and_apply_write_refuse_symlinks() {
+        let dir = std::env::temp_dir().join(format!("picoder-me-ln-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.txt");
+        std::fs::write(&real, "hello\n").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = multi_edit_plan(&[EditReq { path: link.to_string_lossy().into_owned(), old_text: "hello".into(), new_text: "bye".into() }])
+            .unwrap_err();
+        assert!(err.starts_with("DENIED"), "{err}");
+        let r = apply_write(link.to_str().unwrap(), "bye\n");
+        assert!(r.starts_with("DENIED"), "{r}");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "hello\n", "the target is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_reports_bad_ranges_instead_of_an_empty_file() {
+        let dir = std::env::temp_dir().join(format!("picoder-rf-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("r.txt");
+        std::fs::write(&f, "a\nb\nc\n").unwrap();
+        let p = f.to_str().unwrap();
+        assert!(read_file(p, Some(10), None).starts_with("ERROR: start_line 10 is beyond"));
+        assert!(read_file(p, Some(3), Some(2)).starts_with("ERROR: end_line 2 is before"));
+        assert!(read_file(p, Some(2), Some(2)).contains("    2  b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_autocommit_leaves_the_users_own_staged_changes_alone() {
+        let dir = std::env::temp_dir().join(format!("picoder-ac-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let o = Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "init"]);
+        // The user has staged their own work-in-progress...
+        std::fs::write(dir.join("mine.txt"), "wip").unwrap();
+        git(&["add", "mine.txt"]);
+        // ...and picoder edits a different file.
+        let edited = dir.join("edited.txt");
+        std::fs::write(&edited, "hello").unwrap();
+        let note = git_autocommit(&dir, &[edited.to_string_lossy().into_owned()], "picoder: edit edited.txt");
+        assert!(note.contains("[committed"), "{note}");
+        let files = git(&["show", "--name-only", "--format=", "HEAD"]);
+        assert_eq!(files.trim(), "edited.txt", "only picoder's file is in the checkpoint");
+        assert_eq!(git(&["diff", "--cached", "--name-only"]), "mine.txt", "the user's staging survives");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

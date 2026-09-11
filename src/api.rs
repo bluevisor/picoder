@@ -50,8 +50,15 @@ fn messages_payload(messages: &[Message], supports_images: bool) -> Vec<serde_js
     messages
         .iter()
         .map(|m| {
-            if !supports_images || m.images.is_empty() {
+            if m.images.is_empty() {
                 return serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+            }
+            if !supports_images {
+                // Drop the payload, not just the multimodal form: serializing
+                // `m` as-is would ship the base64 blobs in an `images` field.
+                let mut plain = m.clone();
+                plain.images.clear();
+                return serde_json::to_value(&plain).unwrap_or(serde_json::Value::Null);
             }
             let mut parts: Vec<serde_json::Value> = Vec::new();
             if !m.content.is_empty() {
@@ -604,6 +611,17 @@ pub fn truncate(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod balance_tests {
     use super::*;
+
+    #[test]
+    fn images_are_dropped_entirely_for_providers_without_vision() {
+        let m = Message::user_with_images("look", vec!["data:image/png;base64,AAAA".into()]);
+        let v = &messages_payload(&[m.clone()], false)[0];
+        assert!(v.get("images").is_none(), "{v}");
+        assert_eq!(v["content"], "look");
+        let v = &messages_payload(&[m], true)[0];
+        assert!(v["content"].is_array());
+    }
+
     use serde_json::json;
 
     /// The shape DeepSeek actually returns for a China-region account: a funded
