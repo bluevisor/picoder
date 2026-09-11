@@ -787,12 +787,7 @@ impl App {
             _ => None,
         };
         if let Some(delta) = step {
-            let len = picker.filtered().len();
-            if len > 0 {
-                let last = len as isize - 1;
-                picker.cursor = (picker.cursor as isize + delta).clamp(0, last) as usize;
-            }
-            picker.clamp(len);
+            picker.step(delta);
             return;
         }
 

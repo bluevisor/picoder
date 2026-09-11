@@ -223,6 +223,20 @@ impl Picker {
             self.scroll = self.cursor + 1 - PICKER_VISIBLE;
         }
     }
+
+    /// Move the highlight `delta` rows through the *filtered* view, clamping at
+    /// both ends and scrolling the window along. Shared by the arrow keys and
+    /// the Ctrl+j/k aliases in the picker key handler.
+    pub fn step(&mut self, delta: isize) {
+        let len = self.filtered().len();
+        if len == 0 {
+            self.cursor = 0;
+            self.scroll = 0;
+            return;
+        }
+        self.cursor = (self.cursor as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.clamp(len);
+    }
 }
 
 /// Everything the UI needs from config, captured before the worker consumes it.
