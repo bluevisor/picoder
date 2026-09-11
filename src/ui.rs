@@ -1248,8 +1248,18 @@ impl App {
             self.run_command(cmd, h);
             return;
         }
+        // Echo the prompt into the transcript (with its full-width band) before
+        // the turn starts, so the user can see what they asked for while
+        // scrolling back — and so the attachments they referenced are named.
+        self.push(Kind::User, text.clone());
+        let (task_text, attached) = expand_attachments(&text);
+        let (images, img_names) = extract_images(&text);
+        let mut all = attached;
+        all.extend(img_names);
+        if !all.is_empty() {
+            self.push(Kind::Notice, format!("attached: {}", all.join(", ")));
+        }
         self.set_busy();
-        let (task_text, images) = self.prepare_message(text);
         let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
     }
 
