@@ -2803,6 +2803,59 @@ mod tests {
         assert_eq!(p.filtered(), vec![2], "'k' filtered instead of moving up");
     }
 
+    /// A long, multi-line ask_user question must come out whole in the panel.
+    /// It used to be one `Line`, so ratatui clipped it at the panel's right edge
+    /// (and an embedded newline in the prompt reached the frame as a stray
+    /// newline character) — the answer line is the only thing the user could
+    /// read, and they had to answer a question they never saw.
+    #[test]
+    fn a_long_question_is_wrapped_and_fully_visible() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, _rx) = test_handles();
+        app.handle_event(
+            UiEvent::Question {
+                prompt: "Which database should I target?\nThe options are postgres or sqlite.".into(),
+                reply: std::sync::mpsc::channel().0,
+            },
+            &h,
+        );
+        assert!(matches!(app.mode, Mode::Question { .. }));
+
+        let mut term = Terminal::new(TestBackend::new(46, 20)).unwrap();
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("? Which database"), "question lead:\n{screen}");
+        // The tail of the question survives: both its own newline and the width
+        // wrap land on later rows instead of being cut off.
+        assert!(
+            screen.contains("sqlite."),
+            "the whole question is on screen:\n{screen}"
+        );
+
+        // Typing keeps the answer on the row under the question, led by the
+        // indent so it lines up with the question text.
+        app.on_key(key(KeyCode::Char('p')), &h);
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("  p"), "the answer line is indented:\n{screen}");
+
+        // A question that would overflow the panel still can't eat the screen:
+        // the transcript keeps its rows.
+        app.note("transcript marker".to_string());
+        app.handle_event(
+            UiEvent::Question {
+                prompt: (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+                reply: std::sync::mpsc::channel().0,
+            },
+            &h,
+        );
+        let screen = draw(&mut app, &mut term);
+        assert!(
+            screen.contains("transcript marker"),
+            "the panel is capped:\n{screen}"
+        );
+    }
 
 }
 
