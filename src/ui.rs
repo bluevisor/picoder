@@ -2708,6 +2708,7 @@ mod tests {
     /// blank line in the transcript, and the renderer draws it as an empty row.
     #[test]
     fn committed_blocks_are_separated_by_a_blank_row() {
+        use crate::ui::types::Kind;
         let mut app = App::new(test_ui_config(), Vec::new());
         app.push(Kind::Assistant, "first answer");
         app.push(Kind::User, "second question");
