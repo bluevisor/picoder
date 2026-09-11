@@ -83,7 +83,10 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   skips mouse capture (below) and would otherwise have no way to scroll.
 - Mouse capture is skipped on Warp (`TERM_PROGRAM=WarpTerminal`) so click-drag
   text selection keeps working; `PICODER_MOUSE=1`/`0` overrides either way.
-- ASCII fallback + clear-on-exit for the Pi's framebuffer console (`TERM=linux`).
+- ASCII fallback + clear-on-exit for the Pi's framebuffer console (`TERM=linux`),
+  whose 16-color palette can't show a theme's RGB shades: the palette is snapped
+  to the nearest ANSI color there (`palette::for_16color`), since the console
+  ignores an `ESC[38;2;…m` and leaves the cell in whatever color came before.
 - Launch banner: rainbow-color PICODER logo + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `Default`, `Apple ][` (green phosphor, `] ▒`),
   `MSDOS` (gray, `C:\>`), `macOS` (dark mode system colors, `~ `),
