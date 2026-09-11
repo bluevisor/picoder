@@ -117,6 +117,11 @@ pub struct App {
     /// Terminal draws every glyph in one cell (ASCII mode, or the Linux
     /// framebuffer console) — wide chars must be replaced before rendering.
     single_width: bool,
+    /// The terminal can show 24-bit color. When it can't (the Pi's framebuffer
+    /// console), theme palettes are snapped to the nearest of the 16 ANSI
+    /// colors, because an `Rgb` shade is emitted as an escape sequence the
+    /// console ignores — leaving text in whatever color was last in effect.
+    truecolor: bool,
     glyphs: Glyphs,
     ascii: bool,
     palette: Palette,
@@ -198,6 +203,7 @@ impl App {
             force_clear: false,
             single_width: cfg.ascii
                 || matches!(std::env::var("TERM").as_deref(), Ok("linux")),
+            truecolor: detect_truecolor(),
             glyphs: if cfg.ascii { GLYPHS_A } else { GLYPHS_U },
             ascii: cfg.ascii,
             palette: palette_by_name(&cfg.theme),
@@ -536,7 +542,16 @@ impl App {
             .sum()
     }
 
-    fn char_len(&self) -> usize {
+    /// The palette the App starts with, already adapted to the terminal: on a
+    /// 16-color console the theme's RGB shades are snapped to ANSI colors.
+    fn initial_palette(theme: &str) -> Palette {
+        let p = palette_by_name(theme);
+        if detect_truecolor() {
+            p
+        } else {
+            palette::for_16color(p)
+        }
+    }
         self.input.chars().count()
     }
 
