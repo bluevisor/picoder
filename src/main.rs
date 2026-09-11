@@ -11,6 +11,7 @@ mod auth;
 mod config;
 mod diff;
 mod mcp;
+mod money;
 mod sysinfo;
 mod tools;
 mod ui;
