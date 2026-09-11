@@ -2012,24 +2012,30 @@ mod tests {
         (h, cmd_rx)
     }
 
-    /// The real key path (`App::on_key` → `Mode::Select`) used by `/model`:
-    /// a mis-guarded match arm silently swallowed plain Up/Down while the
-    /// Ctrl+j/k aliases still worked.
-    fn select_app(models: &[&str]) -> (App, Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
+    /// A `UiConfig` with test-sized numbers; `price_*` are zeroed so costs are
+    /// deterministic unless a test sets them.
+    fn test_ui_config() -> UiConfig {
         use std::sync::atomic::AtomicU8;
         use std::sync::Arc;
 
-        let cfg = UiConfig {
+        UiConfig {
             model: "m0".into(),
             theme: "Default".into(),
             ascii: false,
             ctx_limit: 128_000,
             price_in: 0.0,
             price_out: 0.0,
+            price_currency: crate::money::Currency::usd(),
             perm: Arc::new(AtomicU8::new(0)),
             settings: crate::config::Config::default(),
-        };
-        let mut app = App::new(cfg, Vec::new());
+        }
+    }
+
+    /// The real key path (`App::on_key` → `Mode::Select`) used by `/model`:
+    /// a mis-guarded match arm silently swallowed plain Up/Down while the
+    /// Ctrl+j/k aliases still worked.
+    fn select_app(models: &[&str]) -> (App, Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
+        let mut app = App::new(test_ui_config(), Vec::new());
         let (h, cmd_rx) = test_handles();
         app.handle_event(
             UiEvent::ModelList(models.iter().map(|m| m.to_string()).collect()),
@@ -2050,20 +2056,7 @@ mod tests {
     /// has somewhere to go. `max_top`/`view_h` are normally set by the render
     /// pass; a unit test pokes them directly.
     fn scrollable_app() -> (App, Handles) {
-        use std::sync::atomic::AtomicU8;
-        use std::sync::Arc;
-
-        let cfg = UiConfig {
-            model: "m0".into(),
-            theme: "Default".into(),
-            ascii: false,
-            ctx_limit: 128_000,
-            price_in: 0.0,
-            price_out: 0.0,
-            perm: Arc::new(AtomicU8::new(0)),
-            settings: crate::config::Config::default(),
-        };
-        let mut app = App::new(cfg, vec!["first".into(), "second".into()]);
+        let mut app = App::new(test_ui_config(), vec!["first".into(), "second".into()]);
         app.max_top = 40;
         app.view_h = 10;
         app.scroll = 40; // pinned to the live end
