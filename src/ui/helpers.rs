@@ -430,11 +430,16 @@ fn render_md_line(
     let code_style = Style::default().fg(p.code);
 
     let mut segs: Vec<(String, Style)> = Vec::new();
+    // Continuation lines of a wrapped list item align under the item text (a
+    // hanging indent) instead of snapping back to the glyph column.
+    let mut hang = 0usize;
     let body: String = if let Some(rest) = heading_body(text.trim_start()) {
         base = Style::default().fg(p.heading).add_modifier(Modifier::BOLD);
         rest.to_string()
     } else if let Some((lead_ws, rest)) = bullet_body(text) {
-        segs.push((format!("{lead_ws}{} ", bullet_glyph(g)), base));
+        let marker = format!("{lead_ws}{} ", bullet_glyph(g));
+        hang = marker.chars().count();
+        segs.push((marker, base));
         rest.to_string()
     } else {
         text.to_string()
@@ -443,8 +448,10 @@ fn render_md_line(
     if segs.is_empty() {
         segs.push((String::new(), base));
     }
+    // Wrap to the hanging column so no wrapped line can overflow the panel.
+    let wrap_w = width.saturating_sub(prefix_w + hang).max(1);
     let lines = wrap_segments(segs, wrap_w);
-    emit_lines(out, lead, width, g, p, lines);
+    emit_lines(out, lead, width, g, p, lines, hang);
 }
 
 /// Render a verbatim line inside a fenced code block: code color, no inline
