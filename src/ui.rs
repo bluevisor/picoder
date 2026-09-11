@@ -1018,6 +1018,20 @@ impl App {
         }
     }
 
+    /// Arms — or fires — the Ctrl+C/Ctrl+D (and empty-composer Esc) quit. True
+    /// means the app is quitting and the caller should stop handling the key.
+    fn double_press_quit(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(t) = self.last_ctrl_c {
+            if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
+                self.should_quit = true;
+                return true;
+            }
+        }
+        self.last_ctrl_c = Some(now);
+        false
+    }
+
     fn interrupt(&mut self, h: &Handles) {
         h.shared.cancel.store(true, Ordering::Relaxed);
         // Restore any queued input undone by Esc so the composer content isn't lost.
