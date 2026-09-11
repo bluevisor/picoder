@@ -167,7 +167,6 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `Option`/`Alt + Backspace` | delete word backward |
 | `Option`/`Alt + Delete` | delete word forward |
 | `Tab` | autocomplete commands / paths |
-| `PgUp` / `PgDn` | scroll transcript |
 | `Ctrl+L` | redraw screen |
 | `Esc` | interrupt turn / clear line |
 | `Ctrl+C` | quit (press twice) |
