@@ -1903,22 +1903,27 @@ impl App {
             _ => (if self.ascii { "*" } else { "●" }, "ask before edits", Color::Green),
         };
         let down = if self.ascii { "| v" } else { "↓" };
+        // "new" only when something actually arrived; a manual scroll-up just
+        // hints that the live end is below. Kept near the front of the line
+        // (before the shift+tab hint and version) so a narrow terminal can't
+        // clip it away.
+        let hint = if !self.scrolled_up {
+            None
+        } else if self.new_below {
+            Some(Span::styled(
+                format!("  {down} new"),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Some(Span::styled(format!("  {down} end"), Style::default().fg(self.dim_text())))
+        };
         let mut spans = vec![
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::styled(text, Style::default().fg(color)),
-            Span::styled("  (shift+tab/ctrl+p to cycle)", Style::default().fg(self.dim_text())),
-            Span::styled(format!("   picoder v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(self.dim_text())),
         ];
-        if self.scrolled_up {
-            // "new" only when something actually arrived; a manual scroll-up
-            // just hints that the live end is below.
-            let (label, style) = if self.new_below {
-                (format!("{down} new"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-            } else {
-                (format!("{down} end"), Style::default().fg(self.dim_text()))
-            };
-            spans.push(Span::styled(format!("  {label}"), style));
-        }
+        spans.extend(hint);
+        spans.push(Span::styled("  (shift+tab/ctrl+p to cycle)", Style::default().fg(self.dim_text())));
+        spans.push(Span::styled(format!("   picoder v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(self.dim_text())));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 }
