@@ -2090,6 +2090,61 @@ mod tests {
         assert_eq!(clean_text("\x1b[32mok", false), "ok");
     }
 
+    /// A pasted snippet often carries raw escapes (copied out of a colored
+    /// terminal or a log file). Drawn into the frame they desync the terminal
+    /// from ratatui's cell grid, so every later cell comes out in the wrong
+    /// color until a full repaint. Control bytes must never reach the buffer.
+    #[test]
+    fn pasted_control_characters_never_reach_the_composer() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.on_paste("safe \x1b[31mred\x1b[0m text\tend".to_string());
+        assert_eq!(app.input, "safe [31mred[0m text end");
+        assert_eq!(app.cursor, app.input.chars().count());
+    }
+
+    /// On a 16-color console the console ignores `ESC[38;2;…m`, so a theme's RGB
+    /// shades made text come out in whatever color was last in effect. The
+    /// adapted palette must contain no RGB left at all (and must stay usable:
+    /// readable text, a visible highlight band).
+    #[test]
+    fn a_16color_terminal_gets_a_palette_with_no_rgb_left_in_it() {
+        use ratatui::style::Color;
+        for theme in THEMES {
+            let safe = palette_for(theme, false);
+            for (name, c) in [
+                ("accent", safe.accent),
+                ("assistant", safe.assistant),
+                ("assistant_glyph", safe.assistant_glyph),
+                ("reasoning", safe.reasoning),
+                ("tool", safe.tool),
+                ("tool_result", safe.tool_result),
+                ("notice", safe.notice),
+                ("code", safe.code),
+                ("heading", safe.heading),
+                ("diff_add", safe.diff_add),
+                ("diff_del", safe.diff_del),
+                ("diff_ctx", safe.diff_ctx),
+                ("error", safe.error),
+                ("chrome", safe.chrome),
+                ("secondary", safe.secondary),
+            ] {
+                assert!(
+                    !matches!(c, Color::Rgb(..)),
+                    "{theme}: {name} is still RGB on a 16-color terminal"
+                );
+            }
+            assert_eq!(safe.user_bg, Color::DarkGray, "{theme}: band stays visible");
+            // A truecolor terminal is left completely alone.
+            let full = palette_for(theme, true);
+            assert_eq!(full.assistant, palette_by_name(theme).assistant);
+        }
+        // The default theme's near-white still reads as a bright color, and the
+        // dim gray still as a dim one: the snap must not collapse them together.
+        let safe = palette_for("Default", false);
+        assert_eq!(safe.assistant, Color::White);
+        assert_eq!(safe.reasoning, Color::DarkGray);
+    }
+
     #[test]
     fn clean_text_ascii_replaces_non_single_width() {
         assert_eq!(clean_text("ok 🚀 漢", true), "ok ? ?");
