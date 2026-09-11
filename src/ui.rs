@@ -2677,6 +2677,56 @@ mod tests {
         assert!(!bottom.contains("end") && !bottom.contains("new"));
     }
 
+    /// The transcript separates blocks with blank lines so turns, prose, and
+    /// tool activity don't run together — but only at real boundaries: a notice
+    /// or a tool result that belongs to the preceding block stays attached.
+    #[test]
+    fn transcript_inserts_blank_lines_between_blocks() {
+        use super::needs_sep;
+        use crate::ui::types::Kind;
+
+        // A new prompt always opens a fresh, roomy block…
+        assert!(needs_sep(Kind::Assistant, Kind::User));
+        assert!(needs_sep(Kind::ToolResult, Kind::User));
+        // …but two prompts in a row are one block, and the banner pads itself.
+        assert!(!needs_sep(Kind::User, Kind::User));
+        assert!(!needs_sep(Kind::Banner, Kind::User));
+
+        // Prose → tools, and tools → the reply that follows, both get a gap.
+        assert!(needs_sep(Kind::Assistant, Kind::Tool));
+        assert!(needs_sep(Kind::ToolResult, Kind::Tool));
+        assert!(needs_sep(Kind::ToolResult, Kind::Assistant));
+        assert!(needs_sep(Kind::Reasoning, Kind::Assistant));
+
+        // A notice or a result never detaches itself from its block.
+        assert!(!needs_sep(Kind::Assistant, Kind::Notice));
+        assert!(!needs_sep(Kind::Tool, Kind::ToolResult));
+        assert!(!needs_sep(Kind::Assistant, Kind::Assistant));
+    }
+
+    /// The whole point of the separator: pushing a prompt after a reply leaves a
+    /// blank line in the transcript, and the renderer draws it as an empty row.
+    #[test]
+    fn committed_blocks_are_separated_by_a_blank_row() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.push(Kind::Assistant, "first answer");
+        app.push(Kind::User, "second question");
+        let kinds: Vec<Kind> = app.transcript.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![Kind::Assistant, Kind::Blank, Kind::User],
+            "a blank line lands between the turn's answer and the next prompt"
+        );
+        // The blank row renders as a genuinely empty line, not stray padding.
+        app.ensure_display_cache(40);
+        let blank = app
+            .disp_cache
+            .iter()
+            .find(|l| l.spans.iter().all(|s| s.content.trim().is_empty()))
+            .expect("the separator renders as an empty row");
+        assert!(blank.spans.iter().all(|s| s.content.is_empty()));
+    }
+
     #[test]
     fn model_picker_moves_with_arrows_and_enters_the_highlighted_model() {
         let (mut app, h, cmd_rx) = select_app(&["m0", "m1", "m2"]);
@@ -2720,33 +2770,6 @@ mod tests {
         assert_eq!(p.filtered(), vec![2], "'k' filtered instead of moving up");
     }
 
-    #[test]
-    fn zz_dump_render() {
-        use crate::ui::types::{Kind, TLine};
-        let mut app = App::new(test_ui_config(), Vec::new());
-        let push = |app: &mut App, k: Kind, t: &str| app.push(k, t.to_string());
-        push(&mut app, Kind::User, "rename the field in parser.rs");
-        push(&mut app, Kind::Assistant, "Sure. Let me look at the file first.\n\nHere is what I plan:\n- read `parser.rs`\n- rename the field");
-        push(&mut app, Kind::Tool, "read src/parser.rs");
-        push(&mut app, Kind::ToolResult, "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}");
-        push(&mut app, Kind::Tool, "edit src/parser.rs");
-        app.transcript.push(TLine { kind: Kind::DiffAdd, text: "+ let y = 2;".into(), lead: true, color: None });
-        app.transcript.push(TLine { kind: Kind::DiffDel, text: "- let x = 1;".into(), lead: true, color: None });
-        app.transcript.push(TLine { kind: Kind::DiffCtx, text: "  fn main() {".into(), lead: true, color: None });
-        push(&mut app, Kind::ToolResult, "edited src/parser.rs");
-        push(&mut app, Kind::ErrorK, "HTTP 429: rate limited");
-        push(&mut app, Kind::Reasoning, "I should check the imports first.\nThen verify the rename.");
-        push(&mut app, Kind::Assistant, "## Done\n\nRenamed `x` to `y` in 2 places.");
-        push(&mut app, Kind::User, "now run the tests");
-        app.ensure_display_cache(60);
-        println!("----BEGIN----");
-        for l in &app.disp_cache {
-            let mut s = String::new();
-            for sp in &l.spans { s.push_str(&sp.content); }
-            println!("[{}]", s.trim_end());
-        }
-        println!("----END----");
-    }
 
 }
 
