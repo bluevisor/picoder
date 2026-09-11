@@ -2044,6 +2044,88 @@ mod tests {
         assert_eq!(clean_text("🚀\t", false), "🚀    ");
     }
 
+    /// The permission-mode binding is advertised as "shift+tab/ctrl+p" in the
+    /// status bar, so every spelling of it must cycle — in every mode. The
+    /// refactor once dropped this to a single `BackTab` arm inside `Idle`, which
+    /// silently broke Shift+Tab under the Kitty keyboard protocol (where it
+    /// arrives as Tab+SHIFT and fell through to Tab autocomplete) and Ctrl+P
+    /// everywhere, while the hint still promised both.
+    #[test]
+    fn shift_tab_and_ctrl_p_cycle_permissions_in_every_mode() {
+        let cases: [(&str, KeyEvent); 3] = [
+            ("BackTab (ANSI)", KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
+            ("Tab+SHIFT (Kitty)", KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)),
+            ("Ctrl+P", KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        ];
+        // Idle, Busy (agent running) and an approval prompt all honour it.
+        for mode in [Mode::Idle, Mode::Busy, Mode::Approval("edit x".into())] {
+            for (name, key) in cases {
+                let mut app = App::new(test_ui_config(), Vec::new());
+                let (h, _rx) = test_handles();
+                app.mode = mode.clone();
+                app.on_key(key, &h);
+                assert_eq!(
+                    app.perm(),
+                    crate::agent::PERM_AUTO,
+                    "{name} in {mode:?} must cycle ask → bypass"
+                );
+                assert_eq!(app.input, "", "{name} must not type into the composer");
+            }
+        }
+
+        // A masked prompt and an ask_user question capture every key, so a Tab
+        // or Ctrl+P there must not leak out as a mode change.
+        for mode in [Mode::Password { prompt: "pw".into() }, Mode::Question { prompt: "q".into() }] {
+            let mut app = App::new(test_ui_config(), Vec::new());
+            let (h, _rx) = test_handles();
+            app.mode = mode.clone();
+            app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL), &h);
+            assert_eq!(app.perm(), 0, "{mode:?} must keep the captured key");
+        }
+    }
+
+    /// A tool result with newlines keeps its line structure. The transcript used
+    /// to hand the whole multi-line string to the wrapper, which turned every
+    /// newline into a space and reflowed `ls`/stack-trace output into one
+    /// garbled paragraph.
+    #[test]
+    fn multi_line_tool_output_keeps_its_lines() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.transcript.clear();
+        app.push(
+            crate::ui::types::Kind::ToolResult,
+            "total 4\n-rw-r--r-- 1 a b\nroot -> /private/root".to_string(),
+        );
+        let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("total 4"), "{screen}");
+        assert!(screen.contains("-rw-r--r-- 1 a b"), "second line survived:\n{screen}");
+        assert!(screen.contains("root -> /private/root"), "third line survived:\n{screen}");
+        assert!(
+            !screen.contains("total 4 -rw-r--r--"),
+            "lines must not be reflowed together:\n{screen}"
+        );
+    }
+
+    /// The user's own prompt is echoed into the transcript, tagged so it draws
+    /// with the full-width band that makes it scannable while scrolling back.
+    #[test]
+    fn sending_a_message_echoes_the_prompt_into_the_transcript() {
+        let (mut app, h) = scrollable_app();
+        app.mode = Mode::Idle;
+        app.submit_text("rename the field", &h);
+        let echoed = app
+            .transcript
+            .iter()
+            .find(|l| crate::ui::types::Kind::User == l.kind)
+            .expect("the prompt is shown");
+        assert_eq!(echoed.text, "rename the field");
+        assert!(matches!(app.mode, Mode::Busy), "the turn started");
+    }
+
     /// A `Handles` backed by throwaway channels, plus the receiver so a test
     /// can assert what the UI sent to the worker.
     fn test_handles() -> (Handles, std::sync::mpsc::Receiver<WorkerCmd>) {
