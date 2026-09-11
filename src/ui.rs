@@ -1737,6 +1737,20 @@ impl App {
 
     fn build_live_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut out: Vec<Line<'static>> = Vec::new();
+        // Reserve the same blank gap the committed entry will get, so streaming
+        // text doesn't jump up a line the moment it is committed.
+        let lead_kind = if !self.live.is_empty() {
+            Some(Kind::Assistant)
+        } else if !self.live_reasoning.is_empty() {
+            Some(Kind::Reasoning)
+        } else {
+            None
+        };
+        if let (Some(k), Some(last)) = (lead_kind, self.transcript.last()) {
+            if needs_sep(last.kind, k) {
+                out.push(Line::default());
+            }
+        }
         if !self.live.is_empty() {
             render_message(&mut out, &self.live, true, width, self.glyphs, &self.palette, self.single_width);
         } else if !self.live_reasoning.is_empty() {
