@@ -147,6 +147,11 @@ pub struct App {
     git_checked_at: Option<Instant>,
 }
 
+const HINT_DOWN_GLYPH: &str = "down";
+
+/// Lines moved per arrow key / wheel notch. PgUp/PgDn move a full viewport.
+const SCROLL_STEP: isize = 3;
+
 impl App {
     pub fn new(cfg: UiConfig, history: Vec<String>) -> App {
         let hist_idx = history.len();
@@ -1141,6 +1146,7 @@ impl App {
         self.pending.clear();
         self.suggestion = None;
         self.rebuild_cmd_uses();
+        self.scroll_to_bottom();
         self.dispatch(text, h);
     }
 
@@ -1162,6 +1168,7 @@ impl App {
         self.hist_idx = self.history.len();
         self.pending.clear();
         self.rebuild_cmd_uses();
+        self.scroll_to_bottom();
         Some(text)
     }
 
