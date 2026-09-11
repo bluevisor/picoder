@@ -67,14 +67,6 @@ pub fn humanize(n: u64) -> String {
     }
 }
 
-pub fn fmt_cost(c: f64) -> String {
-    if c < 0.01 {
-        format!("${c:.4}")
-    } else {
-        format!("${c:.2}")
-    }
-}
-
 
 fn expand_user(path: &str) -> std::path::PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
