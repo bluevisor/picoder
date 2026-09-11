@@ -1088,23 +1088,46 @@ impl App {
 
     pub fn mouse_scroll(&mut self, up: bool) {
         if up {
-            self.scroll_up();
+            self.scroll_lines(-SCROLL_STEP);
         } else {
-            self.scroll_down();
+            self.scroll_lines(SCROLL_STEP);
         }
     }
 
-    fn scroll_up(&mut self) {
-        self.follow = false;
-        self.scroll = self.scroll.saturating_sub(3);
+    /// Scroll the transcript by `n` lines (negative scrolls up). Scrolling up
+    /// pins the view (`follow = false`); coming back to the bottom resumes
+    /// following the live end.
+    fn scroll_lines(&mut self, n: isize) {
+        if n < 0 {
+            // Nothing above the fold: don't pin or flash the "more below" hint.
+            if self.max_top == 0 {
+                return;
+            }
+            self.follow = false;
+            self.scroll = self.scroll.saturating_sub(n.unsigned_abs());
+            self.scrolled_up = true;
+        } else {
+            self.scroll = (self.scroll + n as usize).min(self.max_top);
+            if self.scroll >= self.max_top {
+                self.follow = true;
+                self.scrolled_up = false;
+            }
+        }
     }
 
-    fn scroll_down(&mut self) {
-        self.scroll = (self.scroll + 3).min(self.max_top);
-        if self.scroll >= self.max_top {
-            self.follow = true;
-            self.scrolled_up = false;
-        }
+    /// Scroll a whole screenful (PgUp/PgDn), using the last rendered viewport
+    /// height so a page is exactly what the user can see.
+    fn scroll_page(&mut self, up: bool) {
+        let page = self.view_h.max(1) as isize;
+        self.scroll_lines(if up { -page } else { page });
+    }
+
+    /// Snap back to the live end, dropping the "[arrow] new" hint. Called when
+    /// the user sends or queues a message so the answer they're waiting for is
+    /// on screen.
+    fn scroll_to_bottom(&mut self) {
+        self.follow = true;
+        self.scrolled_up = false;
     }
 
     fn submit(&mut self, h: &Handles) {
