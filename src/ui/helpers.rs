@@ -175,11 +175,14 @@ pub fn longest_common_prefix(items: &[String]) -> String {
 /// text can carry control characters — a raw ESC (e.g. ANSI colors from a
 /// command) starts an escape sequence mid-frame, and a raw tab advances the
 /// real cursor further than ratatui's one-cell bookkeeping; both leave stray
-/// characters on screen that the diff never cleans up. Tabs become spaces,
-/// other control chars are dropped. With `single_width` (ASCII terminals and
-/// the framebuffer console, whose font draws every glyph in one cell), chars
-/// that aren't single-cell width (emoji, CJK) are replaced with '?' — ratatui
-/// books them as two cells, the console draws one, and the diff desyncs.
+/// characters on screen that the diff never cleans up. Whole escape sequences
+/// are dropped (see `eat_escape`) rather than just the ESC byte, so a
+/// `ls --color` or `grep --color` result can't leave `[1;31m` parameter text
+/// on screen looking like corrupted colors. Tabs become spaces, other control
+/// chars are dropped. With `single_width` (ASCII terminals and the framebuffer
+/// console, whose font draws every glyph in one cell), chars that aren't
+/// single-cell width (emoji, CJK) are replaced with '?' — ratatui books them as
+/// two cells, the console draws one, and the diff desyncs.
 pub fn clean_text(text: &str, single_width: bool) -> std::borrow::Cow<'_, str> {
     use unicode_width::UnicodeWidthChar;
     let dirty = |c: char| c.is_control() || (single_width && c.width() != Some(1));
@@ -187,8 +190,11 @@ pub fn clean_text(text: &str, single_width: bool) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c == '\t' {
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            eat_escape(&mut it);
+        } else if c == '\t' {
             out.push_str("    ");
         } else if c.is_control() {
             // drop
@@ -199,6 +205,41 @@ pub fn clean_text(text: &str, single_width: bool) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Consume the rest of an ANSI escape sequence whose introducer (ESC) has just
+/// been read, so none of it reaches the screen. Handles the forms that show up
+/// in real command output: CSI (`ESC [ … final`), the OSC/APC string forms
+/// (ended by BEL or `ESC \`), and the one- and two-character escapes
+/// (`ESC ( B`, `ESC 7`, …).
+fn eat_escape(it: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    // Intermediate bytes (0x20..=0x2F) may precede the final byte.
+    while matches!(it.peek(), Some(c) if ('\u{20}'..='\u{2f}').contains(c)) {
+        it.next();
+    }
+    match it.next() {
+        // CSI: parameters/intermediates then a final byte 0x40..=0x7E.
+        Some('[') => {
+            for c in it.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+        // OSC / DCS / SOS / PM / APC: a string ended by BEL or ST (ESC \).
+        Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+            while let Some(c) = it.next() {
+                if c == '\x07' {
+                    break;
+                }
+                if c == '\x1b' {
+                    it.next();
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
