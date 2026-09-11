@@ -1312,6 +1312,16 @@ impl App {
         self.dispatch(text, h);
     }
 
+    /// Drop the composer's draft line. Unlike `take_input` this keeps it out of
+    /// the history (a Ctrl+C/Esc'd draft isn't a command the user ran) and
+    /// leaves the queued-input undo buffer alone.
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+        self.suggest_idx = 0;
+        self.suggestion = None;
+    }
+
     fn queue_input(&mut self) {
         if let Some(text) = self.take_input() {
             if !text.is_empty() {
