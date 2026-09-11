@@ -14,9 +14,10 @@ pub use types::{detect_ascii, UiConfig};
 
 use crate::agent::{ApprovalResponse, Handles, UiEvent, WorkerCmd};
 use crate::config::{Config, ConfigPatch, PROVIDERS};
+use crate::money;
 use banner::{BRole, banner_lines};
 use helpers::{
-    bar, complete_path, fmt_cost, humanize, longest_common_prefix, pad1,
+    bar, complete_path, humanize, longest_common_prefix, pad1,
     perm_name, render_message, render_tline, setting_max_tool_calls,
 };
 use palette::{Palette, palette_by_name};
@@ -135,10 +136,12 @@ pub struct App {
     ctx_limit: u32,
     price_in: f64,
     price_out: f64,
+    /// Unit the prices above are quoted in; the account balance carries its own.
+    price_currency: money::Currency,
     last_prompt_tokens: u32,
     sess_prompt: u64,
     sess_completion: u64,
-    balance: Option<String>,
+    balance: Option<money::Balance>,
     settings: Config,
     /// Current working directory shown in the output box title, with $HOME
     /// collapsed to `~`. Computed once at startup (picoder never chdirs).
@@ -203,6 +206,7 @@ impl App {
             ctx_limit: cfg.ctx_limit.max(1),
             price_in: cfg.price_in,
             price_out: cfg.price_out,
+            price_currency: cfg.price_currency.clone(),
             last_prompt_tokens: 0,
             sess_prompt: 0,
             sess_completion: 0,
