@@ -15,7 +15,7 @@ pub enum CursorKind {
     Block,   // a solid ▒/# block (Apple ][ / DOS)
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
     User,
     Assistant,
