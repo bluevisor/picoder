@@ -1663,8 +1663,13 @@ impl App {
             }
             Mode::Password { .. } => 2,
             Mode::Question { prompt } => {
-                let w = (width as usize).saturating_sub(2).max(1);
-                (prompt.chars().count() / w + 1).min(4) as u16 + 1
+                let rows = helpers::question_lines(
+                    prompt,
+                    self.question_wrap_w(width.saturating_sub(2)),
+                    self.single_width,
+                )
+                .len();
+                rows as u16 + 1
             }
             Mode::Idle => self.input_rows(width) + self.slash_suggestions().len() as u16,
         }
