@@ -772,14 +772,13 @@ impl App {
             self.mode = Mode::Idle;
             return;
         };
-        // Plain arrows move the cursor; Ctrl+j/k are the vi-style aliases
-        // (bare j/k stay filter input, since the list is type-to-filter).
-        // This runs before the key match below because an `Up | Char('k')`
-        // arm guarded by `ctrl` would apply the guard to `Up` as well,
-        // dropping plain arrow keys through to `_ => {}`.
+        // Movement keys (arrows, Ctrl+j/k, PageUp/PageDown) are handled up
+        // front rather than as match arms: a shared arm like
+        // `KeyCode::Up | KeyCode::Char('k') if ctrl` applies its guard to
+        // `Up` too, so plain arrow keys fell through to `_ => {}` and did
+        // nothing. Bare j/k stay filter input (the list is type-to-filter).
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let step = picker_step_for_key(&key);
-        if let Some(delta) = step {
+        if let Some(delta) = picker_step_for_key(&key) {
             picker.step(delta);
             return;
         }
