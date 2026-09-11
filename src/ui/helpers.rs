@@ -462,7 +462,7 @@ fn render_code_line(
     let (indent, glyph) = layout(Kind::Assistant, g);
     let wrap_w = width.saturating_sub(indent + glyph.chars().count()).max(1);
     let lines = wrap_segments(vec![(text.to_string(), Style::default().fg(p.code))], wrap_w);
-    emit_lines(out, lead, width, g, p, lines);
+    emit_lines(out, lead, width, g, p, lines, 0);
 }
 
 /// Parse inline Markdown into styled runs: `` `code` ``, `**bold**`, `*italic*`.
@@ -623,7 +623,9 @@ fn hard_split(word: &str, w: usize) -> Vec<String> {
 }
 
 /// Emit wrapped, pre-styled lines under the assistant glyph (glyph on the first
-/// line when `lead`, alignment padding on the rest).
+/// line when `lead`, alignment padding on the rest). `hang` extra columns are
+/// added to every continuation line, so a wrapped list item's text stays aligned
+/// under the item rather than snapping back to the glyph column.
 fn emit_lines(
     out: &mut Vec<Line<'static>>,
     lead: bool,
@@ -631,6 +633,7 @@ fn emit_lines(
     g: Glyphs,
     p: &Palette,
     lines: Vec<Vec<(String, Style)>>,
+    hang: usize,
 ) {
     let (indent, glyph) = layout(Kind::Assistant, g);
     let (_, glyph_style) = palette::colors(Kind::Assistant, p);
@@ -646,7 +649,10 @@ fn emit_lines(
                 spans.push(Span::styled(glyph.to_string(), glyph_style));
             }
         } else {
-            spans.push(Span::raw(" ".repeat(prefix_w)));
+            // Only wrapped continuations get the hanging indent — the first
+            // line of each source line (including later list items) does not.
+            let extra = if j > 0 { hang } else { 0 };
+            spans.push(Span::raw(" ".repeat(prefix_w + extra)));
         }
         for (t, st) in segs {
             spans.push(Span::styled(t, st));
