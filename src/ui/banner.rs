@@ -163,7 +163,7 @@ pub fn banner_ansi(width: u16, ascii: bool, theme: &str, status: &[String]) -> S
     let mut out = String::new();
     for bl in banner_lines(w, ascii, status) {
         let prefix = match bl.role {
-            BRole::Art(i) => palette::ansi_fg(palette::banner_row_color(&p, &rainbow, i)),
+            BRole::Art(i) => palette::ansi_fg(palette::banner_row_color(&p, &rainbow, i, is_16color_terminal())),
             BRole::Version => format!("\x1b[1m{}", palette::ansi_fg(p.accent)),
             BRole::Tagline => palette::ansi_fg(p.notice),
             BRole::Frame | BRole::Data => palette::ansi_fg(p.accent),

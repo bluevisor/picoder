@@ -385,10 +385,19 @@ pub fn shade(c: Color, i: usize) -> Color {
 /// Color for art row `i`: the Apple rainbow for the default theme, or a shaded
 /// top→bottom gradient of the theme's own banner color for any non-default
 /// theme. `i` may exceed the ramp on the ASCII shadow row, so it's clamped.
-pub fn banner_row_color(p: &Palette, rainbow: &[Color; 6], i: usize) -> Color {
-    match p.mono_banner {
+/// `sixteen` snaps the shaded ramp (and the rainbow, when it reaches here
+/// un-approximated) to named ANSI colors: a 16-color console ignores an `Rgb`
+/// escape, so the logo would otherwise lose its gradient entirely and come out
+/// in whatever color was last in effect.
+pub fn banner_row_color(p: &Palette, rainbow: &[Color; 6], i: usize, sixteen: bool) -> Color {
+    let c = match p.mono_banner {
         Some(c) => shade(c, i),
         None => rainbow[i % rainbow.len()],
+    };
+    if sixteen {
+        nearest_16(c)
+    } else {
+        c
     }
 }
 

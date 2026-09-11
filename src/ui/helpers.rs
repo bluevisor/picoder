@@ -294,7 +294,7 @@ fn render_one_line(
         let rainbow = if is_16color_terminal() { palette::APPLE_RAINBOW_16 } else { palette::APPLE_RAINBOW };
         let c = match bc {
             BannerColor::Fixed(c) => c,
-            BannerColor::Rainbow(i) => palette::banner_row_color(p, &rainbow, i),
+            BannerColor::Rainbow(i) => palette::banner_row_color(p, &rainbow, i, is_16color_terminal()),
             BannerColor::Accent => p.accent,
         };
         base = base.fg(c);
