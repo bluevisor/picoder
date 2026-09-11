@@ -3,7 +3,9 @@
 
 use crate::api::{self, AccumCall, Message};
 use crate::config::{atomic_write, Config, ConfigPatch};
+use crate::hooks::{Hooks, Outcome};
 use crate::mcp::Mcp;
+use crate::policy::{Decision, Policy};
 use crate::system_prompt;
 use crate::tools;
 use serde_json::Value;
@@ -31,7 +33,9 @@ pub enum UiEvent {
     ToolStart { name: String, summary: String },
     Diff(String),
     ToolResult { ok: bool, preview: String },
-    Approval(String),
+    /// Ask the user to approve `desc`. `rule` is the permission rule the UI can
+    /// offer as "don't ask again for this" (persisted via ApprovalResponse::Rule).
+    Approval { desc: String, rule: Option<String> },
     /// sudo (via the askpass helper) needs a password. The UI pops a masked
     /// prompt and sends the result back over `reply` (None = user cancelled).
     PasswordRequest { prompt: String, reply: Sender<Option<String>> },
@@ -64,7 +68,17 @@ pub enum UiEvent {
 pub enum WorkerCmd {
     User { text: String, images: Vec<String> },
     Reset,
-    Compact,
+    /// `/compact [focus]`: summarize older turns, optionally steering the
+    /// summary toward what the user wants preserved.
+    Compact(Option<String>),
+    /// `!cmd` from the composer: run a shell command directly, show its output,
+    /// and add both to the conversation so the model can see what the user saw.
+    Shell(String),
+    /// Add a note to the conversation (as the user) without starting a turn —
+    /// e.g. "/undo reverted commit X" so the model's picture of the tree stays true.
+    Inject(String),
+    /// Permission rules or hooks changed on disk: re-read them.
+    ReloadSettings,
     SetModel(String),
     /// `/login <provider>`: run the OAuth subscription flow and store the token.
     Login(String),
@@ -77,11 +91,13 @@ pub enum WorkerCmd {
     Quit,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ApprovalResponse {
     Yes,
     No,
     Always,
+    /// Yes, and persist this allow rule so the same call is never asked again.
+    Rule(String),
 }
 
 pub struct Shared {
@@ -121,6 +137,12 @@ struct Worker {
     mcp: Mcp,
     /// Built-in + MCP tool schema, rebuilt once at startup; sent each request.
     tools: Value,
+    /// Permission rules (allow/deny) merged from config + project settings.
+    policy: Policy,
+    /// Lifecycle hooks (PreToolUse, PostToolUse, UserPromptSubmit, Stop).
+    hooks: Hooks,
+    /// Hashes of this turn's tool calls, newest last — thrashing detection.
+    recent_calls: Vec<u64>,
 }
 
 pub fn spawn(
@@ -141,6 +163,27 @@ pub fn spawn(
         // memory, project context, git state). Counting by role — rather than
         // taking the startup message count — keeps /reset and /compact correct
         // for resumed sessions, where startup messages span the whole history.
+        let mut messages = messages;
+        let policy = Policy::load();
+        let hooks = Hooks::load();
+        if !policy.is_empty() {
+            let _ = ui.send(UiEvent::Notice(format!(
+                "permission rules: {} allow, {} deny (/permissions)",
+                policy.allow.len(),
+                policy.deny.len()
+            )));
+        }
+        if !hooks.is_empty() {
+            let _ = ui.send(UiEvent::Notice(format!("hooks: {} configured (/hooks)", hooks.hooks.len())));
+        }
+        if hooks.has("SessionStart") {
+            if let Outcome::Continue { context } = hooks.run("SessionStart", "", &serde_json::json!({})) {
+                if !context.trim().is_empty() {
+                    let at = system_prefix_len(&messages);
+                    messages.insert(at, Message::system(format!("SessionStart hook context:\n{context}")));
+                }
+            }
+        }
         let system_len = system_prefix_len(&messages);
         // Launch MCP servers before the loop (can take a moment per server).
         let mcp = if cfg.mcp_servers.is_empty() {
@@ -178,6 +221,9 @@ pub fn spawn(
             pending_images: Vec::new(),
             mcp,
             tools,
+            policy,
+            hooks,
+            recent_calls: Vec::new(),
         };
         w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
         w.refresh_balance(); // initial account balance for the status line
@@ -205,12 +251,32 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::Notice("new session — fresh start.".into()));
                     let _ = w.ui.send(UiEvent::Context(0));
                 }
-                WorkerCmd::Compact => {
+                WorkerCmd::Compact(focus) => {
                     w.cancel.store(false, Ordering::Relaxed);
-                    if w.compact() {
+                    if w.compact(focus.as_deref()) {
                         w.save_session();
                     }
                     let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::Shell(cmd) => {
+                    w.cancel.store(false, Ordering::Relaxed);
+                    w.run_shell(&cmd);
+                    w.save_session();
+                    let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::Inject(note) => {
+                    w.messages.push(Message::user(note));
+                    w.save_session();
+                }
+                WorkerCmd::ReloadSettings => {
+                    w.policy = Policy::load();
+                    w.hooks = Hooks::load();
+                    let _ = w.ui.send(UiEvent::Notice(format!(
+                        "settings reloaded: {} allow / {} deny rule(s), {} hook(s)",
+                        w.policy.allow.len(),
+                        w.policy.deny.len(),
+                        w.hooks.hooks.len()
+                    )));
                 }
                 WorkerCmd::SetModel(m) => {
                     w.cfg.model = m.clone();
@@ -275,8 +341,29 @@ pub fn spawn(
                     // call early and mark it stale so a late result is dropped.
                     w.suggest_cancel.store(true, Ordering::Relaxed);
                     w.maybe_auto_compact();
+                    // UserPromptSubmit hooks can veto the turn or add context.
+                    let mut text = text;
+                    let mut vetoed = false;
+                    if w.hooks.has("UserPromptSubmit") {
+                        match w.hooks.run("UserPromptSubmit", "", &serde_json::json!({ "prompt": text })) {
+                            Outcome::Block(reason) => {
+                                let _ = w.ui.send(UiEvent::Error(format!("prompt blocked by hook: {reason}")));
+                                vetoed = true;
+                            }
+                            Outcome::Continue { context } if !context.trim().is_empty() => {
+                                text.push_str("\n\n[hook context]\n");
+                                text.push_str(context.trim());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if vetoed {
+                        let _ = w.ui.send(UiEvent::TurnDone);
+                        continue;
+                    }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         w.run_turn(text, images);
+                        w.run_stop_hooks();
                     }));
                     if result.is_err() {
                         let _ = w.ui.send(UiEvent::Error("internal error in agent turn".into()));
@@ -473,7 +560,7 @@ impl Worker {
             let _ = self
                 .ui
                 .send(UiEvent::Notice(format!("context {pct}% full — compacting automatically…")));
-            self.compact();
+            self.compact(None);
         }
     }
 
@@ -482,7 +569,7 @@ impl Worker {
     /// exchange verbatim; everything in between is summarized with a plain
     /// (tool-less) completion. Returns true when messages were compacted (the
     /// caller should save the session) and false when there was nothing to do.
-    fn compact(&mut self) -> bool {
+    fn compact(&mut self, focus: Option<&str>) -> bool {
         let n = self.messages.len();
         if n <= self.system_len + 2 {
             let _ = self.ui.send(UiEvent::Notice("nothing to compact yet.".into()));
@@ -510,7 +597,14 @@ impl Worker {
                  results that matter, and any unresolved problems or next steps. Use terse \
                  bullet points. No preamble.",
             ),
-            Message::user(format!("Summarize this conversation so far:\n\n{rendered}")),
+            Message::user(match focus {
+                Some(f) if !f.trim().is_empty() => format!(
+                    "Summarize this conversation so far. Pay special attention to, and preserve in \
+                     detail: {}\n\n{rendered}",
+                    f.trim()
+                ),
+                _ => format!("Summarize this conversation so far:\n\n{rendered}"),
+            }),
         ];
         match api::chat_plain(&self.http, &self.cfg, &req, &self.cancel) {
             Ok(summary) if !summary.trim().is_empty() => {
@@ -553,8 +647,52 @@ impl Worker {
         // Drop images a previous interrupted turn queued but never consumed,
         // so they can't surface mid-way through an unrelated turn.
         self.pending_images.clear();
+        self.recent_calls.clear();
         self.messages.push(Message::user_with_images(text, images));
         self.run_loop();
+    }
+
+    /// Stop hooks run after the model's final reply. Exit 2 means "not done":
+    /// the hook's reason goes back to the model and the loop continues, at most
+    /// a few times so a hook that can never be satisfied can't spin forever.
+    fn run_stop_hooks(&mut self) {
+        if !self.hooks.has("Stop") || self.quiet {
+            return;
+        }
+        for _ in 0..3 {
+            if self.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let last = self.messages.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.clone());
+            let payload = serde_json::json!({ "last_assistant_message": last.unwrap_or_default() });
+            match self.hooks.run("Stop", "", &payload) {
+                Outcome::Block(reason) => {
+                    let _ = self.ui.send(UiEvent::Notice(format!("stop hook: {}", crate::api::truncate(&reason, 200))));
+                    self.messages.push(Message::user(format!("[Stop hook feedback — address this before finishing]\n{reason}")));
+                    self.run_loop();
+                }
+                Outcome::Continue { context } => {
+                    if !context.trim().is_empty() {
+                        let _ = self.ui.send(UiEvent::Notice(crate::api::truncate(context.trim(), 400)));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `!cmd`: run a shell command on the user's behalf. Output is shown like a
+    /// tool result and recorded in the conversation so the model can build on it.
+    fn run_shell(&mut self, cmd: &str) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let _ = self.ui.send(UiEvent::ToolStart { name: "bash".into(), summary: cmd.to_string() });
+        let out = crate::tools::bash(cmd, 120, &cwd, &self.cancel);
+        let ok = !out.starts_with("ERROR");
+        let _ = self.ui.send(UiEvent::ToolResult { ok, preview: preview(&out, 40) });
+        self.messages.push(Message::user(format!(
+            "[The user ran a shell command directly]\n$ {cmd}\n{}",
+            crate::api::truncate(&out, 20000)
+        )));
     }
 
     /// The model/tool loop over `self.messages`. Returns the final assistant
@@ -763,6 +901,33 @@ impl Worker {
             .to_string();
         let _ = self.ui.send(UiEvent::ToolStart { name: name.clone(), summary });
 
+        // Thrashing guard: the same call with the same arguments three times in
+        // a row can't produce a different result — break the loop instead of
+        // burning tokens (Codex-style).
+        let sig = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut h);
+            raw.hash(&mut h);
+            h.finish()
+        };
+        let n = self.recent_calls.len();
+        let repeated = n >= 2 && self.recent_calls[n - 1] == sig && self.recent_calls[n - 2] == sig;
+        self.recent_calls.push(sig);
+        if self.recent_calls.len() > 32 {
+            self.recent_calls.remove(0);
+        }
+        if repeated && name != "bash_output" && name != "ask_user" {
+            let e = format!(
+                "ERROR: `{name}` was just called twice with these exact arguments and the result \
+                 will not change. Do not repeat it. Try a different approach (other arguments, \
+                 another tool, or inspect why it failed), or explain the blocker to the user."
+            );
+            let _ = self.ui.send(UiEvent::ToolResult { ok: false, preview: e.clone() });
+            self.messages.push(Message::tool(id, e));
+            return;
+        }
+
         let result = match parsed {
             Err(_) => {
                 let e = format!(
@@ -777,9 +942,71 @@ impl Worker {
         self.messages.push(Message::tool(id, result));
     }
 
+    /// What a permission rule's pattern is matched against for this call.
+    fn policy_targets(name: &str, args: &Value) -> Vec<String> {
+        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        match name {
+            "bash" => s("command").into_iter().collect(),
+            "read_file" | "write_file" | "edit_file" | "list_files" => s("path").into_iter().collect(),
+            "multi_edit" => args
+                .get("edits")
+                .and_then(|e| e.as_array())
+                .map(|a| a.iter().filter_map(|e| e.get("path").and_then(|p| p.as_str()).map(str::to_string)).collect())
+                .unwrap_or_default(),
+            "grep" => s("path").into_iter().collect(),
+            "glob" => s("pattern").into_iter().collect(),
+            "web_fetch" => s("url").into_iter().collect(),
+            "web_search" => s("query").into_iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
     fn run_tool(&mut self, name: &str, args: &Value) -> String {
+        // PreToolUse hooks see every call first and may veto it.
+        if self.hooks.has("PreToolUse") {
+            match self.hooks.run("PreToolUse", name, &serde_json::json!({ "tool_input": args })) {
+                Outcome::Block(reason) => {
+                    let r = format!("DENIED by PreToolUse hook: {reason}");
+                    self.result_event(&r);
+                    return r;
+                }
+                Outcome::Continue { context } if !context.trim().is_empty() => {
+                    let _ = self.ui.send(UiEvent::Notice(format!("hook: {}", crate::api::truncate(context.trim(), 300))));
+                }
+                _ => {}
+            }
+        }
+        // Deny rules are absolute — they hold in bypass mode too.
+        let targets = Self::policy_targets(name, args);
+        let target_refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+        let decision = self.policy.check(name, &target_refs);
+        if let Decision::Deny(rule) = &decision {
+            let r = format!("DENIED by permission rule `{rule}` (see /permissions). Do not retry this call.");
+            self.result_event(&r);
+            return r;
+        }
+        let result = self.run_tool_inner(name, args, &decision, targets.first().map(String::as_str).unwrap_or(""));
+        // PostToolUse hooks can append feedback (e.g. a formatter's diagnostics).
+        if self.hooks.has("PostToolUse") {
+            let payload = serde_json::json!({ "tool_input": args, "tool_response": crate::api::truncate(&result, 8000) });
+            match self.hooks.run("PostToolUse", name, &payload) {
+                Outcome::Block(reason) => {
+                    return format!("{result}\n\n[PostToolUse hook feedback]\n{reason}");
+                }
+                Outcome::Continue { context } if !context.trim().is_empty() => {
+                    return format!("{result}\n\n[PostToolUse hook]\n{}", context.trim());
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    fn run_tool_inner(&mut self, name: &str, args: &Value, decision: &Decision, target: &str) -> String {
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        // An allow rule stands in for the user's "yes".
+        let pre_approved = matches!(decision, Decision::Allow(_));
         // Plan mode: refuse mutating tools and ask the model to plan instead.
         if self.perm.load(Ordering::Relaxed) == PERM_PLAN
             && matches!(name, "bash" | "write_file" | "edit_file" | "multi_edit" | "bash_kill")
@@ -891,7 +1118,7 @@ impl Worker {
                 let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
                 let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
                 let desc = if background { format!("run in background: {cmd}") } else { format!("run: {cmd}") };
-                if !self.approve(&desc) {
+                if !pre_approved && !self.approve(&desc, Some(crate::policy::suggest_rule("bash", cmd))) {
                     let r = "DENIED by user.".to_string();
                     self.result_event(&r);
                     return r;
@@ -920,7 +1147,12 @@ impl Worker {
                 let (diff, existed) = tools::write_preview(path, content);
                 let _ = self.ui.send(UiEvent::Diff(diff));
                 let verb = if existed { "overwrite" } else { "create" };
-                if !self.approve(&format!("{verb} {path} ({} bytes)", content.len())) {
+                if !pre_approved
+                    && !self.approve(
+                        &format!("{verb} {path} ({} bytes)", content.len()),
+                        Some(crate::policy::suggest_rule("write_file", path)),
+                    )
+                {
                     let r = "DENIED by user.".to_string();
                     self.result_event(&r);
                     return r;
@@ -941,7 +1173,9 @@ impl Worker {
                     }
                     tools::EditPreview::Ok { diff, new_content } => {
                         let _ = self.ui.send(UiEvent::Diff(diff));
-                        if !self.approve(&format!("edit {path}")) {
+                        if !pre_approved
+                            && !self.approve(&format!("edit {path}"), Some(crate::policy::suggest_rule("edit_file", path)))
+                        {
                             let r = "DENIED by user.".to_string();
                             self.result_event(&r);
                             return r;
@@ -970,7 +1204,12 @@ impl Worker {
                     Ok(plan) => {
                         let _ = self.ui.send(UiEvent::Diff(plan.diff));
                         let paths: Vec<String> = plan.files.iter().map(|(p, _)| p.clone()).collect();
-                        if !self.approve(&format!("apply {} edits across {} file(s)", edits.len(), paths.len())) {
+                        if !pre_approved
+                            && !self.approve(
+                                &format!("apply {} edits across {} file(s)", edits.len(), paths.len()),
+                                Some(crate::policy::suggest_rule("multi_edit", target)),
+                            )
+                        {
                             let r = "DENIED by user.".to_string();
                             self.result_event(&r);
                             return r;
@@ -1009,7 +1248,7 @@ impl Worker {
                     self.result_event(&r);
                     return r;
                 }
-                if !self.approve(&format!("call MCP tool {other}")) {
+                if !pre_approved && !self.approve(&format!("call MCP tool {other}"), Some(other.to_string())) {
                     let r = "DENIED by user.".to_string();
                     self.result_event(&r);
                     return r;
@@ -1043,15 +1282,35 @@ impl Worker {
         let _ = self.ui.send(UiEvent::ToolResult { ok, preview: preview(result, 12) });
     }
 
-    fn approve(&self, desc: &str) -> bool {
+    fn approve(&mut self, desc: &str, rule: Option<String>) -> bool {
         if self.perm.load(Ordering::Relaxed) == PERM_AUTO {
             return true;
         }
-        let _ = self.ui.send(UiEvent::Approval(desc.to_string()));
+        let _ = self.ui.send(UiEvent::Approval { desc: desc.to_string(), rule });
         match self.appr_rx.recv() {
             Ok(ApprovalResponse::Yes) => true,
             Ok(ApprovalResponse::Always) => {
                 self.perm.store(PERM_AUTO, Ordering::Relaxed);
+                true
+            }
+            Ok(ApprovalResponse::Rule(rule)) => {
+                let path = crate::policy::persist_target();
+                match crate::policy::persist_rule(&path, "allow", &rule) {
+                    Ok(()) => {
+                        if let Some(r) = crate::policy::Rule::parse(&rule) {
+                            if !self.policy.allow.contains(&r) {
+                                self.policy.allow.push(r);
+                            }
+                        }
+                        let _ = self.ui.send(UiEvent::Notice(format!(
+                            "won't ask again for {rule} (saved to {})",
+                            path.display()
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = self.ui.send(UiEvent::Error(format!("could not save rule {rule}: {e}")));
+                    }
+                }
                 true
             }
             _ => false,

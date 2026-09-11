@@ -149,6 +149,15 @@ pub struct App {
     /// Current working directory shown in the output box title, with $HOME
     /// collapsed to `~`. Computed once at startup (picoder never chdirs).
     cwd_label: String,
+    /// The "don't ask again" rule offered with the current approval prompt.
+    appr_rule: Option<String>,
+    /// HEAD when this session started, so /diff can show everything since.
+    session_rev: Option<String>,
+    /// Custom slash commands from .picoder/commands etc. (see commands.rs).
+    custom_cmds: Vec<crate::commands::CustomCommand>,
+    /// The same, as palette rows (name/description leaked to 'static — they
+    /// live as long as the process, and reloads are rare and tiny).
+    custom_palette: Vec<(&'static str, &'static str)>,
     /// Cached `(branch, dirty)` for the title's git indicator. `None` outside a
     /// repo. Refreshed on a throttle (see `git_checked_at`) since the agent's
     /// edits/auto-commits change the dirty state mid-session.
@@ -259,9 +268,29 @@ impl App {
             cwd_label: cwd_label(),
             git_head: None,
             git_checked_at: None,
+            appr_rule: None,
+            session_rev: std::env::current_dir().ok().and_then(|d| crate::tools::git_rev(&d)),
+            custom_cmds: Vec::new(),
+            custom_palette: Vec::new(),
         };
         app.rebuild_cmd_uses();
+        app.reload_custom_commands();
         app
+    }
+
+    /// (Re)discover custom slash commands; returns how many were found.
+    fn reload_custom_commands(&mut self) -> usize {
+        self.custom_cmds = crate::commands::load();
+        self.custom_palette = self
+            .custom_cmds
+            .iter()
+            .map(|c| {
+                let name: &'static str = Box::leak(format!("/{}", c.name).into_boxed_str());
+                let desc: &'static str = Box::leak(c.description.clone().into_boxed_str());
+                (name, desc)
+            })
+            .collect();
+        self.custom_cmds.len()
     }
 
     pub fn history(&self) -> &[String] {
@@ -422,7 +451,8 @@ impl App {
                 let kind = if ok { Kind::ToolResult } else { Kind::ToolErr };
                 self.push(kind, preview);
             }
-            UiEvent::Approval(desc) => {
+            UiEvent::Approval { desc, rule } => {
+                self.appr_rule = rule;
                 // Flush any preceding assistant text before showing the prompt.
                 self.flush_live();
                 self.mode = Mode::Approval(desc);
@@ -558,6 +588,7 @@ impl App {
         if self.mode == Mode::Idle && self.input.starts_with('/') && !self.input.contains(' ') {
             let mut scored: Vec<_> = SLASH_COMMANDS
                 .iter()
+                .chain(self.custom_palette.iter())
                 .filter(|(cmd, _)| cmd.starts_with(&self.input))
                 .map(|&(cmd, desc)| {
                     let count = self.cmd_uses.get(cmd).copied().unwrap_or(0);
@@ -735,6 +766,12 @@ impl App {
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 let _ = h.appr_tx.send(ApprovalResponse::Always);
                 self.set_busy();
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                if let Some(rule) = self.appr_rule.take() {
+                    let _ = h.appr_tx.send(ApprovalResponse::Rule(rule));
+                    self.set_busy();
+                }
             }
             KeyCode::Esc => {
                 let _ = h.appr_tx.send(ApprovalResponse::No);
@@ -1367,6 +1404,22 @@ impl App {
             self.run_command(cmd, h);
             return;
         }
+        // `!cmd` runs a shell command directly (Claude Code style): output shows
+        // like a tool result and lands in the conversation for the model.
+        if let Some(cmd) = text.strip_prefix('!') {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() && !text.starts_with("!!") {
+                self.push(Kind::User, format!("! {cmd}"));
+                self.set_busy();
+                let _ = h.cmd_tx.send(WorkerCmd::Shell(cmd.to_string()));
+                return;
+            }
+        }
+        self.send_prompt(text, h);
+    }
+
+    /// Start a turn with `text` as the user's prompt (attachments expanded).
+    fn send_prompt(&mut self, text: String, h: &Handles) {
         // Echo the prompt into the transcript (with its full-width band) before
         // the turn starts, so the user can see what they asked for while
         // scrolling back — and so the attachments they referenced are named.
@@ -1424,7 +1477,56 @@ impl App {
             }
             "compact" => {
                 self.set_busy();
-                let _ = h.cmd_tx.send(WorkerCmd::Compact);
+                let _ = h.cmd_tx.send(WorkerCmd::Compact(_arg.map(|a| a.trim().to_string()).filter(|a| !a.is_empty())));
+            }
+            "diff" => self.show_diff(),
+            "undo" => self.undo_checkpoint(h),
+            "cost" => {
+                for line in self.cost_lines() {
+                    self.push(Kind::Notice, line);
+                }
+            }
+            "status" => self.show_status(),
+            "review" => {
+                let base = _arg.map(str::trim).filter(|a| !a.is_empty()).unwrap_or("the default branch (main or master)");
+                let task = format!(
+                    "Review the code changes in this repository like a careful senior engineer. \
+                     First run `git status --short` and `git diff` for uncommitted work, then \
+                     `git log --oneline {base}..HEAD` and `git diff {base}...HEAD` for committed \
+                     work on this branch (skip whichever is empty; if {base} doesn't exist, review \
+                     the last few commits). Report findings ordered by severity: bugs and \
+                     correctness first, then security, then simplifications. For each, give \
+                     file:line, what is wrong, and a concrete fix. Do not edit any files. End \
+                     with a one-line verdict: ship / fix first."
+                );
+                self.push(Kind::Notice, format!("reviewing changes vs {base}…"));
+                self.send_prompt(task, h);
+            }
+            "permissions" | "perms" => self.permissions_command(_arg, h),
+            "hooks" => {
+                for line in crate::hooks::Hooks::load().describe() {
+                    self.push(Kind::Notice, line);
+                }
+            }
+            "commands" | "skills" => {
+                let n = self.reload_custom_commands();
+                if n == 0 {
+                    self.push(
+                        Kind::Notice,
+                        "no custom commands. Add .picoder/commands/<name>.md (body = prompt, \
+                         $ARGUMENTS = what you type after /name) or ~/.config/picoder/commands/.",
+                    );
+                } else {
+                    self.push(Kind::Notice, format!("{n} custom command(s):"));
+                    let rows: Vec<String> = self
+                        .custom_cmds
+                        .iter()
+                        .map(|c| format!("  /{:<14} {}  ({})", c.name, c.description, c.source.display()))
+                        .collect();
+                    for r in rows {
+                        self.push(Kind::Notice, r);
+                    }
+                }
             }
             "reset" => {
                 let _ = h.cmd_tx.send(WorkerCmd::Reset);
@@ -1481,7 +1583,200 @@ impl App {
             }
             "help" => self.show_help(),
             "exit" | "quit" | "q" => self.should_quit = true,
-            _ => self.push(Kind::ErrorK, format!("unknown command: /{cmd} (try /help)")),
+            _ => {
+                if let Some(c) = self.custom_cmds.iter().find(|c| c.name == cmd) {
+                    let body = crate::commands::expand(&c.body, _arg.unwrap_or(""));
+                    self.push(Kind::Notice, format!("/{} → {}", c.name, c.source.display()));
+                    self.send_prompt(body, h);
+                } else {
+                    self.push(Kind::ErrorK, format!("unknown command: /{cmd} (try /help)"));
+                }
+            }
+        }
+    }
+
+    /// `/diff`: everything that changed since this session started — the
+    /// auto-commit checkpoints plus the uncommitted working tree.
+    fn show_diff(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        if !crate::tools::in_git_repo(&cwd) {
+            self.push(Kind::Notice, "not a git repository.");
+            return;
+        }
+        let base = self.session_rev.clone();
+        let (stat, full) = match &base {
+            Some(rev) => (
+                crate::tools::git_run(&cwd, &["diff", "--stat", rev], 20),
+                crate::tools::git_run(&cwd, &["diff", rev], 20),
+            ),
+            None => (
+                crate::tools::git_run(&cwd, &["diff", "--stat", "HEAD"], 20),
+                crate::tools::git_run(&cwd, &["diff", "HEAD"], 20),
+            ),
+        };
+        match (stat, full) {
+            (Ok(stat), Ok(full)) if stat.trim().is_empty() && full.trim().is_empty() => {
+                self.push(Kind::Notice, "no changes since this session started.");
+            }
+            (Ok(stat), Ok(full)) => {
+                let label = base.as_deref().map(|r| format!("since {}", &r[..r.len().min(7)])).unwrap_or_else(|| "uncommitted".into());
+                self.push(Kind::Notice, format!("changes {label}:"));
+                for l in stat.lines() {
+                    self.push(Kind::Notice, format!("  {l}"));
+                }
+                let mut lines: Vec<&str> = full.lines().collect();
+                let total = lines.len();
+                if total > 400 {
+                    lines.truncate(400);
+                }
+                let text = lines.join("\n");
+                self.handle_diff_text(&text);
+                if total > 400 {
+                    self.push(Kind::Notice, format!("… {} more lines (run `!git diff` for all)", total - 400));
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => self.push(Kind::ErrorK, format!("git diff failed: {e}")),
+        }
+    }
+
+    fn handle_diff_text(&mut self, d: &str) {
+        for (i, ln) in d.lines().enumerate() {
+            let kind = if ln.starts_with('+') {
+                Kind::DiffAdd
+            } else if ln.starts_with('-') {
+                Kind::DiffDel
+            } else {
+                Kind::DiffCtx
+            };
+            self.transcript.push(TLine { kind, text: ln.to_string(), lead: i == 0, color: None });
+        }
+        self.after_push();
+    }
+
+    /// `/undo`: revert the most recent picoder checkpoint commit (only ever a
+    /// commit picoder made, so a user's own commit is never touched).
+    fn undo_checkpoint(&mut self, h: &Handles) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        if !crate::tools::in_git_repo(&cwd) {
+            self.push(Kind::Notice, "not a git repository.");
+            return;
+        }
+        let subject = match crate::tools::git_run(&cwd, &["log", "-1", "--format=%h %s"], 10) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                self.push(Kind::ErrorK, format!("git log failed: {e}"));
+                return;
+            }
+        };
+        let Some((sha, msg)) = subject.split_once(' ') else {
+            self.push(Kind::Notice, "nothing to undo.");
+            return;
+        };
+        if !msg.starts_with("picoder:") {
+            self.push(Kind::Notice, format!("last commit isn't a picoder checkpoint ({subject}); nothing undone."));
+            return;
+        }
+        match crate::tools::git_run(&cwd, &["revert", "--no-edit", "HEAD"], 30) {
+            Ok(_) => {
+                self.push(Kind::Notice, format!("reverted {subject}"));
+                let _ = h.cmd_tx.send(WorkerCmd::Inject(format!(
+                    "[The user ran /undo: commit {sha} \"{msg}\" was reverted. The files are back to \
+                     their previous state; re-read them before editing again.]"
+                )));
+                self.git_checked_at = None;
+            }
+            Err(e) => {
+                let _ = crate::tools::git_run(&cwd, &["revert", "--abort"], 10);
+                self.push(Kind::ErrorK, format!("revert failed: {e}"));
+            }
+        }
+    }
+
+    fn cost_lines(&self) -> Vec<String> {
+        let tokens = self.sess_prompt + self.sess_completion;
+        let cost = self.sess_prompt as f64 / 1e6 * self.price_in + self.sess_completion as f64 / 1e6 * self.price_out;
+        let mut v = vec![format!(
+            "session: {} tokens ({} in / {} out) · {}",
+            humanize(tokens),
+            humanize(self.sess_prompt),
+            humanize(self.sess_completion),
+            money::fmt_cost_tagged(cost, &self.price_currency)
+        )];
+        v.push(format!(
+            "context: {} / {} tokens ({}%)",
+            humanize(self.last_prompt_tokens as u64),
+            humanize(self.ctx_limit as u64),
+            (self.last_prompt_tokens as f64 / self.ctx_limit as f64 * 100.0).round() as u32
+        ));
+        if let Some(b) = &self.balance {
+            v.push(format!("balance: {}", b.render_tagged()));
+        }
+        v
+    }
+
+    fn show_status(&mut self) {
+        let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+        let git = match crate::tools::git_head(&std::path::PathBuf::from(&cwd)) {
+            Some((b, dirty)) => format!("{b}{}", if dirty { " (dirty)" } else { "" }),
+            None => "not a repo".into(),
+        };
+        let policy = crate::policy::Policy::load();
+        let hooks = crate::hooks::Hooks::load();
+        let mut lines = vec![
+            format!("picoder {}", env!("CARGO_PKG_VERSION")),
+            format!("model:       {} ({} · {})", self.model_info, self.settings.provider, self.settings.auth_mode),
+            format!("cwd:         {cwd}"),
+            format!("git:         {git}"),
+            format!("permissions: {} · {} allow / {} deny rule(s)", perm_name(self.perm()), policy.allow.len(), policy.deny.len()),
+            format!("hooks:       {}", hooks.hooks.len()),
+            format!("mcp servers: {}", self.settings.mcp_servers.len()),
+            format!("custom cmds: {}", self.custom_cmds.len()),
+            format!("auto-commit: {}", if self.settings.auto_commit { "on" } else { "off" }),
+            format!("session:     {}", crate::config::session_path().display()),
+        ];
+        lines.extend(self.cost_lines());
+        for l in lines {
+            self.push(Kind::Notice, l);
+        }
+    }
+
+    /// `/permissions [allow|deny <rule> | remove <rule> | reload]`.
+    fn permissions_command(&mut self, arg: Option<&str>, h: &Handles) {
+        let arg = arg.map(str::trim).unwrap_or("");
+        let (verb, rule) = arg.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((arg, ""));
+        match verb {
+            "" | "list" => {
+                for line in crate::policy::Policy::load().describe() {
+                    self.push(Kind::Notice, line);
+                }
+                self.push(
+                    Kind::Notice,
+                    "usage: /permissions allow <rule> · deny <rule> · remove <rule>   e.g. bash(cargo test:*), edit_file(src/**)",
+                );
+            }
+            "allow" | "deny" if !rule.is_empty() => {
+                if crate::policy::Rule::parse(rule).is_none() {
+                    self.push(Kind::ErrorK, format!("bad rule: {rule}"));
+                    return;
+                }
+                let path = crate::policy::persist_target();
+                match crate::policy::persist_rule(&path, verb, rule) {
+                    Ok(()) => {
+                        self.push(Kind::Notice, format!("{verb} {rule} → {}", path.display()));
+                        let _ = h.cmd_tx.send(WorkerCmd::ReloadSettings);
+                    }
+                    Err(e) => self.push(Kind::ErrorK, format!("could not save: {e}")),
+                }
+            }
+            "remove" | "rm" if !rule.is_empty() => {
+                let n = crate::policy::remove_rule(rule);
+                self.push(Kind::Notice, format!("removed {rule} from {n} file(s)"));
+                let _ = h.cmd_tx.send(WorkerCmd::ReloadSettings);
+            }
+            "reload" => {
+                let _ = h.cmd_tx.send(WorkerCmd::ReloadSettings);
+            }
+            _ => self.push(Kind::ErrorK, "usage: /permissions [allow|deny|remove <rule> | reload]"),
         }
     }
 
@@ -1490,12 +1785,21 @@ impl App {
         for (name, desc) in SLASH_COMMANDS {
             self.push(Kind::Notice, format!("  {name:<12} {desc}"));
         }
+        if !self.custom_palette.is_empty() {
+            self.push(Kind::Notice, String::from("custom commands:"));
+            let rows: Vec<String> = self.custom_palette.iter().map(|(n, d)| format!("  {n:<12} {d}")).collect();
+            for r in rows {
+                self.push(Kind::Notice, r);
+            }
+        }
         self.push(Kind::Notice, String::from("  @file       attach a file"));
+        self.push(Kind::Notice, String::from("  !cmd        run a shell command (output goes to the model too)"));
         self.push(Kind::Notice, "  ↑/↓         scroll the output (3 lines)");
         self.push(Kind::Notice, "  PgUp/PgDn   scroll the output a page");
         self.push(Kind::Notice, "  Ctrl/Alt+↑/↓  browse history");
         self.push(Kind::Notice, String::from("  Tab         autocomplete"));
         self.push(Kind::Notice, String::from("  Shift+Tab   cycle permissions (ask / bypass / plan)"));
+        self.push(Kind::Notice, String::from("  approvals   Y yes · N no · P don't ask again for this pattern · A bypass all"));
         self.push(Kind::Notice, String::from("  Esc         interrupt the agent / clear the line"));
         self.push(Kind::Notice, String::from("  Ctrl+C      clear the line (twice = quit)"));
         self.push(Kind::Notice, String::from("  Ctrl+L      force clear/repaint"));
@@ -1850,14 +2154,19 @@ impl App {
                     Span::styled("approve ", Style::default().fg(Color::Yellow)),
                     Span::styled(desc.clone(), Style::default().add_modifier(Modifier::BOLD)),
                 ]);
-                let opts_line = Line::from(vec![
+                let mut opts = vec![
                     Span::styled("(Y)", Style::default().fg(Color::Green)),
                     Span::raw("es  "),
                     Span::styled("(N)", Style::default().fg(Color::Red)),
                     Span::raw("o  "),
-                    Span::styled("(A)", Style::default().fg(self.palette.accent)),
-                    Span::raw("lways"),
-                ]);
+                ];
+                if let Some(rule) = &self.appr_rule {
+                    opts.push(Span::styled("(P)", Style::default().fg(self.palette.accent)));
+                    opts.push(Span::raw(format!("attern: don't ask again for {rule}  ")));
+                }
+                opts.push(Span::styled("(A)", Style::default().fg(self.palette.accent)));
+                opts.push(Span::raw("lways (bypass all)"));
+                let opts_line = Line::from(opts);
                 f.render_widget(Paragraph::new(vec![desc_line, opts_line]), area);
             }
             Mode::ThemeSelect { cursor, .. } => {
@@ -2348,6 +2657,102 @@ mod tests {
             .expect("the prompt is shown");
         assert_eq!(echoed.text, "rename the field");
         assert!(matches!(app.mode, Mode::Busy), "the turn started");
+    }
+
+    #[test]
+    fn bang_prefix_runs_a_shell_command_instead_of_prompting_the_model() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, rx) = test_handles();
+        app.mode = Mode::Idle;
+        app.input = "!git status".to_string();
+        app.cursor = app.input.chars().count();
+        app.submit(&h);
+        match rx.try_recv() {
+            Ok(WorkerCmd::Shell(cmd)) => assert_eq!(cmd, "git status"),
+            other => panic!("expected Shell, got {}", if other.is_ok() { "another command" } else { "nothing" }),
+        }
+        let echoed = app.transcript.iter().find(|l| l.kind == crate::ui::types::Kind::User).expect("echoed");
+        assert_eq!(echoed.text, "! git status");
+        assert!(matches!(app.mode, Mode::Busy));
+        // A bare "!" is just text.
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, rx) = test_handles();
+        app.mode = Mode::Idle;
+        app.input = "!".to_string();
+        app.cursor = 1;
+        app.submit(&h);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCmd::User { .. })));
+    }
+
+    #[test]
+    fn the_approval_prompt_offers_a_pattern_and_p_persists_it() {
+        use std::sync::mpsc;
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (mut h, _rx) = test_handles();
+        let (appr_tx, appr_rx) = mpsc::channel();
+        h.appr_tx = appr_tx;
+        app.handle_event(
+            UiEvent::Approval { desc: "run: cargo test".into(), rule: Some("bash(cargo test:*)".into()) },
+            &h,
+        );
+        assert!(matches!(app.mode, Mode::Approval(_)));
+        // The offer is visible in the rendered prompt.
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("don't ask again for bash(cargo test:*)"), "{screen}");
+        app.on_key(key(KeyCode::Char('p')), &h);
+        match appr_rx.try_recv() {
+            Ok(crate::agent::ApprovalResponse::Rule(r)) => assert_eq!(r, "bash(cargo test:*)"),
+            _ => panic!("expected a Rule response"),
+        }
+        assert!(matches!(app.mode, Mode::Busy));
+        // Without an offered rule, P does nothing and the prompt stays up.
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.handle_event(UiEvent::Approval { desc: "call MCP tool x".into(), rule: None }, &h);
+        app.on_key(key(KeyCode::Char('p')), &h);
+        assert!(matches!(app.mode, Mode::Approval(_)));
+        assert!(appr_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn custom_slash_commands_expand_into_a_prompt_and_show_in_the_palette() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, rx) = test_handles();
+        app.custom_cmds = vec![crate::commands::CustomCommand {
+            name: "fix".into(),
+            description: "Fix an issue".into(),
+            body: "Fix issue $ARGUMENTS in this repo.".into(),
+            source: std::path::PathBuf::from("/x/fix.md"),
+        }];
+        app.custom_palette = vec![("/fix", "Fix an issue")];
+        app.mode = Mode::Idle;
+        app.input = "/fi".to_string();
+        assert!(app.slash_suggestions().iter().any(|(c, _)| *c == "/fix"));
+        app.input = "/fix 42".to_string();
+        app.cursor = app.input.chars().count();
+        app.submit(&h);
+        match rx.try_recv() {
+            Ok(WorkerCmd::User { text, .. }) => assert_eq!(text, "Fix issue 42 in this repo."),
+            _ => panic!("expected a User turn"),
+        }
+        // Unknown commands still report as unknown.
+        app.mode = Mode::Idle;
+        app.input = "/nope".to_string();
+        app.cursor = 5;
+        app.submit(&h);
+        assert!(app.transcript.iter().any(|l| l.kind == crate::ui::types::Kind::ErrorK && l.text.contains("unknown command")));
+    }
+
+    #[test]
+    fn compact_passes_its_focus_hint_to_the_worker() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, rx) = test_handles();
+        app.run_command("compact keep the API shapes", &h);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCmd::Compact(Some(f))) if f == "keep the API shapes"));
+        app.mode = Mode::Idle;
+        app.run_command("compact", &h);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCmd::Compact(None))));
     }
 
     /// A `Handles` backed by throwaway channels, plus the receiver so a test

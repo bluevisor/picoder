@@ -20,7 +20,11 @@ src/
   api.rs              OpenAI-compatible streaming SSE, tool schema, multimodal parts, retry, list_models
   tools.rs            tool impls: bash (+ background), read/write/edit/list, grep, glob,
                       web_fetch, web_search, todo, view_image, remember, recall
-  agent.rs            worker thread: owns the conversation, runs the model/tool loop, sub-agents
+  agent.rs            worker thread: owns the conversation, runs the model/tool loop, sub-agents,
+                      hooks + permission-rule enforcement, thrashing guard, `!cmd` shell runs
+  policy.rs           permission rules: allow/deny patterns, bash segment splitting, rule persistence
+  hooks.rs            lifecycle hooks (PreToolUse/PostToolUse/UserPromptSubmit/Stop/SessionStart)
+  commands.rs         custom slash commands from .picoder/commands/*.md and skills/*/SKILL.md
   mcp.rs              stdio MCP client: spawn servers, JSON-RPC handshake, tools/list + tools/call
   money.rs            Currency/Balance: keeps the cost and balance readouts in the
                       right units (DeepSeek bills CNY accounts in CNY, prices are USD)
@@ -101,7 +105,24 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - `/model` opens an interactive picker over the provider's model list —
   type to filter (handy for OpenRouter's hundreds), ↑/↓ + Enter to select;
   `/model <id|number>` still sets directly.
-- Slash commands: `/model /auto /reset /compact /config /mcp /memory /theme /init /new /clear /help /exit`.
+- Slash commands: `/model /auto /reset /compact [focus] /config /mcp /memory /theme /init /new
+  /diff /undo /review /status /cost /permissions /hooks /commands /clear /help /exit`, plus any
+  custom command from `.picoder/commands/<name>.md` (`$ARGUMENTS`). `!cmd` runs a shell
+  command directly and records the output in the conversation.
+- Permission rules (`policy.rs`): `permissions.allow` / `permissions.deny` arrays merged from
+  `config.json`, `.picoder/settings.json`, `.picoder/settings.local.json`. Deny is checked
+  before the permission mode (so it holds in bypass), allow skips the prompt in ask mode.
+  The approval prompt offers **P** — persist a suggested rule (`bash(cargo test:*)`,
+  `edit_file(src/**)`) to `settings.local.json` (or config.json outside a repo).
+- Hooks (`hooks.rs`): Claude-Code-shaped `hooks` block; each hook is `sh -c` with a JSON
+  payload on stdin. Exit 2 blocks (PreToolUse → tool not run; UserPromptSubmit → turn
+  skipped; Stop → stderr fed back and the loop continues, max 3 times). stdout becomes context.
+- Thrashing guard: the third consecutive identical tool call (same name + args) is answered
+  with an error instead of executed.
+- One-shot scripting: piped stdin is appended as `<stdin>` context (or is the task);
+  `--json` prints a final `{result, usage, cost, tool_calls, duration_ms, errors}` object,
+  `--stream-json` prints JSON-lines events (`token`, `tool_start`, `tool_result`, `notice`,
+  `error`, `diff`, `reasoning`, `result`).
 - `/config`: interactive settings panel — provider preset (deepseek/openai/anthropic/groq/openrouter/google),
   base URL, model, API key (masked), thinking mode (DeepSeek-style
   `"thinking":{"type":"enabled"}` request field; off by default), default
@@ -177,6 +198,11 @@ Each server is spawned over stdio at launch; its tools appear as
 `mcp__filesystem__<tool>`. `/model` and `/theme` rewrites preserve the block.
 
 ## Roadmap / wishlist
+
+- **Session forking / naming**; `--resume` picker over several sessions per directory.
+- **OS-native sandboxing** (Seatbelt / bubblewrap) for bash — rules + hooks are policy,
+  not containment.
+- **MCP server mode** (expose picoder's tools over stdio).
 
 - **ui.rs split** (~3100 lines → submodules). A clean split would extract:
   `ui/banner.rs` (banner rendering, ~300 lines), `ui/panels.rs` (config picker,

@@ -44,14 +44,37 @@ dependencies.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
   live token streaming, and colored unified diffs previewed before every
   write/edit.
-- **Context compaction** — `/compact` summarizes older turns to free the
-  window; triggers automatically at 80% full.
+- **Context compaction** — `/compact [focus]` summarizes older turns to free
+  the window (the optional focus tells the summary what to preserve); triggers
+  automatically at 80% full.
 - **Queued input** — keep typing while the agent works; Enter queues messages
   that send as turns finish.
 - **One-shot `--output`** — `picoder "task" -o out.md` writes the final reply to
   disk after the run.
 - **Permission modes** (`Shift+Tab` / `Ctrl+P` to cycle) — *ask* / *bypass* /
   *plan* (read-only).
+- **Permission rules** — Claude-Code-style `allow` / `deny` patterns
+  (`bash(cargo test:*)`, `edit_file(src/**)`, `mcp__fs__*`) in `config.json` or
+  the project's `.picoder/settings.json`. Deny rules hold even in bypass mode;
+  pressing **P** at an approval prompt saves a "don't ask again" rule for that
+  command prefix or directory. `/permissions` lists, adds, and removes them.
+- **Hooks** — `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` /
+  `SessionStart` shell hooks (same JSON shape as Claude Code's) receive the
+  event on stdin; exit `2` blocks the action and feeds stderr back to the model.
+- **Custom slash commands** — drop a Markdown prompt in
+  `.picoder/commands/<name>.md` (or a `.picoder/skills/<name>/SKILL.md`, or the
+  same under `~/.config/picoder/`) and `/name args` runs it with `$ARGUMENTS`
+  substituted. `.claude/commands/*.md` is read too.
+- **`!cmd`** — run a shell command straight from the composer; the output shows
+  in the transcript and is added to the model's context.
+- **`/diff`, `/undo`, `/review`** — see everything changed since the session
+  started, revert the last picoder checkpoint commit, or ask for a code review
+  of the working tree / branch. `/status` and `/cost` report where you stand.
+- **Thrashing guard** — the same tool call with identical arguments three times
+  in a row is short-circuited with a nudge to change approach.
+- **Scripting** — `git diff | picoder "review this"` attaches stdin as context
+  (or uses it as the task), and `--json` / `--stream-json` print a result
+  object or JSON-lines events for CI and automation.
 - **Context files** — auto-loads `PICODER.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md` from the working directory.
 - **Sessions** — persisted per working directory; resume with `picoder --continue`.
@@ -117,11 +140,48 @@ in `~/.config/picoder/`:
 
 ```
 config.json   provider / model / key, auth_mode, oauth tokens (0600),
-              max_tool_calls, prices (+ optional mcp_servers)
+              max_tool_calls, prices (+ optional mcp_servers, permissions, hooks)
+commands/     user-wide custom slash commands (*.md)
+skills/       user-wide skills (<name>/SKILL.md)
 memory.md     remember/recall store
 history       composer history
 sessions/     per-directory session transcripts
 ```
+
+Per-project settings live in `.picoder/` inside the working directory:
+
+```
+.picoder/settings.json        permissions + hooks shared with the team
+.picoder/settings.local.json  your own rules (P at an approval prompt writes
+                              here) — add it to .gitignore
+.picoder/commands/*.md        project slash commands
+.picoder/skills/<name>/SKILL.md
+```
+
+### Permissions and hooks
+
+```json
+{
+  "permissions": {
+    "allow": ["bash(cargo test:*)", "bash(git status:*)", "edit_file(src/**)", "read_file"],
+    "deny":  ["bash(rm -rf *)", "bash(git push:*)", "edit_file(.env*)"]
+  },
+  "hooks": {
+    "PreToolUse":  [{ "matcher": "bash", "hooks": [{ "type": "command", "command": "./scripts/guard.sh" }] }],
+    "PostToolUse": [{ "matcher": "edit_file|write_file|multi_edit", "hooks": [{ "type": "command", "command": "cargo fmt" }] }],
+    "Stop":        [{ "hooks": [{ "type": "command", "command": "cargo test -q 2>&1 | tail -3" }] }]
+  }
+}
+```
+
+A rule is `tool` or `tool(pattern)`. For `bash`, `prefix:*` matches the prefix
+alone or followed by more words, a plain pattern is a prefix, and `*` is a
+wildcard; compound commands (`a && b`) are allowed only if every segment is and
+denied if any is. File tools take globs on the path. Claude Code's `Bash(...)`,
+`Edit(...)`, `Read(...)`, `Write(...)` spellings are accepted. Hooks get a JSON
+payload (`hook_event_name`, `tool_name`, `tool_input`, `tool_response`, `cwd`)
+on stdin; exit `0` continues (stdout becomes extra context), exit `2` blocks
+and feeds stderr to the model, anything else is a non-blocking warning.
 
 ### Currency
 
@@ -173,7 +233,14 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `/model [id\|n]` | open the model picker, or set directly by id/number |
 | `/login <provider>` | sign in to a subscription (anthropic, openai, google) |
 | `/config` | settings panel (provider, model, key, auth, thinking, …) |
-| `/compact` | summarize older turns to free context (auto at 80%) |
+| `/compact [focus]` | summarize older turns to free context (auto at 80%) |
+| `/diff` | show everything changed since the session started |
+| `/undo` | revert the last picoder checkpoint commit |
+| `/review [base]` | review uncommitted + branch changes vs `base` |
+| `/status` · `/cost` | model, cwd, git, rules, context · token usage and cost |
+| `/permissions [allow\|deny\|remove <rule>]` | list or edit permission rules |
+| `/hooks` · `/commands` | list hooks · reload and list custom commands |
+| `!cmd` | run a shell command; output goes to the transcript and the model |
 | `/reset` | clear conversation context |
 | `/new` | delete the session and start fresh |
 | `/auto` | toggle bypass-permissions |

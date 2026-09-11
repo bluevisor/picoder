@@ -113,6 +113,10 @@ pub struct Config {
     /// persist it then.
     #[serde(skip)]
     pub key_from_env: bool,
+    /// Settings blocks picoder doesn't model as fields (`permissions`, `hooks`)
+    /// carried through verbatim so a model/theme rewrite can't drop them.
+    #[serde(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -240,6 +244,7 @@ impl Default for Config {
             permission: default_permission(),
             max_tool_calls: default_max_tool_calls(),
             key_from_env: false,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -278,6 +283,28 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Every settings document that can carry `permissions` / `hooks`, lowest
+/// priority first: the user's config.json, then the project's
+/// `.picoder/settings.json` and `.picoder/settings.local.json` (the latter is
+/// where "don't ask again" rules land, and belongs in .gitignore). Missing or
+/// malformed files are skipped. Each entry is (path, parsed JSON object).
+pub fn settings_layers() -> Vec<(PathBuf, serde_json::Value)> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let paths = [
+        config_path(),
+        cwd.join(".picoder").join("settings.json"),
+        cwd.join(".picoder").join("settings.local.json"),
+    ];
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+            v.is_object().then_some((p, v))
+        })
+        .collect()
 }
 
 pub fn history_path() -> PathBuf {
@@ -388,6 +415,11 @@ impl Config {
                 if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
                     cfg.max_tool_calls = n as u32;
                 }
+                for key in ["permissions", "hooks"] {
+                    if let Some(x) = v.get(key) {
+                        cfg.extra.insert(key.to_string(), x.clone());
+                    }
+                }
             }
         }
         // Resolve the effective key from the per-provider map.
@@ -493,6 +525,9 @@ impl Config {
         }
         if on_disk.max_tool_calls != default_max_tool_calls() {
             json["max_tool_calls"] = serde_json::json!(on_disk.max_tool_calls);
+        }
+        for (k, v) in &on_disk.extra {
+            json[k.as_str()] = v.clone();
         }
         json
     }

@@ -888,6 +888,26 @@ pub fn git_status_line(dir: &Path, sep: &str) -> Option<String> {
 
 /// Current branch name and whether the working tree is dirty, for the UI title.
 /// `None` when `dir` is not inside a git repo.
+/// Full SHA of HEAD, or None outside a repo / before the first commit.
+pub fn git_rev(dir: &Path) -> Option<String> {
+    let out = git_output(dir, &["rev-parse", "--verify", "HEAD"], 10).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// `git <args>` with captured stdout, for the TUI's /diff and /undo. Returns
+/// Err(stderr) on a non-zero exit.
+pub fn git_run(dir: &Path, args: &[&str], timeout_secs: u64) -> std::result::Result<String, String> {
+    match git_output(dir, args, timeout_secs) {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 pub fn git_head(dir: &Path) -> Option<(String, bool)> {
     if !in_git_repo(dir) {
         return None;

@@ -87,15 +87,18 @@ zero competitors do this.
 
 ## Missing Features (vs Competitors)
 
-- Session forking / naming / parallel worktrees
-- JSON output / schema for scripting
-- stdin piping
-- CI/CD integration (GitHub Actions)
-- Custom skills / slash commands
-- Hooks (pre/post tool)
-- MCP server mode
-- OS-native sandboxing (Seatbelt/Bubblewrap)
-- Execution policy rules
-- Compaction focus hint
-- Thrashing protection
-- Built-in code review command
+| Feature | Status |
+|---|---|
+| JSON output / schema for scripting | ✅ `--json` / `--stream-json` (main.rs) |
+| stdin piping | ✅ piped stdin → `<stdin>` context or the task itself |
+| Custom skills / slash commands | ✅ `.picoder/commands/*.md`, `skills/*/SKILL.md`, `$ARGUMENTS` (commands.rs) |
+| Hooks (pre/post tool) | ✅ PreToolUse / PostToolUse / UserPromptSubmit / Stop / SessionStart (hooks.rs) |
+| Execution policy rules | ✅ `permissions.allow` / `deny` + "P: don't ask again" (policy.rs) |
+| Compaction focus hint | ✅ `/compact <focus>` |
+| Thrashing protection | ✅ identical call ×3 short-circuited (agent.rs handle_call) |
+| Built-in code review command | ✅ `/review [base]` |
+| `!cmd` shell passthrough, `/diff`, `/undo`, `/status`, `/cost` | ✅ |
+| CI/CD integration (GitHub Actions) | `--json` makes it scriptable; no action template yet |
+| Session forking / naming / parallel worktrees | pending |
+| MCP server mode | pending |
+| OS-native sandboxing (Seatbelt/Bubblewrap) | pending |

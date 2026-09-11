@@ -3,3 +3,4 @@
 ._*
 build.sh.pi
 /install-orin.sh
+/.picoder/settings.local.json

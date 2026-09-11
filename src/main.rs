@@ -8,10 +8,13 @@ mod agent;
 mod api;
 mod askpass;
 mod auth;
+mod commands;
 mod config;
 mod diff;
+mod hooks;
 mod mcp;
 mod money;
+mod policy;
 mod sysinfo;
 mod tools;
 mod ui;
@@ -62,19 +65,24 @@ const HELP: &str = "picoder — tiny agentic coding CLI (Rust, for the Pi Zero W
 usage:
   picoder                 interactive full-screen TUI
   picoder \"do a thing\"     one-shot task, then exit
+  cmd | picoder \"task\"     one-shot with stdin attached as context (or as the task)
   picoder --continue      resume this directory's last session (alias: -c)
-  picoder --auto ...      auto-approve tool calls
+  picoder --auto ...      auto-approve tool calls (deny rules still apply)
   picoder --output FILE   one-shot: also write the final reply to FILE (alias: -o)
+  picoder --json ...      one-shot: print one JSON object {result, usage, cost, …}
+  picoder --stream-json   one-shot: print JSON-lines events as they happen
   picoder --config        set up provider + API key
   picoder model [id]      list models, or set the model
   picoder --banner        print the launch banner (debug) and exit
   picoder -h | --help     this help
   picoder --version
 
-in the TUI: @path attaches a file · Tab autocompletes commands/paths
+in the TUI: @path attaches a file · !cmd runs a shell command · Tab autocompletes
 
 config: ~/.config/picoder/config.json  (key also via PICODER_API_KEY, or the
         configured provider's var, e.g. DEEPSEEK_API_KEY / OPENAI_API_KEY)
+project: .picoder/settings.json {permissions: {allow, deny}, hooks}
+         .picoder/commands/*.md  custom slash commands ($ARGUMENTS)
 auto-loads PICODER.md / AGENTS.md / CLAUDE.md from the working directory";
 
 fn main() {
@@ -123,7 +131,16 @@ fn main() {
 
     let auto = args.iter().any(|a| a == "--auto");
     let cont = args.iter().any(|a| a == "--continue" || a == "-c");
-    args.retain(|a| a != "--auto" && a != "--continue" && a != "-c");
+    let out_mode = if args.iter().any(|a| a == "--stream-json") {
+        OutputMode::StreamJson
+    } else if args.iter().any(|a| a == "--json" || a == "--output-format=json") {
+        OutputMode::Json
+    } else {
+        OutputMode::Text
+    };
+    args.retain(|a| {
+        !matches!(a.as_str(), "--auto" | "--continue" | "-c" | "--json" | "--stream-json" | "--output-format=json")
+    });
 
     let mut output: Option<String> = None;
     if let Some(pos) = args.iter().position(|a| a == "--output" || a == "-o") {
@@ -159,15 +176,44 @@ fn main() {
         }
     }
 
-    if !args.is_empty() {
+    // Piped stdin (`git diff | picoder "review this"`) rides along as context;
+    // with no task argument it *is* the task. A terminal stdin is left alone.
+    let piped = if std::io::stdin().is_terminal() {
+        String::new()
+    } else if !args.is_empty() && !stdin_ready(300) {
+        // A non-tty stdin that nobody is writing to (a supervisor's idle pipe,
+        // a socket) must not wedge a scripted `picoder "task"`: with a task
+        // given, only read stdin when data or EOF is already there.
+        String::new()
+    } else {
+        read_stdin_capped(1_000_000)
+    };
+    let mut task = args.join(" ");
+    if !piped.trim().is_empty() {
+        if task.trim().is_empty() {
+            task = piped;
+        } else {
+            task = format!("{task}\n\n<stdin>\n{}\n</stdin>", piped.trim_end());
+        }
+    }
+
+    if !task.trim().is_empty() {
         let (messages, _) = build_context(cont, &cfg);
         // Only persist a one-shot turn when explicitly continuing a session,
         // so a stray `picoder "x"` can't clobber a richer interactive session.
         let session = cont.then(config::session_path);
-        run_oneshot(cfg, messages, session, args.join(" "), output);
+        run_oneshot(cfg, messages, session, task, output, out_mode);
     } else {
         if output.is_some() {
             eprintln!("--output only applies to one-shot mode (picoder \"task\" -o file)");
+            return;
+        }
+        if out_mode != OutputMode::Text {
+            eprintln!("--json / --stream-json only apply to one-shot mode (picoder \"task\" --json)");
+            return;
+        }
+        if !std::io::stdin().is_terminal() {
+            eprintln!("no task given and stdin is not a terminal — pass a task: picoder \"do a thing\"");
             return;
         }
         let (messages, notes) = build_context(cont, &cfg);
@@ -266,21 +312,63 @@ fn load_session() -> Option<Vec<Message>> {
     }
 }
 
+/// How one-shot mode reports: streamed text (default), one JSON object at the
+/// end (`--json`), or one JSON object per event (`--stream-json`) — the shapes
+/// scripts and CI expect from Claude Code / Codex.
+#[derive(Clone, Copy, PartialEq)]
+enum OutputMode {
+    Text,
+    Json,
+    StreamJson,
+}
+
+/// True when stdin has data (or EOF) to read within `timeout_ms`.
+fn stdin_ready(timeout_ms: i32) -> bool {
+    #[cfg(unix)]
+    {
+        let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        // SAFETY: a valid pollfd array of length 1 and a finite timeout.
+        let n = unsafe { libc::poll(&mut fds, 1, timeout_ms) };
+        return n > 0 && (fds.revents & (libc::POLLIN | libc::POLLHUP)) != 0;
+    }
+    #[allow(unreachable_code)]
+    true
+}
+
+fn read_stdin_capped(cap: u64) -> String {
+    let mut s = String::new();
+    let _ = std::io::stdin().lock().take(cap).read_to_string(&mut s);
+    s
+}
+
 fn run_oneshot(
     cfg: Config,
     messages: Vec<Message>,
     session: Option<std::path::PathBuf>,
     task: String,
     output: Option<String>,
+    mode: OutputMode,
 ) {
+    let started = std::time::Instant::now();
+    let model = cfg.model.clone();
+    let (price_in, price_out, price_currency) = (cfg.price_in, cfg.price_out, cfg.price_currency.clone());
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     let h = agent::spawn(cfg, messages, agent::PERM_AUTO, session, ui_tx);
     let (task_text, attached) = ui::expand_attachments(&task);
     let (images, img_names) = ui::extract_images(&task);
     let mut all = attached;
     all.extend(img_names);
+    let text_mode = mode == OutputMode::Text;
+    let emit = |v: serde_json::Value| {
+        if mode == OutputMode::StreamJson {
+            println!("{v}");
+        }
+    };
     if !all.is_empty() {
-        eprintln!("\x1b[2mattached: {}\x1b[0m", all.join(", "));
+        if text_mode {
+            eprintln!("\x1b[2mattached: {}\x1b[0m", all.join(", "));
+        }
+        emit(serde_json::json!({"type": "attached", "files": all}));
     }
     let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
 
@@ -290,25 +378,21 @@ fn run_oneshot(
     // so --output can write it to disk after the turn.
     let mut live = String::new();
     let mut final_text = String::new();
+    let (mut prompt_tokens, mut completion_tokens, mut tool_calls, mut errors) = (0u64, 0u64, 0u32, Vec::new());
     while let Ok(ev) = ui_rx.recv() {
         match ev {
             UiEvent::Token(t) => {
-                print!("{t}");
+                if text_mode {
+                    print!("{t}");
+                    let _ = out.flush();
+                }
+                emit(serde_json::json!({"type": "token", "text": t}));
                 at_line_start = t.ends_with('\n');
                 live.push_str(&t);
-                let _ = out.flush();
             }
-            UiEvent::ResetLive => {
-                // Tool calls are starting — capture any text accumulated so far
-                // as a candidate for --output, because AssistantCommit will fire
-                // after live is cleared and would miss this turn's text.
-                if !live.trim().is_empty() {
-                    final_text = std::mem::take(&mut live);
-                } else {
-                    live.clear();
-                }
-            }
-            UiEvent::AssistantCommit => {
+            UiEvent::ResetLive | UiEvent::AssistantCommit => {
+                // Tool calls are starting, or the reply finished — capture the
+                // text accumulated so far as a candidate for the final result.
                 if !live.trim().is_empty() {
                     final_text = std::mem::take(&mut live);
                 } else {
@@ -316,51 +400,76 @@ fn run_oneshot(
                 }
             }
             UiEvent::ToolStart { name, summary } => {
-                if !at_line_start {
-                    println!();
+                tool_calls += 1;
+                if text_mode {
+                    if !at_line_start {
+                        println!();
+                    }
+                    println!("\x1b[34m⏺ {name}\x1b[0m {summary}");
+                    at_line_start = true;
                 }
-                println!("\x1b[34m⏺ {name}\x1b[0m {summary}");
-                at_line_start = true;
+                emit(serde_json::json!({"type": "tool_start", "name": name, "summary": summary}));
             }
             UiEvent::ToolResult { ok, preview } => {
-                let color = if ok { "\x1b[2m" } else { "\x1b[31m" };
-                for line in preview.lines() {
-                    println!("  {color}{line}\x1b[0m");
+                if text_mode {
+                    let color = if ok { "\x1b[2m" } else { "\x1b[31m" };
+                    for line in preview.lines() {
+                        println!("  {color}{line}\x1b[0m");
+                    }
+                    at_line_start = true;
                 }
-                at_line_start = true;
+                emit(serde_json::json!({"type": "tool_result", "ok": ok, "preview": preview}));
             }
             UiEvent::Notice(s) => {
-                if !at_line_start {
-                    println!();
+                if text_mode {
+                    if !at_line_start {
+                        println!();
+                    }
+                    println!("\x1b[2m{s}\x1b[0m");
+                    at_line_start = true;
                 }
-                println!("\x1b[2m{s}\x1b[0m");
-                at_line_start = true;
+                emit(serde_json::json!({"type": "notice", "text": s}));
             }
             UiEvent::Error(s) => {
-                if !at_line_start {
-                    println!();
+                if text_mode {
+                    if !at_line_start {
+                        println!();
+                    }
+                    at_line_start = true;
                 }
+                // Errors always go to stderr so a JSON consumer's stdout stays clean.
                 eprintln!("\x1b[31m{s}\x1b[0m");
-                at_line_start = true;
+                emit(serde_json::json!({"type": "error", "text": s}));
+                errors.push(s);
+            }
+            UiEvent::Usage { prompt, completion } => {
+                prompt_tokens += prompt as u64;
+                completion_tokens += completion as u64;
             }
             UiEvent::TurnDone => break,
-            // Reasoning and diffs are shown in one-shot mode now.
             UiEvent::Reasoning(t) => {
-                // Thinking tokens: print dimmed, no newline.
-                print!("\x1b[2m{t}\x1b[0m");
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                at_line_start = false;
+                if text_mode {
+                    // Thinking tokens: print dimmed, no newline.
+                    print!("\x1b[2m{t}\x1b[0m");
+                    let _ = out.flush();
+                    at_line_start = false;
+                }
+                emit(serde_json::json!({"type": "reasoning", "text": t}));
             }
             UiEvent::Diff(d) => {
-                if !at_line_start { println!(); }
-                println!("\x1b[2m{d}\x1b[0m");
-                at_line_start = true;
+                if text_mode {
+                    if !at_line_start {
+                        println!();
+                    }
+                    println!("\x1b[2m{d}\x1b[0m");
+                    at_line_start = true;
+                }
+                emit(serde_json::json!({"type": "diff", "text": d}));
             }
-            UiEvent::Approval(d) => {
+            UiEvent::Approval { desc, .. } => {
                 // In auto mode we shouldn't get here, but answer yes just in case.
                 let _ = h.appr_tx.send(agent::ApprovalResponse::Yes);
-                eprintln!("\x1b[2m[auto-approved: {d}]\x1b[0m");
+                eprintln!("\x1b[2m[auto-approved: {desc}]\x1b[0m");
             }
             UiEvent::Question { prompt, reply } => {
                 // In auto mode, answer with an empty decline.
@@ -374,11 +483,28 @@ fn run_oneshot(
             _ => {}
         }
     }
-    if !at_line_start {
+    if text_mode && !at_line_start {
         println!();
     }
+    let cost = prompt_tokens as f64 / 1e6 * price_in + completion_tokens as f64 / 1e6 * price_out;
+    let result = final_text.trim_end().to_string();
+    if mode != OutputMode::Text {
+        let summary = serde_json::json!({
+            "type": "result",
+            "result": result,
+            "model": model,
+            "usage": { "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens },
+            "cost": cost,
+            "cost_currency": price_currency,
+            "tool_calls": tool_calls,
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "errors": errors,
+            "is_error": !errors.is_empty(),
+        });
+        println!("{summary}");
+    }
     if let Some(path) = output {
-        let mut text = final_text.trim_end().to_string();
+        let mut text = result;
         text.push('\n');
         match std::fs::write(&path, text) {
             Ok(()) => eprintln!("\x1b[2mwrote {path}\x1b[0m"),
