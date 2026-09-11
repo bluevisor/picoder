@@ -2181,6 +2181,54 @@ mod tests {
         assert!(want_mouse_capture("iTerm.app", Some("maybe")));
     }
 
+    /// The status line's two money readouts, as drawn. This is the bug being
+    /// guarded: a hardcoded `$` on the cost while the balance rendered as `¥`.
+    #[test]
+    fn status_line_money_readouts_never_mix_currencies_silently() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let cny = crate::money::Currency::parse("cny");
+        let bal = |code: &str, amount: &str| crate::money::Balance {
+            amount: amount.into(),
+            currency: crate::money::Currency::parse(code),
+        };
+
+        // A CNY-billed account (balance ¥135.70) with the default USD price
+        // list: both figures must carry their ISO code, because a `$0.0300`
+        // next to `¥135.70` looks comparable and isn't.
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.price_in = 0.14;
+        app.price_out = 0.28;
+        app.sess_prompt = 100_000;
+        app.sess_completion = 50_000;
+        app.balance = Some(bal("CNY", "135.70"));
+        let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("$0.0280 USD"), "cost is unit-labelled:\n{screen}");
+        assert!(screen.contains("bal ¥135.70 CNY"), "balance is too:\n{screen}");
+
+        // Set the price currency to CNY (and use DeepSeek's CNY list) and the
+        // readouts line up in one currency, with no tags.
+        app.price_currency = cny.clone();
+        app.price_in = 1.0;
+        app.price_out = 2.0;
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("¥0.2000 · 150.0k tok"), "cost in CNY:\n{screen}");
+        assert!(screen.contains("bal ¥135.70"), "balance in CNY:\n{screen}");
+        assert!(!screen.contains("USD"), "no leftover USD:\n{screen}");
+
+        // A USD account with the default prices reads plainly, as before.
+        app.price_currency = crate::money::Currency::usd();
+        app.price_in = 0.14;
+        app.price_out = 0.28;
+        app.balance = Some(bal("USD", "12.34"));
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("$0.0280 · 150.0k tok"), "cost:\n{screen}");
+        assert!(screen.contains("bal $12.34"), "balance:\n{screen}");
+        assert!(!screen.contains("CNY") && !screen.contains("USD"), "untagged when aligned:\n{screen}");
+    }
+
     /// The real render path: an overflowing transcript, a small screen, and the
     /// status bar read back from the backend buffer. Guards against the scroll
     /// state being right while nothing visible changes.
