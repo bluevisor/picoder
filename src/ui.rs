@@ -1058,8 +1058,8 @@ impl App {
             self.clear_input();
             return;
         }
-        // Esc clears the line (it never quits the app); with an empty composer
-        // it still arms the double-press exit, exactly as before.
+        // Esc clears the line instead of quitting on a single press; with an
+        // empty composer it still arms the double-press exit, as before.
         if key.code == KeyCode::Esc {
             if !self.input.is_empty() {
                 self.clear_input();
