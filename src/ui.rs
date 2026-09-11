@@ -117,11 +117,6 @@ pub struct App {
     /// Terminal draws every glyph in one cell (ASCII mode, or the Linux
     /// framebuffer console) — wide chars must be replaced before rendering.
     single_width: bool,
-    /// The terminal can show 24-bit color. When it can't (the Pi's framebuffer
-    /// console), theme palettes are snapped to the nearest of the 16 ANSI
-    /// colors, because an `Rgb` shade is emitted as an escape sequence the
-    /// console ignores — leaving text in whatever color was last in effect.
-    truecolor: bool,
     glyphs: Glyphs,
     ascii: bool,
     palette: Palette,
@@ -164,32 +159,24 @@ pub struct App {
 /// Lines moved per arrow key / wheel notch. PgUp/PgDn move a full viewport.
 const SCROLL_STEP: isize = 3;
 
-/// Whether the terminal advertises 24-bit color. `COLORTERM=truecolor|24bit` is
-/// the signal every modern terminal sends; the 16-color consoles (`linux`,
-/// `dumb`, `vt100`) never set it. A truecolor-capable terminal that leaves
-/// `COLORTERM` unset is still handled, just with the palette snapped to ANSI —
-/// visible, if less pretty, which beats emitting escapes the terminal drops.
-fn detect_truecolor() -> bool {
-    matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor") | Ok("24bit"))
-        || matches!(std::env::var("TERM").as_deref(), Ok(t) if t.contains("truecolor") || t.contains("direct"))
-}
-
-/// Resolve a theme name for this terminal: a 16-color console gets the theme
-/// with its RGB shades snapped to the nearest ANSI colors (see
-/// `palette::for_16color`).
-fn palette_for(theme: &str, truecolor: bool) -> Palette {
+/// Resolve a theme name for this terminal. A 16-color console (the Pi's
+/// framebuffer, `TERM=linux`) can't display a theme's `Rgb` shades at all — it
+/// emits the escape anyway, the console ignores the unknown parameters, and the
+/// cell keeps whatever color was last in effect. So those terminals get the
+/// theme with every shade snapped to the nearest ANSI color (see
+/// `palette::for_16color`); a 256-color or truecolor terminal is left alone.
+fn palette_for(theme: &str) -> Palette {
     let p = palette_by_name(theme);
-    if truecolor {
-        p
-    } else {
+    if is_16color_terminal() {
         palette::for_16color(p)
+    } else {
+        p
     }
 }
 
 impl App {
     pub fn new(cfg: UiConfig, history: Vec<String>) -> App {
         let hist_idx = history.len();
-        let truecolor = detect_truecolor();
         let mut app = App {
             transcript: Vec::new(),
             live: String::new(),
@@ -226,10 +213,9 @@ impl App {
             force_clear: false,
             single_width: cfg.ascii
                 || matches!(std::env::var("TERM").as_deref(), Ok("linux")),
-            truecolor,
             glyphs: if cfg.ascii { GLYPHS_A } else { GLYPHS_U },
             ascii: cfg.ascii,
-            palette: palette_for(&cfg.theme, truecolor),
+            palette: palette_for(&cfg.theme),
             disp_cache: Vec::new(),
             disp_cache_width: usize::MAX,
             disp_cache_tver: u64::MAX,
@@ -290,14 +276,13 @@ impl App {
         self.dirty();
     }
 
-    /// Adapt a palette to what this terminal can actually display: a 16-color
-    /// console (the Pi's framebuffer) ignores truecolor escapes, so the theme's
-    /// `Rgb` shades have to be snapped to the nearest ANSI color first.
+    /// Adapt a palette to what this terminal can actually display, so a theme
+    /// switch on the Pi's console doesn't reintroduce colors it can't show.
     fn terminal_safe(&self, p: Palette) -> Palette {
-        if self.truecolor {
-            p
-        } else {
+        if is_16color_terminal() {
             palette::for_16color(p)
+        } else {
+            p
         }
     }
 
@@ -2111,7 +2096,7 @@ mod tests {
     fn a_16color_terminal_gets_a_palette_with_no_rgb_left_in_it() {
         use ratatui::style::Color;
         for theme in THEMES {
-            let safe = palette_for(theme, false);
+            let safe = palette::for_16color(palette_by_name(theme));
             for (name, c) in [
                 ("accent", safe.accent),
                 ("assistant", safe.assistant),
@@ -2136,12 +2121,12 @@ mod tests {
             }
             assert_eq!(safe.user_bg, Color::DarkGray, "{theme}: band stays visible");
             // A truecolor terminal is left completely alone.
-            let full = palette_for(theme, true);
+            let full = palette_for(theme);
             assert_eq!(full.assistant, palette_by_name(theme).assistant);
         }
         // The default theme's near-white still reads as a bright color, and the
         // dim gray still as a dim one: the snap must not collapse them together.
-        let safe = palette_for("Default", false);
+        let safe = palette::for_16color(palette_by_name("Default"));
         assert_eq!(safe.assistant, Color::White);
         assert_eq!(safe.reasoning, Color::DarkGray);
     }
