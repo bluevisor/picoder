@@ -1912,7 +1912,9 @@ impl App {
         } else if self.new_below {
             Some(Span::styled(
                 format!("  {down} new"),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ))
         } else {
             Some(Span::styled(format!("  {down} end"), Style::default().fg(self.dim_text())))
