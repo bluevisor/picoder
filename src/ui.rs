@@ -1990,6 +1990,114 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// An idle app whose transcript is taller than the viewport, so scrolling
+    /// has somewhere to go. `max_top`/`view_h` are normally set by the render
+    /// pass; a unit test pokes them directly.
+    fn scrollable_app() -> (App, Handles) {
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+
+        let cfg = UiConfig {
+            model: "m0".into(),
+            theme: "Default".into(),
+            ascii: false,
+            ctx_limit: 128_000,
+            price_in: 0.0,
+            price_out: 0.0,
+            perm: Arc::new(AtomicU8::new(0)),
+            settings: crate::config::Config::default(),
+        };
+        let mut app = App::new(cfg, vec!["first".into(), "second".into()]);
+        app.max_top = 40;
+        app.view_h = 10;
+        app.scroll = 40; // pinned to the live end
+        let (h, _rx) = test_handles();
+        (app, h)
+    }
+
+    #[test]
+    fn arrows_roll_the_transcript_and_only_ctrl_arrows_recall_history() {
+        let (mut app, h) = scrollable_app();
+
+        // Plain Up/Down move the view, not the composer history.
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.scroll, 37, "Up rolls the output back a step");
+        assert!(!app.follow, "scrolling up pins the view");
+        assert!(app.scrolled_up, "the more-below hint shows");
+        assert_eq!(app.input, "", "Up must not type history into the composer");
+
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.scroll, 40);
+        assert!(app.follow, "returning to the live end resumes following");
+        assert!(!app.scrolled_up);
+
+        // Ctrl+Up is where history recall lives now.
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), &h);
+        assert_eq!(app.input, "second", "Ctrl+Up recalls the previous prompt");
+        assert_eq!(app.scroll, 40, "history recall doesn't move the view");
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), &h);
+        assert_eq!(app.input, "", "Ctrl+Down returns to the empty draft");
+    }
+
+    #[test]
+    fn scrolling_clamps_at_both_ends_and_never_pins_an_unscrollable_view() {
+        let (mut app, h) = scrollable_app();
+        for _ in 0..30 {
+            app.on_key(key(KeyCode::Down), &h);
+        }
+        assert_eq!(app.scroll, 40, "clamped at the live end");
+        assert!(app.follow);
+
+        for _ in 0..30 {
+            app.on_key(key(KeyCode::Up), &h);
+        }
+        assert_eq!(app.scroll, 0, "clamped at the top");
+        assert!(!app.follow);
+
+        // Short transcript: nothing above the fold, so Up is a no-op and we
+        // don't tease a scroll that can't happen.
+        app.max_top = 0;
+        app.follow = true;
+        app.scrolled_up = false;
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!((app.scroll, app.follow, app.scrolled_up), (0, true, false));
+    }
+
+    #[test]
+    fn page_keys_move_a_full_screenful() {
+        let (mut app, h) = scrollable_app();
+        app.on_key(key(KeyCode::PageUp), &h);
+        assert_eq!(app.scroll, 30, "PgUp moves one viewport (view_h = 10)");
+        app.on_key(key(KeyCode::PageDown), &h);
+        assert_eq!(app.scroll, 40);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn sending_a_message_snaps_back_to_the_live_end() {
+        let (mut app, h) = scrollable_app();
+        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(key(KeyCode::Up), &h);
+        assert!(!app.follow);
+
+        for c in "hello".chars() {
+            app.on_key(key(KeyCode::Char(c)), &h);
+        }
+        app.on_key(key(KeyCode::Enter), &h);
+        assert!(app.follow, "Enter returns to the live end for the reply");
+        assert!(!app.scrolled_up, "and drops the new-output hint");
+    }
+
+    #[test]
+    fn scrolling_works_while_the_agent_is_busy() {
+        let (mut app, h) = scrollable_app();
+        app.mode = Mode::Busy;
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.scroll, 37, "queued-input mode scrolls too");
+        assert!(!app.follow);
+        assert!(matches!(app.mode, Mode::Busy), "still busy, not interrupted");
+    }
+
     #[test]
     fn model_picker_moves_with_arrows_and_enters_the_highlighted_model() {
         let (mut app, h, cmd_rx) = select_app(&["m0", "m1", "m2"]);
