@@ -64,12 +64,19 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
 - Session persistence + resume (`picoder --continue`, per working directory).
 - Composer: typing `/` opens a command palette (suggestions ranked by your
   usage history; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab
-  autocomplete (commands + paths), history,
+  autocomplete (commands + paths), history (Ctrl/Alt+↑/↓),
   word-skip (Alt/Ctrl/Cmd + arrows), word-delete (Option/Alt+Backspace and
   Option/Alt+Delete), code-block highlighting.
 - Enables the Kitty keyboard protocol when the terminal supports it, so
   modified keys (e.g. Option+Backspace) are reported unambiguously instead of
   being flattened to a bare Backspace by terminals like Warp.
+- Transcript scrolling: ↑/↓ roll the output 3 lines, PgUp/PgDn a whole
+  viewport, the mouse wheel a notch (where capture is on). Scrolling up pins the
+  view and turns on a "↓ new" hint; sending a message snaps back to the live
+  end. Scrolling lives on the arrows rather than only the wheel because Warp
+  skips mouse capture (below) and would otherwise have no way to scroll.
+- Mouse capture is skipped on Warp (`TERM_PROGRAM=WarpTerminal`) so click-drag
+  text selection keeps working; `PICODER_MOUSE=1`/`0` overrides either way.
 - ASCII fallback + clear-on-exit for the Pi's framebuffer console (`TERM=linux`).
 - Launch banner: rainbow-color PICODER logo + live status (MEM, WiFi SSID + IP).
 - Themes (`/theme`, numbered picker): `Default`, `Apple ][` (green phosphor, `] ▒`),
