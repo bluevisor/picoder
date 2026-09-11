@@ -2521,6 +2521,42 @@ mod tests {
         assert!(matches!(app.mode, Mode::Busy), "still busy, not interrupted");
     }
 
+    /// Ctrl+C must work with a draft in the composer. It used to be swallowed:
+    /// the `Char` arm's CONTROL guard rejected it, so nothing happened at all —
+    /// no clear, no quit, no way out of the TUI short of killing the process.
+    #[test]
+    fn ctrl_c_clears_a_draft_line_and_quits_on_the_second_press() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, _rx) = test_handles();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        app.on_key(key(KeyCode::Char('h')), &h);
+        app.on_key(key(KeyCode::Char('i')), &h);
+        assert_eq!(app.input, "hi");
+
+        // First press: the line goes, the app stays (and isn't a history entry).
+        app.on_key(ctrl_c, &h);
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor, 0);
+        assert!(!app.should_quit(), "one press must not quit");
+        assert!(app.history.is_empty(), "a dropped draft isn't a command");
+
+        // Second press inside the double-press window: quit.
+        app.on_key(ctrl_c, &h);
+        assert!(app.should_quit());
+    }
+
+    /// Esc clears the line too (as the README promises) and must never quit.
+    #[test]
+    fn esc_clears_a_draft_line_without_quitting() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, _rx) = test_handles();
+        app.on_key(key(KeyCode::Char('x')), &h);
+        app.on_key(key(KeyCode::Esc), &h);
+        assert_eq!(app.input, "");
+        assert!(!app.should_quit());
+    }
+
     #[test]
     fn mouse_capture_defaults_to_on_except_on_warp_and_honours_the_override() {
         assert!(want_mouse_capture("iTerm.app", None));
