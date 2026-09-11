@@ -1949,7 +1949,10 @@ mod tests {
             UiEvent::ModelList(models.iter().map(|m| m.to_string()).collect()),
             &h,
         );
-        assert!(matches!(app.mode, Mode::Select), "ModelList opens the picker");
+        assert!(
+            matches!(app.mode, Mode::Select),
+            "ModelList opens the picker"
+        );
         (app, h, cmd_rx)
     }
 
