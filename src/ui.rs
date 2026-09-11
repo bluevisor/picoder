@@ -1032,19 +1032,39 @@ impl App {
     }
 
     fn on_key_idle(&mut self, key: KeyEvent, h: &Handles) {
-        if key.code == KeyCode::Esc || ctrl_c_or_d(&key) {
-            // Check for double-press exit (Ctrl+C / Ctrl+D style).
-            if self.input.is_empty() {
-                let now = Instant::now();
-                if let Some(t) = self.last_ctrl_c {
-                    if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
-                        self.should_quit = true;
-                        return;
-                    }
+        // Ctrl+C / Ctrl+D quit on a double press. Draft text in the composer
+        // must not swallow the first press (it used to: with a non-empty line
+        // the key fell through to the `Char` arm's CONTROL guard and did
+        // nothing at all) — a single press clears the line, Codex/Claude-Code
+        // style, and still arms the timer so the second press quits.
+        if ctrl_c_or_d(&key) {
+            let now = Instant::now();
+            if let Some(t) = self.last_ctrl_c {
+                if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
+                    self.should_quit = true;
+                    return;
                 }
-                self.last_ctrl_c = Some(now);
+            }
+            self.clear_input();
+            self.last_ctrl_c = Some(now);
+            return;
+        }
+        // Esc clears the line (it never quits the app); with an empty composer
+        // it still arms the double-press exit, exactly as before.
+        if key.code == KeyCode::Esc {
+            if !self.input.is_empty() {
+                self.clear_input();
                 return;
             }
+            let now = Instant::now();
+            if let Some(t) = self.last_ctrl_c {
+                if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
+                    self.should_quit = true;
+                    return;
+                }
+            }
+            self.last_ctrl_c = Some(now);
+            return;
         }
         self.last_ctrl_c = None;
 
