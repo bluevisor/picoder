@@ -1923,16 +1923,33 @@ impl App {
                 f.render_widget(Paragraph::new(lines), area);
             }
             Mode::Question { prompt } => {
+                // The question is model text that can be long, multi-line, or
+                // even carry an escape sequence, so it is sanitized and wrapped
+                // (never handed to the frame as one row, which used to clip it
+                // at the panel edge and let a raw newline break the frame).
+                let wrap_w = self.question_wrap_w(area.width);
+                let lead_w = helpers::QUESTION_LEAD.chars().count();
                 let mut lines: Vec<Line> = Vec::new();
-                lines.push(Line::from(vec![
-                    Span::styled(prompt.clone(), Style::default().fg(self.palette.accent)),
-                ]));
-                let mut line_spans = vec![
-                    Span::styled(if self.q_input.is_empty() { " " } else { &self.q_input }, Style::default().fg(self.palette.accent)),
-                ];
-                if !self.q_input.is_empty() {
-                    line_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+                for (i, row) in helpers::question_lines(prompt, wrap_w, self.single_width)
+                    .into_iter()
+                    .enumerate()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if i == 0 { helpers::QUESTION_LEAD.to_string() } else { " ".repeat(lead_w) },
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::styled(row, Style::default().fg(self.palette.accent)),
+                    ]));
                 }
+                let mut line_spans = vec![Span::styled(" ".repeat(lead_w), Style::default())];
+                if !self.q_input.is_empty() {
+                    line_spans.push(Span::styled(
+                        self.q_input.clone(),
+                        Style::default().fg(self.palette.accent),
+                    ));
+                }
+                line_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
                 lines.push(Line::from(line_spans));
                 f.render_widget(Paragraph::new(lines), area);
             }
