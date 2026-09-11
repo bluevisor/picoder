@@ -1038,15 +1038,10 @@ impl App {
         // nothing at all) — a single press clears the line, Codex/Claude-Code
         // style, and still arms the timer so the second press quits.
         if ctrl_c_or_d(&key) {
-            let now = Instant::now();
-            if let Some(t) = self.last_ctrl_c {
-                if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
-                    self.should_quit = true;
-                    return;
-                }
+            if self.double_press_quit() {
+                return;
             }
             self.clear_input();
-            self.last_ctrl_c = Some(now);
             return;
         }
         // Esc clears the line (it never quits the app); with an empty composer
@@ -1056,14 +1051,7 @@ impl App {
                 self.clear_input();
                 return;
             }
-            let now = Instant::now();
-            if let Some(t) = self.last_ctrl_c {
-                if now.duration_since(t) < DOUBLE_PRESS_TIMEOUT {
-                    self.should_quit = true;
-                    return;
-                }
-            }
-            self.last_ctrl_c = Some(now);
+            self.double_press_quit();
             return;
         }
         self.last_ctrl_c = None;
