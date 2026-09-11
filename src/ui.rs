@@ -36,8 +36,9 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use types::{
-    caps_char, ctrl_c_or_d, BannerColor, CursorKind, GLYPHS_A, GLYPHS_U, Glyphs, Kind, Mode,
-    PickAction, Picker, PICKER_VISIBLE, SETTING_LABELS, SLASH_COMMANDS, SPIN_A, SPIN_U, TLine,
+    caps_char, ctrl_c_or_d, picker_step_for_key, BannerColor, CursorKind, GLYPHS_A, GLYPHS_U,
+    Glyphs, Kind, Mode, PickAction, Picker, PICKER_VISIBLE, SETTING_LABELS, SLASH_COMMANDS,
+    SPIN_A, SPIN_U, TLine,
     DOUBLE_PRESS_TIMEOUT, MAX_SUGGEST, MAX_TRANSCRIPT,
 };
 
