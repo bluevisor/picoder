@@ -2134,6 +2134,22 @@ mod tests {
         assert!(matches!(app.mode, Mode::Busy), "still busy, not interrupted");
     }
 
+    #[test]
+    fn mouse_capture_defaults_to_on_except_on_warp_and_honours_the_override() {
+        assert!(want_mouse_capture("iTerm.app", None));
+        assert!(want_mouse_capture("", None));
+        assert!(!want_mouse_capture("WarpTerminal", None));
+
+        assert!(want_mouse_capture("WarpTerminal", Some("1")));
+        assert!(want_mouse_capture("WarpTerminal", Some("true")));
+        assert!(want_mouse_capture("WarpTerminal", Some("ON")));
+        assert!(!want_mouse_capture("iTerm.app", Some("0")));
+        assert!(!want_mouse_capture("iTerm.app", Some("off")));
+        // Unrecognised value: fall back to the terminal-based default.
+        assert!(!want_mouse_capture("WarpTerminal", Some("maybe")));
+        assert!(want_mouse_capture("iTerm.app", Some("maybe")));
+    }
+
     /// The real render path: an overflowing transcript, a small screen, and the
     /// status bar read back from the backend buffer. Guards against the scroll
     /// state being right while nothing visible changes.
