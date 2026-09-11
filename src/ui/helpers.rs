@@ -425,7 +425,6 @@ fn render_md_line(
     let text = &*clean_text(text, single_width);
     let (indent, glyph) = layout(Kind::Assistant, g);
     let prefix_w = indent + glyph.chars().count();
-    let wrap_w = width.saturating_sub(prefix_w).max(1);
     let (mut base, _) = palette::colors(Kind::Assistant, p);
     let code_style = Style::default().fg(p.code);
 
