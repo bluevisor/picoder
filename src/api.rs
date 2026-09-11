@@ -486,7 +486,7 @@ pub fn chat_plain(
 }
 
 /// DeepSeek account balance (best-effort; returns None for other providers).
-pub fn fetch_balance(http: &ureq::Agent, cfg: &Config) -> Option<String> {
+pub fn fetch_balance(http: &ureq::Agent, cfg: &Config) -> Option<Balance> {
     let url = format!("{}/user/balance", cfg.base_url.trim_end_matches('/'));
     let text = http
         .get(&url)
@@ -497,24 +497,37 @@ pub fn fetch_balance(http: &ureq::Agent, cfg: &Config) -> Option<String> {
         .into_string()
         .ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let infos = v.get("balance_infos")?.as_array()?;
-    let parse = |info: &serde_json::Value| {
-        info.get("total_balance").and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok())
+    pick_balance(&v, &Currency::parse(&cfg.price_currency))
+}
+
+/// Pick the balance bucket to show from a `/user/balance` payload: the largest
+/// funded one, since an account can hold an empty `$0.00 USD` bucket next to a
+/// `¥135.70 CNY` one. `prefer` (the currency the cost readout is quoted in)
+/// breaks ties, so a fully-empty account still reports a figure in the currency
+/// the rest of the line uses.
+fn pick_balance(v: &serde_json::Value, prefer: &Currency) -> Option<Balance> {
+    let parse = |info: &serde_json::Value| -> Option<(f64, Balance)> {
+        let amount = info.get("total_balance")?.as_str()?.trim().to_string();
+        let value = amount.parse::<f64>().ok()?;
+        let code = info.get("currency")?.as_str()?;
+        Some((
+            value,
+            Balance { amount, currency: Currency::parse(code) },
+        ))
     };
-    // An account can have several currency buckets ($0 USD next to ¥77 CNY);
-    // show the funded one.
-    let info = infos
+    v.get("balance_infos")?
+        .as_array()?
         .iter()
+        .filter_map(parse)
         .max_by(|a, b| {
-            parse(a).unwrap_or(0.0).partial_cmp(&parse(b).unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
-        })?;
-    let bal = info.get("total_balance")?.as_str()?;
-    let sym = match info.get("currency").and_then(|c| c.as_str()) {
-        Some("CNY") => "¥",
-        Some("USD") => "$",
-        _ => "",
-    };
-    Some(format!("{sym}{bal}"))
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                // Tie (e.g. every bucket at 0.00): prefer the price currency.
+                .then_with(|| {
+                    (a.1.currency == *prefer).cmp(&(b.1.currency == *prefer))
+                })
+        })
+        .map(|(_, bal)| bal)
 }
 
 /// Best-effort context window (tokens) for `model` from the provider's
