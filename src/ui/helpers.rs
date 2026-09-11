@@ -768,4 +768,46 @@ mod tests {
         // "para one" + blank + "code" + "done" = 4; the ``` fences are dropped.
         assert_eq!(out.len(), 4);
     }
+
+    /// Flatten a rendered line to plain text, for asserting on layout.
+    fn flat(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn wrapped_list_items_hang_indent_under_the_item() {
+        let p = palette::palette_by_name("Default");
+        let mut out = Vec::new();
+        render_message(
+            &mut out,
+            "- alpha beta gamma delta epsilon",
+            true,
+            24,
+            crate::ui::types::GLYPHS_A,
+            &p,
+            true,
+        );
+        assert_eq!(out.len(), 2, "the item wraps onto a second line");
+        assert_eq!(flat(&out[0]), "* - alpha beta gamma");
+        // The wrap aligns under the item text (glyph + bullet), not the glyph.
+        assert_eq!(flat(&out[1]), "    delta epsilon");
+    }
+
+    #[test]
+    fn wrapped_prose_still_aligns_under_the_glyph() {
+        let p = palette::palette_by_name("Default");
+        let mut out = Vec::new();
+        render_message(
+            &mut out,
+            "alpha beta gamma delta epsilon zeta",
+            true,
+            24,
+            crate::ui::types::GLYPHS_A,
+            &p,
+            true,
+        );
+        assert!(out.len() >= 2);
+        // Non-list prose keeps the plain glyph-column indent (2), no hang.
+        assert!(flat(&out[1]).starts_with("  ") && !flat(&out[1]).starts_with("   "));
+    }
 }
