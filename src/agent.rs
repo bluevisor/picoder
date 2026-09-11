@@ -50,7 +50,9 @@ pub enum UiEvent {
     /// Auth mode changed by the worker (e.g. after a successful /login), so the
     /// `/config` panel reflects "api" vs "sub" without a round-trip.
     AuthMode(String),
-    Balance(String),
+    /// Account balance, with the currency the provider billed it in (see
+    /// `money::Balance`), so the status line can't mix units silently.
+    Balance(crate::money::Balance),
     Notice(String),
     Error(String),
     TurnDone,
