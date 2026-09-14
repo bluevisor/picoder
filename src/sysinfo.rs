@@ -71,7 +71,10 @@ fn macos_ssid_raw() -> Option<String> {
 /// NetworkManager (nmcli), then iwgetid, then iw.
 fn ssid() -> Option<String> {
     if cfg!(target_os = "macos") {
-        return macos_ssid_raw().filter(|s| s != "<redacted>");
+        return match macos_ssid_raw() {
+            Some(s) if s == "<redacted>" => macos_ssid_wdutil(),
+            other => other,
+        };
     }
     if let Ok(out) =
         std::process::Command::new("nmcli").args(["-t", "-f", "active,ssid", "dev", "wifi"]).output()
@@ -101,6 +104,37 @@ fn ssid() -> Option<String> {
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+/// macOS 14.4+ hides the SSID from everything unprivileged, and a CLI cannot
+/// even raise the Location Services prompt. `sudo wdutil info` still prints
+/// the real name, so this runs it with `-n` (never prompts; fails instantly
+/// unless sudo is passwordless for it). Enable with:
+///   echo "$USER ALL=(root) NOPASSWD: /usr/bin/wdutil info" \
+///     | sudo tee /etc/sudoers.d/picoder-wifi && sudo chmod 440 /etc/sudoers.d/picoder-wifi
+fn macos_ssid_wdutil() -> Option<String> {
+    let out = std::process::Command::new("sudo")
+        .args(["-n", "/usr/bin/wdutil", "info"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_wdutil_ssid(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// First `SSID : <name>` line of `wdutil info` output (BSSID lines don't match).
+fn parse_wdutil_ssid(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("SSID") else { continue };
+        let Some(v) = rest.trim_start().strip_prefix(':') else { continue };
+        let v = v.trim();
+        if !v.is_empty() && v != "<redacted>" && v != "None" {
+            return Some(v.to_string());
         }
     }
     None
@@ -236,4 +270,17 @@ fn wifi_state() -> String {
         }
     }
     "n/a".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_wdutil_ssid;
+
+    #[test]
+    fn wdutil_ssid_skips_bssid_and_redacted() {
+        let out = "WIFI\n    MAC Address : aa:bb\n    BSSID : 11:22\n    SSID : Home Net\n    Channel : 112\n";
+        assert_eq!(parse_wdutil_ssid(out).as_deref(), Some("Home Net"));
+        assert_eq!(parse_wdutil_ssid("    SSID : <redacted>\n"), None);
+        assert_eq!(parse_wdutil_ssid("    SSID : None\n    BSSID : x\n"), None);
+    }
 }
