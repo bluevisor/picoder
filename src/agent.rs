@@ -1208,6 +1208,7 @@ impl Worker {
             "glob" => s("pattern").into_iter().collect(),
             "web_fetch" => s("url").into_iter().collect(),
             "web_search" => s("query").into_iter().collect(),
+            "skill" => s("name").into_iter().collect(),
             _ => Vec::new(),
         }
     }
@@ -1650,7 +1651,7 @@ impl Call {
         let summary = args
             .as_ref()
             .and_then(|a| {
-                ["command", "path", "pattern", "note", "query", "url", "question", "description"]
+                ["command", "path", "pattern", "note", "query", "url", "question", "description", "name"]
                     .iter()
                     .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
             })
@@ -1669,7 +1670,7 @@ impl Call {
 /// Read-only tools that need no approval, prompt or worker state, so several
 /// from one response can run side by side.
 fn parallel_safe(name: &str) -> bool {
-    matches!(name, "read_file" | "list_files" | "grep" | "glob" | "web_fetch" | "web_search" | "recall")
+    matches!(name, "read_file" | "list_files" | "grep" | "glob" | "web_fetch" | "web_search" | "recall" | "skill")
 }
 
 /// The read-only tools' own work, free of the worker so a batch can run on
@@ -1692,6 +1693,7 @@ fn run_readonly(http: &ureq::Agent, name: &str, args: &Value) -> String {
         "web_fetch" => tools::web_fetch(http, s("url")),
         "web_search" => tools::web_search(http, s("query")),
         "recall" => tools::recall(args.get("query").and_then(|v| v.as_str())),
+        "skill" => crate::commands::skill_tool(s("name")),
         _ => format!("ERROR: {name} is not a read-only tool"),
     }
 }
@@ -1777,8 +1779,11 @@ ask the user questions or spawn further sub-agents.
 - You have up to {max} tool-call rounds to complete the task.
 - Stay strictly within the delegated task.
 - When done, reply with a concise final report (findings, files changed, key results) \
-and no tool call. That report is ALL the parent agent sees, so make it self-contained.",
-        max = max
+and no tool call. That report is ALL the parent agent sees, so make it self-contained.{skills}",
+        max = max,
+        skills = crate::commands::skills_prompt(&crate::commands::discover_skills())
+            .map(|s| format!("\n\n{s}"))
+            .unwrap_or_default()
     )
 }
 
@@ -1823,7 +1828,7 @@ mod tests {
 
     #[test]
     fn only_read_only_tools_run_in_parallel() {
-        for t in ["read_file", "list_files", "grep", "glob", "web_fetch", "web_search", "recall"] {
+        for t in ["read_file", "list_files", "grep", "glob", "web_fetch", "web_search", "recall", "skill"] {
             assert!(parallel_safe(t), "{t}");
         }
         // Anything that writes, prompts, recurses or touches worker state

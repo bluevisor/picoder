@@ -344,9 +344,24 @@ fn tool(name: &str, desc: &str, params: serde_json::Value) -> serde_json::Value 
 }
 
 /// The built-in tool schema plus any MCP tools, as one array for the request.
+/// The `skill` tool is only offered when skills are installed, so it costs no
+/// tokens otherwise.
 pub fn tools_spec_with(mcp: &[crate::mcp::McpTool]) -> serde_json::Value {
     let mut spec = tools_spec();
     if let Some(arr) = spec.as_array_mut() {
+        if !crate::commands::discover_skills().is_empty() {
+            arr.push(tool(
+                "skill",
+                "Load an installed skill by name (see the Skills list in your instructions): returns \
+                 its full instructions and the paths of its files. Call it before starting a task \
+                 that matches a skill's description, then follow it.",
+                serde_json::json!({
+                    "type":"object",
+                    "properties":{"name":{"type":"string","description":"The skill's name, as listed."}},
+                    "required":["name"]
+                }),
+            ));
+        }
         for t in mcp {
             arr.push(tool(&t.full_name, &t.description, t.schema.clone()));
         }

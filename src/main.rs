@@ -250,6 +250,11 @@ fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
         messages.push(msg);
         notes.push(format!("loaded {}", names.join(", ")));
     }
+    let skills = commands::discover_skills();
+    if let Some(list) = commands::skills_prompt(&skills) {
+        messages.push(Message::system(list));
+        notes.push(format!("{} skill(s) available", skills.len()));
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     if let Some(git) = tools::git_context(&cwd) {
         messages.push(Message::system(format!(
