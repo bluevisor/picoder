@@ -76,8 +76,10 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   needs since it can't report Shift+Tab): ask / bypass / plan (read-only); colored
   diff before write/edit. Handled in every mode, and never confused with the
   composer's Tab autocomplete.
-- Auto-loads the first of `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` in the
-  working directory as context (one file, 12k chars).
+- Instruction files: the first of `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md`
+  in `~/.config/picoder/` and in each directory from the repo root down to the
+  working directory, stacked general → specific (12k chars each, 32k total,
+  budget spent nearest-first).
 - Session persistence + resume (`picoder --continue`, per working directory).
 - Composer: typing `/` opens a command palette (suggestions ranked by your
   usage history; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab

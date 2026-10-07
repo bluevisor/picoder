@@ -84,7 +84,8 @@ config: ~/.config/picoder/config.json  (key also via PICODER_API_KEY, or the
         configured provider's var, e.g. DEEPSEEK_API_KEY / OPENAI_API_KEY)
 project: .picoder/settings.json {permissions: {allow, deny}, hooks, auto_bump_version}
          .picoder/commands/*.md  custom slash commands ($ARGUMENTS)
-auto-loads the first of PICODER.md / AGENTS.md / CLAUDE.md / GEMINI.md in the working directory
+instructions: the first of PICODER.md / AGENTS.md / CLAUDE.md / GEMINI.md in ~/.config/picoder
+              and in each directory from the repo root down to the working directory
 
 exit status: 0 ok · 1 the run reported an error · 2 bad usage";
 
@@ -245,9 +246,9 @@ fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
             "Persistent memory (things you were told to remember):\n{mem}"
         )));
     }
-    if let Some((msg, name)) = load_project_context() {
+    if let Some((msg, names)) = load_project_context() {
         messages.push(msg);
-        notes.push(format!("loaded {name}"));
+        notes.push(format!("loaded {}", names.join(", ")));
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     if let Some(git) = tools::git_context(&cwd) {
@@ -284,28 +285,80 @@ fn status_lines(cfg: &Config, ascii: bool) -> Vec<String> {
     lines
 }
 
-fn load_project_context() -> Option<(Message, String)> {
-    for name in ["PICODER.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
-        let content = match std::fs::File::open(name) {
-            Ok(f) => {
-                let mut r = std::io::BufReader::new(f.take(1_000_000)); // cap at 1 MB
-                let mut s = String::new();
-                match r.read_to_string(&mut s) {
-                    Ok(_) => s,
-                    Err(_) => continue,
-                }
+/// Instruction files, in precedence order within one directory.
+const CONTEXT_FILES: [&str; 4] = ["PICODER.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
+/// Per-file and overall caps (chars) on loaded instructions; a Pi's model
+/// can't spare much context for them.
+const CONTEXT_FILE_CAP: usize = 12_000;
+const CONTEXT_TOTAL_CAP: usize = 32_000;
+
+/// Instruction files for this session as one system message, plus their
+/// display names for the startup notes.
+fn load_project_context() -> Option<(Message, Vec<String>)> {
+    let cwd = std::env::current_dir().ok()?;
+    let found = collect_context(&cwd, &config::config_dir());
+    let names: Vec<String> = found.iter().map(|(n, _)| n.clone()).collect();
+    let text = match found.as_slice() {
+        [] => return None,
+        [(name, body)] => format!("Project context from {name}:\n{body}"),
+        _ => {
+            let parts: Vec<String> = found.iter().map(|(n, b)| format!("--- {n} ---\n{b}")).collect();
+            format!(
+                "Project instructions, general to specific (later files take precedence):\n\n{}",
+                parts.join("\n\n")
+            )
+        }
+    };
+    Some((Message::system(text), names))
+}
+
+/// (display name, contents) of the instruction files that apply in `cwd`,
+/// general to specific: the global one in `global` (picoder's config dir),
+/// then one per directory from the repo root down to `cwd` (just `cwd`
+/// outside a repo), each the first of `CONTEXT_FILES` present there. The
+/// overall cap is spent nearest-first, so a long global file can't crowd out
+/// the project's own instructions.
+fn collect_context(cwd: &std::path::Path, global: &std::path::Path) -> Vec<(String, String)> {
+    let mut dirs: Vec<(std::path::PathBuf, String)> = vec![(cwd.to_path_buf(), String::new())];
+    let below_repo_root =
+        !cwd.join(".git").exists() && cwd.ancestors().skip(1).any(|d| d.join(".git").exists());
+    if below_repo_root {
+        for (up, d) in cwd.ancestors().enumerate().skip(1) {
+            dirs.push((d.to_path_buf(), "../".repeat(up)));
+            if d.join(".git").exists() {
+                break;
             }
-            Err(_) => continue,
-        };
-        if !content.trim().is_empty() {
-            let body = api::truncate(content.trim(), 12000);
-            return Some((
-                Message::system(format!("Project context from {name}:\n{body}")),
-                name.to_string(),
-            ));
         }
     }
-    None
+    if dirs.iter().all(|(d, _)| d != global) {
+        dirs.push((global.to_path_buf(), "~/.config/picoder/".into()));
+    }
+    let mut found = Vec::new();
+    let mut left = CONTEXT_TOTAL_CAP;
+    for (dir, shown) in dirs {
+        if left == 0 {
+            break;
+        }
+        let Some((name, text)) = CONTEXT_FILES.iter().find_map(|n| {
+            let text = read_capped(&dir.join(n))?;
+            (!text.trim().is_empty()).then(|| (*n, text))
+        }) else {
+            continue;
+        };
+        let body = api::truncate(text.trim(), CONTEXT_FILE_CAP.min(left));
+        left = left.saturating_sub(body.chars().count());
+        found.push((format!("{shown}{name}"), body));
+    }
+    found.reverse();
+    found
+}
+
+/// A file's text, read no further than 1 MB; None if it can't be read.
+fn read_capped(path: &std::path::Path) -> Option<String> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut s = String::new();
+    std::io::BufReader::new(f.take(1_000_000)).read_to_string(&mut s).ok()?;
+    Some(s)
 }
 
 fn load_session() -> Option<Vec<Message>> {
@@ -695,4 +748,71 @@ fn save_history(history: &[String]) {
     let text = history[start..].join("\n");
     let _ = std::fs::create_dir_all(config::config_dir());
     let _ = std::fs::write(config::history_path(), text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("picoder_ctx_{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn instruction_files_stack_from_global_to_the_working_directory() {
+        let root = scratch("repo");
+        let repo = root.join("repo");
+        let deep = repo.join("sub/deep");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(root.join("AGENTS.md"), "above the repo: never read").unwrap();
+        fs::write(repo.join("AGENTS.md"), "repo root").unwrap();
+        fs::write(repo.join("sub/CLAUDE.md"), "sub").unwrap();
+        fs::write(deep.join("PICODER.md"), "deep").unwrap();
+        fs::write(deep.join("AGENTS.md"), "shadowed by PICODER.md").unwrap();
+        let global = root.join("global");
+        fs::create_dir_all(&global).unwrap();
+        fs::write(global.join("AGENTS.md"), "global").unwrap();
+
+        let got = collect_context(&deep, &global);
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["~/.config/picoder/AGENTS.md", "../../AGENTS.md", "../CLAUDE.md", "PICODER.md"]);
+        let bodies: Vec<&str> = got.iter().map(|(_, b)| b.as_str()).collect();
+        assert_eq!(bodies, ["global", "repo root", "sub", "deep"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn outside_a_repo_only_the_working_directory_counts() {
+        let root = scratch("plain");
+        let cwd = root.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(root.join("AGENTS.md"), "parent, not a repo").unwrap();
+        fs::write(cwd.join("GEMINI.md"), "here").unwrap();
+        let got = collect_context(&cwd, &root.join("no-global"));
+        assert_eq!(got, vec![("GEMINI.md".to_string(), "here".to_string())]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_size_budget_goes_to_the_nearest_files_first() {
+        let root = scratch("budget");
+        let cwd = root.join("work");
+        let global = root.join("global");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&global).unwrap();
+        fs::write(cwd.join("AGENTS.md"), "x".repeat(CONTEXT_FILE_CAP + 500)).unwrap();
+        fs::write(global.join("AGENTS.md"), "g".repeat(CONTEXT_TOTAL_CAP)).unwrap();
+        let got = collect_context(&cwd, &global);
+        let total: usize = got.iter().map(|(_, b)| b.chars().count()).sum();
+        assert!(total <= CONTEXT_TOTAL_CAP, "{total}");
+        let (near, far) = (&got[1].1, &got[0].1);
+        assert!(near.chars().count() <= CONTEXT_FILE_CAP && near.starts_with("xxx"));
+        assert!(far.chars().count() < CONTEXT_TOTAL_CAP, "global got only what was left");
+        fs::remove_dir_all(&root).ok();
+    }
 }

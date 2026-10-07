@@ -78,9 +78,11 @@ dependencies.
   `permission` setting (`--auto` forces bypass); with no one to ask, approval
   prompts are declined, never silently approved. Exit status: `0` ok, `1` the
   run reported an error, `2` bad usage.
-- **Context files** — auto-loads the first of `PICODER.md` / `AGENTS.md` /
-  `CLAUDE.md` / `GEMINI.md` found in the working directory (one file, up to 12k
-  chars; parent directories aren't searched).
+- **Context files** — in `~/.config/picoder/` and in every directory from the
+  repo root down to the working directory (just the working directory outside
+  a repo), loads the first of `PICODER.md` / `AGENTS.md` / `CLAUDE.md` /
+  `GEMINI.md`. They stack general to specific, so the nearest file wins on
+  conflicts; 12k chars per file, 32k in all, spent nearest-first.
 - **Sessions** — persisted per working directory; resume with `picoder --continue`.
 - **Composer niceties** — a `/` command palette (suggestions ranked by your
   usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
