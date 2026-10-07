@@ -111,7 +111,15 @@ dependencies.
   a repo), loads the first of `PICODER.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md`. They stack general to specific, so the nearest file wins on
   conflicts; 12k chars per file, 32k in all, spent nearest-first.
-- **Sessions** — persisted per working directory; resume with `picoder --continue`.
+- **Sessions** — every TUI run is a saved session, many per working directory,
+  titled by its first prompt. `picoder -c` resumes the latest, `picoder -r
+  <id|name>` (or `/resume`, a picker) any of them; `/rename` names one, `/fork`
+  (or `--fork-session` at launch) carries on in a copy, `/export [--all] [file]`
+  writes a Markdown transcript, and `/new` starts another without deleting the
+  last. `picoder sessions [--json]` lists them for scripts; `/sessions delete`
+  or `picoder sessions delete <id>` removes one. The least recently used go
+  past 50 per directory or 400 overall. One-shot runs are saved only with
+  `-c` / `-r`.
 - **Composer niceties** — a `/` command palette (suggestions ranked by your
   usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
   (commands + paths), history, word-skip and word-delete, code-block
@@ -184,7 +192,8 @@ commands/     user-wide custom slash commands (*.md)
 skills/       user-wide skills (<name>/SKILL.md)
 memory.md     remember/recall store
 history       composer history
-sessions/     per-directory session transcripts
+sessions/     saved sessions: one folder per working directory, each
+              session a <id>.json conversation + <id>.meta.json
 ```
 
 Per-project settings live in `.picoder/` inside the working directory:
@@ -284,7 +293,12 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `/hooks` · `/commands` | list hooks · reload and list custom commands |
 | `!cmd` | run a shell command; output goes to the transcript and the model |
 | `/reset` | clear conversation context |
-| `/new` | delete the session and start fresh |
+| `/new` | start a new session (the current one stays saved) |
+| `/resume [id\|name]` | switch to another saved session here (a picker without an argument) |
+| `/rename <name>` | name this session |
+| `/fork` | carry on in a copy of this conversation; the original stays as it was |
+| `/export [--all] [file]` | save the conversation as Markdown (`--all` keeps system/context messages) |
+| `/sessions [delete <id\|name>]` | list or delete this directory's saved sessions |
 | `/auto` | toggle bypass-permissions |
 | `/mcp` | list configured MCP servers and their tools |
 | `/memory` | show persistent memory |

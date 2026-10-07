@@ -329,22 +329,6 @@ pub fn sessions_dir() -> PathBuf {
     config_dir().join("sessions")
 }
 
-/// Per-working-directory session file (so each project resumes its own chat).
-/// Uses a deterministic FNV-1a hash so the same directory always gets the
-/// same session file across invocations (DefaultHasher is randomly seeded).
-pub fn session_path() -> PathBuf {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    // FNV-1a 64-bit — deterministic, no dependency.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in cwd.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    sessions_dir().join(format!("{:016x}.json", h))
-}
-
 impl Config {
     /// Read config.json leniently: each known field is merged independently,
     /// so one malformed field (a typo in mcp_servers, say) can't reset the

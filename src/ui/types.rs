@@ -97,7 +97,7 @@ pub fn is_16color_terminal() -> bool {
 /// Slash commands with the one-line description shown in the `/` palette.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "pick a model from the provider's list"),
-    ("/new", "clear conversation and session"),
+    ("/new", "start a new session (the current one stays saved)"),
     ("/config", "settings: provider, model, key, thinking, …"),
     ("/compact", "summarize older turns to free context"),
     ("/reset", "clear conversation context"),
@@ -109,6 +109,11 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/diff", "show what changed since this session started"),
     ("/undo", "revert the last picoder checkpoint commit"),
     ("/rewind", "pick an earlier prompt: undo picoder's edits since then and resume from there"),
+    ("/resume", "switch to another saved session in this directory"),
+    ("/rename", "name this session: /rename <name>"),
+    ("/fork", "carry on in a copy of this conversation (the original stays)"),
+    ("/export", "save the conversation as Markdown: /export [--all] [file]"),
+    ("/sessions", "list saved sessions; /sessions delete <id|name>"),
     ("/review", "review the working tree / branch changes"),
     ("/status", "model, cwd, git, permissions, context, cost"),
     ("/cost", "session token usage and cost"),
@@ -196,6 +201,8 @@ pub enum PickAction {
     #[allow(dead_code)] Model,
     /// Rewind to before the chosen prompt ("N. preview").
     Rewind,
+    /// Switch to the chosen session ("id  label · …").
+    Resume,
 }
 
 /// State for `Mode::Select`: a filterable, scrollable list of choices.

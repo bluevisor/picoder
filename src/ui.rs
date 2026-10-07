@@ -143,6 +143,8 @@ pub struct App {
     busy_since: Option<Instant>,
     model_info: String,
     last_models: Vec<String>,
+    /// The current session ("id — label"), for /status.
+    session_label: String,
     should_quit: bool,
     esc_deadline: Option<Instant>,
     /// Time of last Ctrl+C with empty input; used for double-press-to-quit.
@@ -282,6 +284,7 @@ impl App {
             busy_since: None,
             model_info: cfg.model,
             last_models: Vec::new(),
+            session_label: String::new(),
             should_quit: false,
             esc_deadline: None,
             last_ctrl_c: None,
@@ -590,6 +593,34 @@ impl App {
                 self.input = prompt;
                 self.cursor = self.char_len();
                 self.git_checked_at = None;
+            }
+            UiEvent::SessionList(items) => {
+                if items.is_empty() {
+                    self.picker = None;
+                    self.mode = Mode::Idle;
+                } else {
+                    self.picker = Some(Picker {
+                        title: "Resume which session?".into(),
+                        items,
+                        current: None,
+                        filter: String::new(),
+                        cursor: 0,
+                        scroll: 0,
+                        action: PickAction::Resume,
+                    });
+                    self.mode = Mode::Select;
+                }
+            }
+            UiEvent::SessionSwitched { label, replay } => {
+                self.transcript.clear();
+                self.replay(replay);
+                self.push(Kind::Notice, format!("resumed session {label}"));
+                self.session_label = label;
+                self.git_checked_at = None;
+                self.dirty();
+            }
+            UiEvent::SessionLabel(label) => {
+                self.session_label = label;
             }
             UiEvent::Notice(msg) => {
                 self.push(Kind::Notice, msg);
@@ -1252,6 +1283,11 @@ impl App {
                                 let _ = h.cmd_tx.send(WorkerCmd::Rewind(n - 1));
                             }
                         }
+                        PickAction::Resume => {
+                            if let Some(id) = item.split_whitespace().next() {
+                                let _ = h.cmd_tx.send(WorkerCmd::Resume(id.to_string()));
+                            }
+                        }
                     }
                 }
                 self.mode = Mode::Idle;
@@ -1777,7 +1813,6 @@ impl App {
                 let _ = h.cmd_tx.send(WorkerCmd::New);
                 self.transcript.clear();
                 self.dirty();
-                self.push(Kind::Notice, "new session — fresh start.".to_string());
             }
             "config" => {
                 self.mode = Mode::Settings { cursor: 0, edit: None };
@@ -1791,6 +1826,27 @@ impl App {
             "rewind" => {
                 let _ = h.cmd_tx.send(WorkerCmd::ListTurns);
                 self.mode = Mode::Select;
+            }
+            "resume" => match _arg {
+                Some(key) => {
+                    let _ = h.cmd_tx.send(WorkerCmd::Resume(key.to_string()));
+                }
+                None => self.open_session_picker(h),
+            },
+            "rename" => match _arg {
+                Some(name) => {
+                    let _ = h.cmd_tx.send(WorkerCmd::Rename(name.to_string()));
+                }
+                None => self.push(Kind::Notice, "usage: /rename <name>"),
+            },
+            "fork" => {
+                let _ = h.cmd_tx.send(WorkerCmd::Fork);
+            }
+            "export" => {
+                let _ = h.cmd_tx.send(WorkerCmd::Export(_arg.unwrap_or("").to_string()));
+            }
+            "sessions" => {
+                let _ = h.cmd_tx.send(WorkerCmd::Sessions(_arg.unwrap_or("").to_string()));
             }
             "cost" => {
                 for line in self.cost_lines() {
@@ -2045,7 +2101,7 @@ impl App {
             format!("mcp servers: {}", self.settings.mcp_servers.len()),
             format!("custom cmds: {}", self.custom_cmds.len()),
             format!("auto-commit: {}", if self.settings.auto_commit { "on" } else { "off" }),
-            format!("session:     {}", crate::config::session_path().display()),
+            format!("session:     {}", self.session_label),
         ];
         lines.extend(self.cost_lines());
         for l in lines {
@@ -2150,6 +2206,20 @@ impl App {
 
     pub fn note(&mut self, s: String) {
         self.push(Kind::Notice, s);
+    }
+
+    /// Show a resumed session's recent exchanges ((role, text) pairs).
+    pub fn replay(&mut self, items: Vec<(String, String)>) {
+        for (role, text) in items {
+            let kind = if role == "user" { Kind::User } else { Kind::Assistant };
+            self.push(kind, text);
+        }
+    }
+
+    /// Ask the worker for this directory's sessions; the list opens a picker.
+    pub fn open_session_picker(&mut self, h: &Handles) {
+        let _ = h.cmd_tx.send(WorkerCmd::ListSessions);
+        self.mode = Mode::Select;
     }
 
     pub fn should_quit(&self) -> bool {

@@ -2,7 +2,7 @@
 //! the blocking model/tool loop, talking to the UI thread over channels.
 
 use crate::api::{self, AccumCall, Message};
-use crate::config::{atomic_write, Config, ConfigPatch};
+use crate::config::{Config, ConfigPatch};
 use crate::hooks::{Hooks, Outcome};
 use crate::mcp::Mcp;
 use crate::policy::{Decision, Policy};
@@ -70,6 +70,13 @@ pub enum UiEvent {
     TurnDone,
     /// A suggested follow-up prompt generated after the turn completes.
     Suggestion(String),
+    /// `/resume` choices, newest first: "id  label · when · n msgs".
+    SessionList(Vec<String>),
+    /// Now in another session: the transcript is replaced by `replay`
+    /// ((role, text) of its recent exchanges) and `label` names the session.
+    SessionSwitched { label: String, replay: Vec<(String, String)> },
+    /// The current session ("id — label"), for /status.
+    SessionLabel(String),
 }
 
 /// UI → Worker control messages (processed between turns).
@@ -103,8 +110,20 @@ pub enum WorkerCmd {
     /// Rewind to just before turn N (0-based, oldest first): undo picoder's
     /// checkpoints since then and drop that prompt and everything after it.
     Rewind(usize),
-    /// `/new`: delete the session file and reset to a clean slate.
+    /// `/new`: start a new session; the current one stays saved.
     New,
+    /// `/resume`: list this directory's sessions for the picker.
+    ListSessions,
+    /// Switch to the saved session `key` names (an id, id prefix or name).
+    Resume(String),
+    /// `/rename <name>` the current session.
+    Rename(String),
+    /// `/fork`: carry on in a copy of this conversation; the original stays.
+    Fork,
+    /// `/export [--all] [file]`: write the conversation as Markdown.
+    Export(String),
+    /// `/sessions [delete <id|name>]`: list or delete saved sessions.
+    Sessions(String),
     Quit,
 }
 
@@ -262,6 +281,7 @@ pub fn spawn(
             ctx_detected: Arc::new(Mutex::new(None)),
             turns: Vec::new(),
         };
+        let _ = w.ui.send(UiEvent::SessionLabel(w.session_label()));
         w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
         w.refresh_balance(); // initial account balance for the status line
         w.refresh_context_window(); // refine the ctx window from the provider
@@ -280,15 +300,28 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::Context(0));
                 }
                 WorkerCmd::New => {
-                    // Delete the session file so we start fresh.
-                    if let Some(ref path) = w.session {
-                        let _ = std::fs::remove_file(path);
+                    // The current session stays saved and resumable; carry on
+                    // in a fresh one (its file appears with the first save).
+                    if w.session.is_some() {
+                        w.session = Some(crate::sessions::Store::here().new_path());
                     }
                     w.messages.truncate(w.system_len);
                     w.turns.clear();
                     w.last_prompt = 0;
-                    let _ = w.ui.send(UiEvent::Notice("new session — fresh start.".into()));
+                    let _ = w.ui.send(UiEvent::Notice(
+                        "new session — the previous one stays saved (/resume to go back).".into(),
+                    ));
                     let _ = w.ui.send(UiEvent::Context(0));
+                    let _ = w.ui.send(UiEvent::SessionLabel(w.session_label()));
+                }
+                WorkerCmd::ListSessions
+                | WorkerCmd::Resume(_)
+                | WorkerCmd::Rename(_)
+                | WorkerCmd::Fork
+                | WorkerCmd::Export(_)
+                | WorkerCmd::Sessions(_) => {
+                    w.session_cmd(cmd);
+                    let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::Compact(focus) => {
                     w.cancel.store(false, Ordering::Relaxed);
@@ -599,27 +632,177 @@ impl Worker {
         }
     }
 
-    fn save_session(&self) {
-        let Some(path) = &self.session else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Strip image payloads: a few photos would balloon the session file to
-        // multi-MB rewritten every turn (painful on a Pi Zero). The text
-        // around each image survives, so a resumed session stays coherent.
-        let slim: Vec<Message> = self
-            .messages
+    /// The conversation as sessions store it. Image payloads are stripped: a
+    /// few photos would balloon a file rewritten every turn (painful on a Pi
+    /// Zero); the text around each image keeps a resumed session coherent.
+    fn slim_messages(&self) -> Vec<Message> {
+        self.messages
             .iter()
             .map(|m| {
                 let mut m = m.clone();
                 m.images.clear();
                 m
             })
-            .collect();
-        if let Ok(json) = serde_json::to_string(&slim) {
-            // Atomic: a power loss mid-rewrite must not corrupt the session that
-            // `--continue` depends on — leave the previous turn's file intact.
-            let _ = atomic_write(path, json.as_bytes());
+            .collect()
+    }
+
+    fn save_session(&self) {
+        let Some(path) = &self.session else { return };
+        // Atomic writes: a power loss mid-save must not corrupt the session
+        // `--continue` depends on — the previous turn's file stays intact.
+        let _ = crate::sessions::save(&crate::sessions::Store::here(), path, &self.slim_messages());
+    }
+
+    /// "id — label" of the current session, for /status.
+    fn session_label(&self) -> String {
+        let Some(path) = &self.session else {
+            return "not saved (one-shot run)".into();
+        };
+        let meta = crate::sessions::read_meta(path).unwrap_or_else(|| crate::sessions::Meta {
+            id: path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+            title: crate::sessions::title_of(&self.messages),
+            ..Default::default()
+        });
+        format!("{} — {}", meta.id, meta.label())
+    }
+
+    /// /resume, /rename, /fork, /export and /sessions.
+    fn session_cmd(&mut self, cmd: WorkerCmd) {
+        use crate::sessions::{self as ss, Store};
+        let store = Store::here();
+        let now = crate::config::now_unix();
+        let err = |w: &Self, e: String| {
+            let _ = w.ui.send(UiEvent::Error(e));
+        };
+        match cmd {
+            WorkerCmd::ListSessions => {
+                let items: Vec<String> = store
+                    .list()
+                    .iter()
+                    .map(|(m, p)| ss::summary_line(m, now, self.session.as_ref() == Some(p)))
+                    .collect();
+                if items.is_empty() {
+                    let _ = self.ui.send(UiEvent::Notice("no saved sessions in this directory yet.".into()));
+                }
+                let _ = self.ui.send(UiEvent::SessionList(items));
+            }
+            WorkerCmd::Resume(key) => match store.find(&key) {
+                Err(e) => err(self, e),
+                Ok((_, path)) if self.session.as_ref() == Some(&path) => {
+                    let _ = self.ui.send(UiEvent::Notice("already in that session.".into()));
+                }
+                Ok((meta, path)) => match ss::load(&path) {
+                    None => err(self, format!("session {} is empty or unreadable.", meta.id)),
+                    Some(mut msgs) => {
+                        repair_orphans(&mut msgs);
+                        self.messages = msgs;
+                        self.system_len = system_prefix_len(&self.messages);
+                        self.session = Some(path);
+                        // Turn marks index the old conversation.
+                        self.turns.clear();
+                        self.recent_calls.clear();
+                        self.pending_images.clear();
+                        let est = estimate_tokens(&self.messages);
+                        self.last_prompt = est;
+                        let _ = self.ui.send(UiEvent::Context(est));
+                        let _ = self.ui.send(UiEvent::SessionSwitched {
+                            label: self.session_label(),
+                            replay: ss::replay(&self.messages),
+                        });
+                    }
+                },
+            },
+            WorkerCmd::Rename(name) => {
+                let Some(path) = self.session.clone() else {
+                    return err(self, "this run isn't saved, so it can't be named.".into());
+                };
+                self.save_session();
+                match ss::rename(&path, &name) {
+                    Ok(m) => {
+                        let _ = self.ui.send(UiEvent::Notice(format!("session {} is now \"{}\".", m.id, m.label())));
+                        let _ = self.ui.send(UiEvent::SessionLabel(self.session_label()));
+                    }
+                    Err(e) => err(self, format!("rename failed: {e}")),
+                }
+            }
+            WorkerCmd::Fork => {
+                let Some(from) = self.session.clone() else {
+                    return err(self, "this run isn't saved, so there's nothing to fork.".into());
+                };
+                match ss::fork(&store, &from, &self.slim_messages()) {
+                    Ok(to) => {
+                        let old = from.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                        self.session = Some(to);
+                        let _ = self.ui.send(UiEvent::Notice(format!(
+                            "forked: you're now in {}; {old} stays as it was (/resume to go back).",
+                            self.session_label()
+                        )));
+                        let _ = self.ui.send(UiEvent::SessionLabel(self.session_label()));
+                    }
+                    Err(e) => err(self, format!("fork failed: {e}")),
+                }
+            }
+            WorkerCmd::Export(arg) => {
+                let all = arg.split_whitespace().any(|a| a == "--all");
+                let file: String = arg.split_whitespace().filter(|a| *a != "--all").collect::<Vec<_>>().join(" ");
+                let meta = self.session.as_deref().and_then(ss::read_meta).unwrap_or_else(|| ss::Meta {
+                    id: self.session_label().split(' ').next().unwrap_or("").to_string(),
+                    title: ss::title_of(&self.messages),
+                    created: now,
+                    cwd: store.cwd.display().to_string(),
+                    ..Default::default()
+                });
+                let target = if file.is_empty() {
+                    let name = ss::export_name(&meta);
+                    let p = store.cwd.join(&name);
+                    if p.exists() {
+                        store.cwd.join(name.replace(".md", &format!("-{}.md", meta.id)))
+                    } else {
+                        p
+                    }
+                } else {
+                    store.cwd.join(tools::expand(&file))
+                };
+                match std::fs::write(&target, ss::to_markdown(&meta, &self.messages, all)) {
+                    Ok(()) => {
+                        let _ = self.ui.send(UiEvent::Notice(format!("exported the conversation to {}", target.display())));
+                    }
+                    Err(e) => err(self, format!("export failed: {e}")),
+                }
+            }
+            WorkerCmd::Sessions(arg) => {
+                let arg = arg.trim();
+                if let Some(key) = arg.strip_prefix("delete").map(str::trim).filter(|_| arg.starts_with("delete")) {
+                    if key.is_empty() {
+                        return err(self, "usage: /sessions delete <id|name>".into());
+                    }
+                    match store.find(key) {
+                        Err(e) => err(self, e),
+                        Ok((_, p)) if self.session.as_ref() == Some(&p) => {
+                            err(self, "that's the session you're in; /new or /resume another first.".into())
+                        }
+                        Ok((m, p)) => {
+                            ss::delete(&p);
+                            let _ = self.ui.send(UiEvent::Notice(format!("deleted session {} ({}).", m.id, m.label())));
+                        }
+                    }
+                } else if arg.is_empty() {
+                    let list = store.list();
+                    let _ = self.ui.send(UiEvent::Notice(format!(
+                        "{} saved session(s) here, newest first (/resume to switch, /sessions delete <id>):",
+                        list.len()
+                    )));
+                    for (m, p) in list.iter().take(30) {
+                        let _ = self.ui.send(UiEvent::Notice(format!(
+                            "  {}",
+                            ss::summary_line(m, now, self.session.as_ref() == Some(p))
+                        )));
+                    }
+                } else {
+                    err(self, "usage: /sessions, or /sessions delete <id|name>".into());
+                }
+            }
+            _ => {}
         }
     }
 

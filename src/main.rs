@@ -15,6 +15,7 @@ mod hooks;
 mod mcp;
 mod money;
 mod policy;
+mod sessions;
 mod sysinfo;
 mod tools;
 mod ui;
@@ -66,7 +67,10 @@ usage:
   picoder                 interactive full-screen TUI
   picoder \"do a thing\"     one-shot task, then exit
   cmd | picoder \"task\"     one-shot with stdin attached as context (or as the task)
-  picoder --continue      resume this directory's last session (alias: -c)
+  picoder --continue      resume this directory's latest session (alias: -c)
+  picoder -r [id|name]    resume a saved session; with no id, pick one in the TUI (--resume)
+  picoder --fork-session  with -c / -r: carry on in a copy, leaving the original as it was
+  picoder sessions        list this directory's saved sessions (--json; delete <id|name>)
   picoder --auto ...      auto-approve tool calls (deny rules still apply); one-shot
                           runs otherwise follow config \"permission\" and decline prompts
   picoder --output FILE   one-shot: also write the final reply to FILE (alias: -o)
@@ -135,6 +139,15 @@ fn main() {
 
     let auto = args.iter().any(|a| a == "--auto");
     let cont = args.iter().any(|a| a == "--continue" || a == "-c");
+    let fork_session = args.iter().any(|a| a == "--fork-session");
+    // -r / --resume [id|name]: the next argument is the session unless it's a
+    // flag; with none, the TUI opens the session picker.
+    let mut resume: Option<Option<String>> = None;
+    if let Some(pos) = args.iter().position(|a| a == "-r" || a == "--resume") {
+        args.remove(pos);
+        let key = (pos < args.len() && !args[pos].starts_with('-')).then(|| args.remove(pos));
+        resume = Some(key);
+    }
     let out_mode = if args.iter().any(|a| a == "--stream-json") {
         OutputMode::StreamJson
     } else if args.iter().any(|a| a == "--json" || a == "--output-format=json") {
@@ -143,7 +156,10 @@ fn main() {
         OutputMode::Text
     };
     args.retain(|a| {
-        !matches!(a.as_str(), "--auto" | "--continue" | "-c" | "--json" | "--stream-json" | "--output-format=json")
+        !matches!(
+            a.as_str(),
+            "--auto" | "--continue" | "-c" | "--fork-session" | "--json" | "--stream-json" | "--output-format=json"
+        )
     });
 
     let mut output: Option<String> = None;
@@ -162,6 +178,29 @@ fn main() {
         model_subcommand(&cfg, args.get(1).cloned());
         return;
     }
+    if !args.is_empty() && args[0] == "sessions" {
+        // `--json` was taken off `args` with the one-shot output flags.
+        std::process::exit(sessions_subcommand(&args[1..], out_mode != OutputMode::Text));
+    }
+
+    // The saved session to start from, if any.
+    let store = sessions::Store::here();
+    let start = match &resume {
+        Some(Some(key)) => match store.find(key) {
+            Ok(hit) => Some(hit),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        _ if cont => store.latest(),
+        _ => None,
+    };
+    if fork_session && start.is_none() {
+        eprintln!("--fork-session needs a session to copy: add --continue or --resume <id|name>");
+        std::process::exit(2);
+    }
+    let resumed = start.and_then(|(meta, path)| sessions::load(&path).map(|msgs| (meta, path, msgs)));
 
     if cfg.api_key.is_empty() {
         eprintln!("\x1b[33mNo API key configured.\x1b[0m");
@@ -201,11 +240,16 @@ fn main() {
         }
     }
 
+    let wants_session = cont || resume.is_some();
     if !task.trim().is_empty() {
-        let (messages, _) = build_context(cont, &cfg);
+        if resume == Some(None) {
+            eprintln!("-r needs a session id or name in one-shot mode (`picoder sessions` lists them; -c resumes the latest)");
+            std::process::exit(2);
+        }
+        let (messages, session, _) = start_session(&store, resumed, fork_session, &cfg);
         // Only persist a one-shot turn when explicitly continuing a session,
-        // so a stray `picoder "x"` can't clobber a richer interactive session.
-        let session = cont.then(config::session_path);
+        // so a stray `picoder "x"` doesn't pile up sessions.
+        let session = wants_session.then_some(session);
         let perm = start_perm(&cfg, auto);
         if !run_oneshot(cfg, messages, session, task, output, out_mode, perm) {
             std::process::exit(1);
@@ -223,23 +267,90 @@ fn main() {
             eprintln!("no task given and stdin is not a terminal — pass a task: picoder \"do a thing\"");
             std::process::exit(2);
         }
-        let (messages, notes) = build_context(cont, &cfg);
-        run_tui(cfg, messages, notes, auto);
+        let replay = resumed.as_ref().map(|(_, _, msgs)| sessions::replay(msgs)).unwrap_or_default();
+        let (messages, session, notes) = start_session(&store, resumed, fork_session, &cfg);
+        run_tui(cfg, messages, notes, auto, session, replay, resume == Some(None));
     }
 }
 
-/// Build the starting conversation: a resumed session if asked for and present,
-/// otherwise a fresh one (system prompt + memory + auto-loaded project file).
-/// Returns the messages and human-readable startup notes for the UI.
-fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
-    let mut notes = Vec::new();
-    if cont {
-        if let Some(msgs) = load_session() {
-            notes.push(format!("resumed session ({} messages)", msgs.len()));
-            return (msgs, notes);
-        }
-        notes.push("no previous session here — starting fresh".into());
+/// The conversation to start with and the session file it saves to: a
+/// resumed session's own file, a copy of it with `--fork-session`, or a new
+/// session. Returns startup notes for the UI too.
+fn start_session(
+    store: &sessions::Store,
+    resumed: Option<(sessions::Meta, std::path::PathBuf, Vec<Message>)>,
+    fork: bool,
+    cfg: &Config,
+) -> (Vec<Message>, std::path::PathBuf, Vec<String>) {
+    let Some((meta, path, mut msgs)) = resumed else {
+        let (messages, notes) = build_context(cfg);
+        return (messages, store.new_path(), notes);
+    };
+    // A session saved mid tool-round (crash, kill) has tool_calls with no
+    // results; answer them so the first request on resume isn't a 400.
+    agent::repair_orphans(&mut msgs);
+    let mut notes = vec![format!("resumed session {}: {} ({} messages)", meta.id, meta.label(), meta.messages)];
+    if !fork {
+        return (msgs, path, notes);
     }
+    match sessions::fork(store, &path, &msgs) {
+        Ok(copy) => {
+            notes.push(format!(
+                "forked into {}; {} stays as it was",
+                copy.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+                meta.id
+            ));
+            (msgs, copy, notes)
+        }
+        Err(e) => {
+            eprintln!("could not fork session {}: {e}", meta.id);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `picoder sessions [--json]` lists this directory's sessions, newest first;
+/// `picoder sessions delete <id|name>` removes one. Returns the exit status.
+fn sessions_subcommand(args: &[String], json: bool) -> i32 {
+    let store = sessions::Store::here();
+    if args.first().map(String::as_str) == Some("delete") {
+        let Some(key) = args.get(1) else {
+            eprintln!("usage: picoder sessions delete <id|name>");
+            return 2;
+        };
+        return match store.find(key) {
+            Ok((m, p)) => {
+                sessions::delete(&p);
+                println!("deleted {} ({})", m.id, m.label());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
+    let list = store.list();
+    if json {
+        let metas: Vec<&sessions::Meta> = list.iter().map(|(m, _)| m).collect();
+        println!("{}", serde_json::to_string_pretty(&metas).unwrap_or_default());
+        return 0;
+    }
+    if list.is_empty() {
+        println!("no saved sessions in {}", store.cwd.display());
+        return 0;
+    }
+    let now = config::now_unix();
+    for (m, _) in &list {
+        println!("{}", sessions::summary_line(m, now, false));
+    }
+    0
+}
+
+/// A fresh conversation's start: system prompt, memory, instruction files and
+/// git state. Returns the messages and human-readable startup notes.
+fn build_context(cfg: &Config) -> (Vec<Message>, Vec<String>) {
+    let mut notes = Vec::new();
     let mut messages = vec![Message::system(system_prompt(cfg.auto_commit))];
     if let Ok(Some(mem)) = tools::load_memory() {
         messages.push(Message::system(format!(
@@ -364,19 +475,6 @@ fn read_capped(path: &std::path::Path) -> Option<String> {
     let mut s = String::new();
     std::io::BufReader::new(f.take(1_000_000)).read_to_string(&mut s).ok()?;
     Some(s)
-}
-
-fn load_session() -> Option<Vec<Message>> {
-    let text = std::fs::read_to_string(config::session_path()).ok()?;
-    let mut msgs: Vec<Message> = serde_json::from_str(&text).ok()?;
-    if msgs.is_empty() {
-        None
-    } else {
-        // A session saved mid tool-round (crash, kill) has tool_calls with no
-        // results; answer them so the first request on resume isn't a 400.
-        agent::repair_orphans(&mut msgs);
-        Some(msgs)
-    }
 }
 
 /// How one-shot mode reports: streamed text (default), one JSON object at the
@@ -642,7 +740,15 @@ fn run_oneshot(
     ok
 }
 
-fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) {
+fn run_tui(
+    cfg: Config,
+    messages: Vec<Message>,
+    notes: Vec<String>,
+    auto: bool,
+    session: std::path::PathBuf,
+    replay: Vec<(String, String)>,
+    pick_session: bool,
+) {
     let console = ui::detect_ascii();
     let status = status_lines(&cfg, console);
     let history = load_history();
@@ -659,7 +765,7 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     // Wire up sudo askpass before the worker exists (it mutates process env).
     askpass::setup(ui_tx.clone());
-    let h = agent::spawn(cfg, messages, perm_start, Some(config::session_path()), ui_tx);
+    let h = agent::spawn(cfg, messages, perm_start, Some(session), ui_tx);
 
     let mut terminal = match ui::setup_terminal() {
         Ok(t) => t,
@@ -684,8 +790,12 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     );
     app.banner(ui::term_width(), status);
     app.welcome();
+    app.replay(replay);
     for n in notes {
         app.note(n);
+    }
+    if pick_session {
+        app.open_session_picker(&h);
     }
 
     let result = ui::run(&mut terminal, &mut app, ui_rx, &h);
