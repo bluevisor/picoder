@@ -33,9 +33,11 @@ dependencies.
 - **Forgiving edits** — `read_file` numbers lines `cat -n` style (number, tab,
   text) so the number can't be mistaken for indentation. When `edit_file`'s
   `old_text` doesn't match exactly, it is matched line by line ignoring each
-  line's surrounding whitespace (and any pasted line numbers), and the new text
-  is re-indented to the file's own indentation. A miss returns the closest real
-  lines so the model can copy them.
+  line's surrounding whitespace (then all of it, for a dropped space) and any
+  pasted line numbers, and the new text is re-indented to the file's own
+  indentation. A miss returns the closest real lines so the model can copy
+  them. `multi_edit` takes a top-level `path` for single-file batches, and a
+  malformed edit fails the batch with its number instead of being skipped.
 - **Symlink-safe file tools** — `read_file` / `list_files` / `write_file` /
   `edit_file` all refuse symlinked paths, and paths are lexically normalized so
   the path you approve is the path that's used.

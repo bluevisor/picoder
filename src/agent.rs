@@ -1389,8 +1389,9 @@ impl Worker {
                 r
             }
             "edit_file" => {
-                let path = s("path");
-                match tools::edit_preview(path, s("old_text"), s("new_text")) {
+                let a = |keys: &[&str]| str_arg(args, keys).unwrap_or("");
+                let path = a(&["path", "file_path"]);
+                match tools::edit_preview(path, a(&["old_text", "old_string"]), a(&["new_text", "new_string"])) {
                     tools::EditPreview::Err(e) => {
                         self.result_event(&e);
                         e
@@ -1414,12 +1415,14 @@ impl Worker {
                 }
             }
             "multi_edit" => {
-                let edits = parse_edits(args.get("edits"));
-                if edits.is_empty() {
-                    let r = "ERROR: multi_edit needs an 'edits' array of {path, old_text, new_text}.".to_string();
-                    self.result_event(&r);
-                    return r;
-                }
+                let edits = match parse_edits(args) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let r = format!("ERROR: multi_edit: {e}. Nothing was applied.");
+                        self.result_event(&r);
+                        return r;
+                    }
+                };
                 match tools::multi_edit_plan(&edits) {
                     Err(e) => {
                         self.result_event(&e);
@@ -1723,18 +1726,40 @@ fn system_prefix_len(messages: &[Message]) -> usize {
 }
 
 /// Parse the `edits` argument of multi_edit into typed edit requests.
-fn parse_edits(v: Option<&Value>) -> Vec<tools::EditReq> {
-    let Some(arr) = v.and_then(|v| v.as_array()) else {
-        return Vec::new();
+/// The first string among `keys` in `v`: models trained on other agents send
+/// Claude Code's spellings (`file_path`, `old_string`, `new_string`).
+fn str_arg<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+}
+
+/// multi_edit's edits, all or nothing: a malformed edit is an error naming it,
+/// never silently dropped while the rest apply. An edit without a path uses
+/// the previous edit's, else the call's top-level `path`. `edits` may also
+/// arrive as a JSON string.
+fn parse_edits(args: &Value) -> Result<Vec<tools::EditReq>, String> {
+    let parsed;
+    let edits = match args.get("edits") {
+        Some(Value::String(s)) => {
+            parsed = serde_json::from_str::<Value>(s).map_err(|_| "'edits' is a string that isn't a JSON array".to_string())?;
+            &parsed
+        }
+        Some(v) => v,
+        None => return Err("missing 'edits'".into()),
     };
-    arr.iter()
-        .filter_map(|e| {
-            let path = e.get("path")?.as_str()?.to_string();
-            let old_text = e.get("old_text")?.as_str()?.to_string();
-            let new_text = e.get("new_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            Some(tools::EditReq { path, old_text, new_text })
-        })
-        .collect()
+    let arr = edits.as_array().filter(|a| !a.is_empty()).ok_or("'edits' must be a non-empty array")?;
+    let mut path = str_arg(args, &["path", "file_path"]).map(str::to_string);
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, e) in arr.iter().enumerate() {
+        let n = i + 1;
+        if let Some(p) = str_arg(e, &["path", "file_path"]) {
+            path = Some(p.to_string());
+        }
+        let path = path.clone().ok_or(format!("edit {n} has no 'path' (give each edit one, or a top-level 'path')"))?;
+        let old_text = str_arg(e, &["old_text", "old_string"]).ok_or(format!("edit {n} has no 'old_text'"))?.to_string();
+        let new_text = str_arg(e, &["new_text", "new_string"]).ok_or(format!("edit {n} has no 'new_text'"))?.to_string();
+        out.push(tools::EditReq { path, old_text, new_text });
+    }
+    Ok(out)
 }
 
 /// System prompt for a delegated sub-agent. Its whole job is one task; its
@@ -1769,6 +1794,32 @@ fn preview(s: &str, maxlines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_edit_args_fail_loudly_and_paths_carry_over() {
+        use serde_json::json;
+        let e = |o: &str, n: &str| json!({"old_text": o, "new_text": n});
+        // No path anywhere: an error naming the edit (it used to be dropped).
+        let err = parse_edits(&json!({"edits": [e("a", "b")]})).unwrap_err();
+        assert!(err.contains("edit 1 has no 'path'"), "{err}");
+        // A top-level path, inherited by every edit; a later path takes over.
+        let ok = parse_edits(&json!({"path": "x.rs", "edits": [
+            e("a", "b"),
+            {"path": "y.rs", "old_string": "c", "new_string": "d"},
+            e("e", "f"),
+        ]}))
+        .unwrap();
+        let paths: Vec<&str> = ok.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["x.rs", "y.rs", "y.rs"]);
+        assert_eq!((ok[1].old_text.as_str(), ok[1].new_text.as_str()), ("c", "d"), "Claude Code spellings");
+        // A missing field fails the whole batch instead of being skipped.
+        let err = parse_edits(&json!({"path": "x", "edits": [e("a", "b"), {"old_text": "c"}]})).unwrap_err();
+        assert!(err.contains("edit 2 has no 'new_text'"), "{err}");
+        // edits sent as a JSON string still parse.
+        let s = json!({"path": "x", "edits": "[{\"old_text\":\"a\",\"new_text\":\"b\"}]"});
+        assert_eq!(parse_edits(&s).unwrap().len(), 1);
+        assert!(parse_edits(&json!({"edits": []})).is_err());
+    }
 
     #[test]
     fn only_read_only_tools_run_in_parallel() {

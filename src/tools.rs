@@ -506,6 +506,7 @@ pub enum EditPreview {
 }
 
 /// One requested edit (a unique-substring replacement in a file).
+#[derive(Debug)]
 pub struct EditReq {
     pub path: String,
     pub old_text: String,
@@ -618,8 +619,9 @@ fn indent_of(line: &str) -> &str {
 
 /// Replace the one run of whole lines in `data` that equals `old_text` line
 /// for line once each line's surrounding whitespace is ignored (blank lines
-/// match blank lines), re-indenting `new_text` by the indentation the model
-/// got wrong. None when nothing matches that way.
+/// match blank lines) — or, failing that, all of its whitespace (a space the
+/// model dropped mid-line) — re-indenting `new_text` by the indentation the
+/// model got wrong. None when nothing matches either way.
 fn splice_loose(data: &str, old_text: &str, new_text: &str, where_: &str) -> Option<std::result::Result<String, String>> {
     let old: Vec<&str> = old_text.trim_end_matches(['\n', '\r']).split('\n').collect();
     let first = old.iter().position(|l| !l.trim().is_empty())?;
@@ -628,19 +630,29 @@ fn splice_loose(data: &str, old_text: &str, new_text: &str, where_: &str) -> Opt
     if k > lines.len() {
         return None;
     }
-    let hits: Vec<usize> =
-        (0..=lines.len() - k).filter(|&i| (0..k).all(|j| lines[i + j].trim() == old[j].trim())).collect();
-    let i = match hits.as_slice() {
-        [] => return None,
-        [i] => *i,
-        many => {
-            return Some(Err(format!(
-                "ERROR: {where_}old_text matches {} places when whitespace is ignored; include more \
-                 surrounding lines to make it unique.",
-                many.len()
-            )))
+    let trim = |l: &str| l.trim().to_string();
+    let squash = |l: &str| l.split_whitespace().collect::<String>();
+    let mut found = None;
+    for key in [&trim as &dyn Fn(&str) -> String, &squash] {
+        let want: Vec<String> = old.iter().map(|l| key(l)).collect();
+        let have: Vec<String> = lines.iter().map(|l| key(l)).collect();
+        let hits: Vec<usize> = (0..=lines.len() - k).filter(|&i| have[i..i + k] == want[..]).collect();
+        match hits.as_slice() {
+            [] => continue,
+            [i] => {
+                found = Some(*i);
+                break;
+            }
+            many => {
+                return Some(Err(format!(
+                    "ERROR: {where_}old_text matches {} places when whitespace is ignored; include more \
+                     surrounding lines to make it unique.",
+                    many.len()
+                )))
+            }
         }
-    };
+    }
+    let i = found?;
     let start: usize = lines[..i].iter().map(|l| l.len()).sum();
     let end = start + lines[i..i + k].iter().map(|l| l.len()).sum::<usize>();
     let last = lines[i + k - 1];
@@ -1920,6 +1932,16 @@ mod tests {
             "function frame(now) {\n    const dt = 1;\n    if (x) y();\n\n    const d = 2;\n    gl.draw();\n  }\n",
             "matched despite the indentation, and the new lines use the file's"
         );
+    }
+
+    /// The other slip seen live: a space dropped inside a line.
+    #[test]
+    fn edit_tolerates_a_space_dropped_mid_line() {
+        let data = "  if (u_scene == 1) {\n    // ----- Menger: subdivision with continuous min -----\n    vec3 q = p;\n  }\n";
+        let old = "  if (u_scene == 1) {\n    // ----- Menger: subdivision with continuous min-----\n    vec3 q = p;";
+        let new = "  if (u_scene == 1) {\n    // ----- Menger: subdivision with continuous min-----\n    vec3 q = p * 2.0;";
+        let out = splice_edit(data, old, new, "").unwrap();
+        assert!(out.contains("vec3 q = p * 2.0;") && out.ends_with("  }\n"), "{out}");
     }
 
     #[test]
