@@ -97,7 +97,6 @@ pub fn is_16color_terminal() -> bool {
 /// Slash commands with the one-line description shown in the `/` palette.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "pick a model from the provider's list"),
-    ("/login", "sign in to a subscription (anthropic, openai, google)"),
     ("/new", "clear conversation and session"),
     ("/config", "settings: provider, model, key, thinking, …"),
     ("/compact", "summarize older turns to free context"),
@@ -140,6 +139,12 @@ pub const SETTING_LABELS: &[&str] = &[
     "max tool calls",
     "price currency",
 ];
+
+/// The `/config` rows shown, as indexes into `SETTING_LABELS` (the panel's
+/// cursor is a position in this list). Row 4, auth mode, is hidden along with
+/// `/login`: subscription tokens only work through the vendors' own apps, and
+/// picoder has no native adapter for them.
+pub const SETTING_ROWS: &[usize] = &[0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11];
 
 #[derive(Clone, Copy)]
 pub enum BannerColor {
@@ -188,8 +193,6 @@ pub enum Mode {
 pub enum PickAction {
     /// Switch model to the chosen id.
     #[allow(dead_code)] Model,
-    /// Start the subscription OAuth flow for the chosen provider.
-    Login,
 }
 
 /// State for `Mode::Select`: a filterable, scrollable list of choices.

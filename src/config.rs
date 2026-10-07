@@ -208,7 +208,10 @@ pub fn known_context_window(model: &str) -> u32 {
     } else if m.contains("glm") {
         128_000 // GLM-4-Flash / GLM-4-Air / etc.
     } else {
-        default_ctx()
+        // Unknown model: assume the conservative window rather than the 1M
+        // default, or auto-compaction would wait until ~800k tokens and the
+        // provider would reject the request long before that.
+        128_000
     }
 }
 fn default_price_in() -> f64 {
@@ -448,13 +451,13 @@ impl Config {
                 if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
                     cfg.permission = s.to_string();
                 }
-                if let Some(s) = v.get("auth_mode").and_then(|x| x.as_str()) {
-                    cfg.auth_mode = if s == "sub" { "sub".into() } else { "api".into() };
-                }
+                // `auth_mode` is deliberately not read while `/login` is hidden:
+                // with no UI to switch back, a stale "sub" would strand the
+                // config on a token the provider's API doesn't accept.
                 if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
                     cfg.max_tool_calls = n as u32;
                 }
-                for key in ["permissions", "hooks"] {
+                for key in ["permissions", "hooks", "auto_bump_version"] {
                     if let Some(x) = v.get(key) {
                         cfg.extra.insert(key.to_string(), x.clone());
                     }
@@ -792,8 +795,8 @@ mod tests {
         assert_eq!(known_context_window("deepseek-reasoner"), 128_000);
         // A non-DeepSeek "flash" (GLM-4-Flash) must not inherit the 1M window.
         assert_eq!(known_context_window("glm-4-flash"), 128_000);
-        // Unknown models fall back to the conservative default.
-        assert_eq!(known_context_window("gpt-4o-mini"), default_ctx());
+        // Unknown models fall back to the conservative 128k, not the 1M default.
+        assert_eq!(known_context_window("gpt-4o-mini"), 128_000);
         // A fresh config auto-derives, and stays non-explicit so it keeps
         // tracking the model and never gets written to disk.
         let c = Config::default();

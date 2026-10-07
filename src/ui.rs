@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use types::{
     caps_char, ctrl_c_or_d, is_16color_terminal, picker_step_for_key, BannerColor, CursorKind,
     Glyphs, Kind, Mode, PickAction, Picker, TLine, DOUBLE_PRESS_TIMEOUT, GLYPHS_A, GLYPHS_U,
-    MAX_SUGGEST, MAX_TRANSCRIPT, PICKER_VISIBLE, SETTING_LABELS, SLASH_COMMANDS, SPIN_A, SPIN_U,
+    MAX_SUGGEST, MAX_TRANSCRIPT, PICKER_VISIBLE, SETTING_LABELS, SETTING_ROWS, SLASH_COMMANDS, SPIN_A, SPIN_U,
 };
 
 /// The current working directory as a display string, with `$HOME` collapsed to
@@ -507,6 +507,10 @@ impl App {
                 self.sess_prompt += prompt as u64;
                 self.sess_completion += completion as u64;
             }
+            UiEvent::Spend { prompt, completion } => {
+                self.sess_prompt += prompt as u64;
+                self.sess_completion += completion as u64;
+            }
             UiEvent::Context(n) => {
                 self.last_prompt_tokens = n;
             }
@@ -921,7 +925,7 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     self.mode = Mode::Settings { cursor: cur, edit: None };
-                    self.commit_setting(cur, buf, h);
+                    self.commit_setting(SETTING_ROWS[cur], buf, h);
                 }
                 KeyCode::Esc => self.mode = Mode::Settings { cursor: cur, edit: None },
                 KeyCode::Char('u') if ctrl => {
@@ -939,7 +943,7 @@ impl App {
             }
             return;
         }
-        let n = SETTING_LABELS.len();
+        let n = SETTING_ROWS.len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.mode = Mode::Settings { cursor: (cur + n - 1) % n, edit: None };
@@ -954,12 +958,13 @@ impl App {
         }
     }
 
-    /// Act on a `/config` row: cycle choice rows by `dir`, or open text rows
-    /// in the edit buffer. Choice changes apply (and persist) immediately.
+    /// Act on the `/config` row at cursor position `cur`: cycle choice rows by
+    /// `dir`, or open text rows in the edit buffer. Choice changes apply (and
+    /// persist) immediately.
     fn activate_setting(&mut self, cur: usize, dir: i32, h: &Handles) {
         let cycle = |i: usize, n: usize| ((i as i32 + dir).rem_euclid(n as i32)) as usize;
         let edit_with = |s: String| Mode::Settings { cursor: cur, edit: Some(s) };
-        match cur {
+        match SETTING_ROWS[cur] {
             0 => {
                 let i = PROVIDERS
                     .iter()
@@ -1023,10 +1028,11 @@ impl App {
         }
     }
 
-    /// Commit a text edit from the `/config` panel.
-    fn commit_setting(&mut self, cur: usize, val: String, h: &Handles) {
+    /// Commit a text edit from the `/config` panel. `row` indexes
+    /// `SETTING_LABELS` (not the cursor position).
+    fn commit_setting(&mut self, row: usize, val: String, h: &Handles) {
         let val = val.trim().to_string();
-        match cur {
+        match row {
             1 => {
                 if !val.is_empty() {
                     let v = val.trim_end_matches('/').to_string();
@@ -1095,9 +1101,6 @@ impl App {
                     match picker.action {
                         PickAction::Model => {
                             let _ = h.cmd_tx.send(WorkerCmd::SetModel(item));
-                        }
-                        PickAction::Login => {
-                            let _ = h.cmd_tx.send(WorkerCmd::Login(item));
                         }
                     }
                 }
@@ -1361,24 +1364,29 @@ impl App {
         self.input.drain(start..end);
     }
 
+    /// Tab-complete the `@path` word ending at the cursor, wherever it sits in
+    /// the line (`fix @src/ma` → `fix @src/main.rs`), not only a line that
+    /// starts with `@`.
     fn complete(&mut self) {
-        if self.input.starts_with('@') {
-            let prefix = &self.input[1..];
-            let opts = complete_path(prefix);
-            if opts.is_empty() {
-                return;
+        let end = self.byte_at(self.cursor);
+        let start = self.input[..end].rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        let word = &self.input[start..end];
+        let Some(prefix) = word.strip_prefix('@') else { return };
+        let opts = complete_path(prefix);
+        let fill = match opts.len() {
+            0 => return,
+            1 => opts[0].clone(),
+            _ => {
+                let lcp = longest_common_prefix(&opts);
+                if lcp.len() <= prefix.len() {
+                    return;
+                }
+                lcp
             }
-            if opts.len() == 1 {
-                self.input = format!("@{}", opts[0]);
-                self.cursor = self.char_len();
-                return;
-            }
-            let lcp = longest_common_prefix(&opts);
-            if lcp.len() > prefix.len() {
-                self.input = format!("@{lcp}");
-                self.cursor = self.char_len();
-            }
-        }
+        };
+        let added = fill.chars().count() - prefix.chars().count();
+        self.input.replace_range(start + 1..end, &fill);
+        self.cursor += added;
     }
 
     fn history_prev(&mut self) {
@@ -1564,20 +1572,6 @@ impl App {
         let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
     }
 
-    fn open_login_picker(&mut self) {
-        use crate::auth;
-        self.picker = Some(Picker {
-            title: "Pick a provider to sign in to".into(),
-            items: auth::supported().iter().map(|s| s.to_string()).collect(),
-            current: None,
-            filter: String::new(),
-            cursor: 0,
-            scroll: 0,
-            action: PickAction::Login,
-        });
-        self.mode = Mode::Select;
-    }
-
     fn run_command(&mut self, cmd: &str, h: &Handles) {
         // `/model ` (trailing space) must not become `SetModel("")` and persist
         // an empty model name; a blank argument is no argument.
@@ -1593,9 +1587,6 @@ impl App {
                     let _ = h.cmd_tx.send(WorkerCmd::ListModels);
                     self.mode = Mode::Select;
                 }
-            }
-            "login" => {
-                self.open_login_picker();
             }
             "new" => {
                 let _ = h.cmd_tx.send(WorkerCmd::New);
@@ -2135,7 +2126,7 @@ impl App {
             }
             Mode::Approval(_) => 2,
             Mode::ThemeSelect { .. } => THEMES.len() as u16 + 1,
-            Mode::Settings { .. } => SETTING_LABELS.len() as u16 + 1,
+            Mode::Settings { .. } => SETTING_ROWS.len() as u16 + 1,
             Mode::Select => {
                 let n = self.picker.as_ref().map(|p| p.filtered().len()).unwrap_or(0);
                 n.clamp(1, PICKER_VISIBLE) as u16 + 1
@@ -2334,7 +2325,8 @@ impl App {
                     Span::styled("(up/down to browse, Enter to change, Esc to close)", Style::default().fg(self.dim_text())),
                 ]));
                 let marker = if self.ascii { ">" } else { "▸" };
-                for (i, label) in SETTING_LABELS.iter().enumerate() {
+                for (i, &row) in SETTING_ROWS.iter().enumerate() {
+                    let label = SETTING_LABELS[row];
                     let sel = i == *cursor;
                     let lead = if sel { marker } else { " " };
                     let label_style = if sel {
@@ -2342,7 +2334,7 @@ impl App {
                     } else {
                         Style::default().fg(self.dim_text())
                     };
-                    let val = self.setting_value(i);
+                    let val = self.setting_value(row);
                     lines.push(Line::from(vec![
                         Span::styled(format!("{lead}{label:<16} "), label_style),
                         Span::styled(val, Style::default().fg(self.palette.accent)),
@@ -3141,6 +3133,27 @@ mod tests {
         // Second press inside the double-press window: quit.
         app.on_key(ctrl_c, &h);
         assert!(app.should_quit());
+    }
+
+    /// Tab completes an `@path` mid-sentence, at the cursor, keeping the text
+    /// around it (it used to work only when the whole line began with `@`).
+    #[test]
+    fn tab_completes_an_at_path_anywhere_in_the_line() {
+        let dir = std::env::temp_dir().join("picoder_tab_mid");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main_file.rs"), "").unwrap();
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, _rx) = test_handles();
+        app.input = format!("fix @{}/mai please", dir.display());
+        app.cursor = app.input.chars().count() - " please".chars().count();
+        app.on_key(key(KeyCode::Tab), &h);
+        assert_eq!(app.input, format!("fix @{}/main_file.rs please", dir.display()));
+        assert_eq!(
+            app.cursor,
+            app.input.chars().count() - " please".chars().count(),
+            "cursor lands after the completed path"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Esc clears the line too (as the README promises) and must never quit.

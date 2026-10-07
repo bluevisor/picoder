@@ -18,10 +18,13 @@ dependencies.
   `list_files`, `multi_edit` (a batch of edits across files in one approval),
   `grep` (regex), `glob`, `web_fetch`, `web_search`, `todo` (a visible plan),
   `ask_user`, `view_image`, and `remember` / `recall` memory. A `max_tool_calls`
-  budget (default 100, editable in `/config`) caps a single turn's tool calls.
+  budget (default `0` = auto, 500; editable in `/config`) caps the model
+  round-trips in a single turn.
 - **Git auto-checkpoint** — every successful edit is committed to the
   working-directory repo (`auto_commit`, on by default), so each change is
-  restorable; recent git history is fed into context as a clue.
+  restorable; recent git history is fed into context as a clue. Set
+  `"auto_bump_version": true` (config or `.picoder/settings.json`) to also bump
+  the `[package]` patch version in `Cargo.toml` with each checkpoint.
 - **Crash-safe state** — `config.json` and session transcripts are written
   atomically (temp file → fsync → rename), so a power loss on the Pi's SD card
   leaves the old or new file intact, never a truncated one.
@@ -32,13 +35,6 @@ dependencies.
   agent with its own context and the same tools; only its report comes back.
 - **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
   at start; their tools show up as `mcp__<server>__<tool>` (`/mcp` lists them).
-- **Subscription login** — `/login <anthropic|openai|google>` runs a browser
-  OAuth 2.0 (PKCE) flow and authenticates with your Claude Pro/Max, ChatGPT, or
-  Gemini account instead of a pay-as-you-go API key. Tokens persist to
-  `config.json` (mode `0600`) and refresh automatically on resume; `auth_mode`
-  (`api` / `sub`, in `/config`) selects which to send. The OAuth client ids are
-  hand-rolled with zero extra crates; Google needs your own client id/secret via
-  `PICODER_OAUTH_GOOGLE_CLIENT_ID` / `_CLIENT_SECRET`.
 - **Images** — `@image.png` attaches as a base64 data URI and `view_image`
   loads one from disk, sent as OpenAI multimodal content parts.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
@@ -46,7 +42,9 @@ dependencies.
   write/edit.
 - **Context compaction** — `/compact [focus]` summarizes older turns to free
   the window (the optional focus tells the summary what to preserve); triggers
-  automatically at 80% full.
+  automatically at 80% full, including mid-turn during long tool loops. The
+  window comes from `context_window`, else the provider's `/models`, else a
+  built-in table (128k for unknown models).
 - **Queued input** — keep typing while the agent works; Enter queues messages
   that send as turns finish.
 - **One-shot `--output`** — `picoder "task" -o out.md` writes the final reply to
@@ -74,9 +72,13 @@ dependencies.
   in a row is short-circuited with a nudge to change approach.
 - **Scripting** — `git diff | picoder "review this"` attaches stdin as context
   (or uses it as the task), and `--json` / `--stream-json` print a result
-  object or JSON-lines events for CI and automation.
-- **Context files** — auto-loads `PICODER.md` / `AGENTS.md` / `CLAUDE.md` /
-  `GEMINI.md` from the working directory.
+  object or JSON-lines events for CI and automation. One-shot runs use your
+  `permission` setting (`--auto` forces bypass); with no one to ask, approval
+  prompts are declined, never silently approved. Exit status: `0` ok, `1` the
+  run reported an error, `2` bad usage.
+- **Context files** — auto-loads the first of `PICODER.md` / `AGENTS.md` /
+  `CLAUDE.md` / `GEMINI.md` found in the working directory (one file, up to 12k
+  chars; parent directories aren't searched).
 - **Sessions** — persisted per working directory; resume with `picoder --continue`.
 - **Composer niceties** — a `/` command palette (suggestions ranked by your
   usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
@@ -139,8 +141,8 @@ On first run, picoder walks you through provider, model, and API key. State live
 in `~/.config/picoder/`:
 
 ```
-config.json   provider / model / key, auth_mode, oauth tokens (0600),
-              max_tool_calls, prices (+ optional mcp_servers, permissions, hooks)
+config.json   provider / model / key (0600), max_tool_calls, prices
+              (+ optional mcp_servers, permissions, hooks, auto_bump_version)
 commands/     user-wide custom slash commands (*.md)
 skills/       user-wide skills (<name>/SKILL.md)
 memory.md     remember/recall store
@@ -151,7 +153,7 @@ sessions/     per-directory session transcripts
 Per-project settings live in `.picoder/` inside the working directory:
 
 ```
-.picoder/settings.json        permissions + hooks shared with the team
+.picoder/settings.json        permissions, hooks, auto_bump_version (shared)
 .picoder/settings.local.json  your own rules (P at an approval prompt writes
                               here) — add it to .gitignore
 .picoder/commands/*.md        project slash commands
@@ -234,7 +236,6 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | Command | Action |
 | --- | --- |
 | `/model [id\|n]` | open the model picker, or set directly by id/number |
-| `/login <provider>` | sign in to a subscription (anthropic, openai, google) |
 | `/config` | settings panel (provider, model, key, auth, thinking, …) |
 | `/compact [focus]` | summarize older turns to free context (auto at 80%) |
 | `/diff` | show everything changed since the session started |

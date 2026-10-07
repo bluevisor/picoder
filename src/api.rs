@@ -8,8 +8,62 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 pub const MAX_TOOL_OUTPUT: usize = 16000;
+
+/// An HTTP error status from the provider, kept typed (not just a message)
+/// so the retry loop can tell a rate limit from a request that can't succeed.
+#[derive(Debug)]
+pub struct HttpStatus {
+    pub code: u16,
+    /// Seconds from a `Retry-After` header, when the server sent one.
+    pub retry_after: Option<u64>,
+    pub detail: String,
+}
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}: {}", self.code, self.detail)
+    }
+}
+
+impl std::error::Error for HttpStatus {}
+
+/// How long to wait before retrying after `err` on attempt `attempt` (1-based),
+/// or None when a retry can't help: any 4xx but timeout/conflict/rate-limit
+/// would fail the same way again. Exponential backoff (1s, 2s, 4s…) plus
+/// jitter; a server's `Retry-After` wins, capped at a minute.
+fn retry_delay(err: &anyhow::Error, attempt: u32) -> Option<Duration> {
+    if let Some(s) = err.downcast_ref::<HttpStatus>() {
+        if !matches!(s.code, 408 | 409 | 425 | 429 | 500..=599) {
+            return None;
+        }
+        if let Some(secs) = s.retry_after {
+            return Some(Duration::from_secs(secs.min(60)));
+        }
+    }
+    let base = Duration::from_millis(1000u64 << attempt.saturating_sub(1).min(5));
+    // No RNG crate on purpose (binary size): the clock's sub-second nanos are
+    // plenty to keep several clients from retrying in lockstep.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    Some(base + Duration::from_millis(nanos % (base.as_millis() as u64 / 2 + 1)))
+}
+
+/// Sleep for `d`, waking early on cancel. Returns false when cancelled.
+fn sleep_unless_cancelled(d: Duration, cancel: &AtomicBool) -> bool {
+    let deadline = std::time::Instant::now() + d;
+    while std::time::Instant::now() < deadline {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !cancel.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
@@ -230,7 +284,7 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"question":{"type":"string"}},
             "required":["question"]
         })),
-        tool("task","Delegate a self-contained sub-task to a fresh sub-agent that has its own context and the same tools. Use to parallelize exploration or keep a big sub-task's intermediate steps out of your context. Give complete instructions; you only get back the sub-agent's final report.", serde_json::json!({
+        tool("task","Delegate a self-contained sub-task to a fresh sub-agent that has its own context and the same tools. Sub-agents run one at a time, not in parallel; use one to keep a big sub-task's intermediate steps out of your context. Give complete instructions; you only get back the sub-agent's final report.", serde_json::json!({
             "type":"object",
             "properties":{
                 "description":{"type":"string","description":"Short label for the sub-task (a few words)."},
@@ -351,8 +405,9 @@ fn chat_stream(
     let resp = match resp {
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
-            let detail = r.into_string().unwrap_or_default();
-            return Err(anyhow!("HTTP {code}: {}", truncate(&detail, 800)));
+            let retry_after = r.header("retry-after").and_then(|v| v.trim().parse::<u64>().ok());
+            let detail = truncate(&r.into_string().unwrap_or_default(), 800);
+            return Err(HttpStatus { code, retry_after, detail }.into());
         }
         Err(e) => return Err(anyhow!("network error: {e}")),
     };
@@ -426,7 +481,8 @@ fn chat_stream(
 }
 
 /// chat_stream with retry: a dropped SSE chunk can corrupt streamed tool-call
-/// JSON, so we re-request a clean response. Also retries transient net errors.
+/// JSON, so we re-request a clean response. Transient failures (network,
+/// rate limits, 5xx) are retried with backoff; other 4xx fail at once.
 #[allow(clippy::too_many_arguments)]
 pub fn chat_resilient(
     http: &ureq::Agent,
@@ -438,7 +494,7 @@ pub fn chat_resilient(
     mut on_reasoning: impl FnMut(&str),
     mut on_retry: impl FnMut(&str),
 ) -> Result<(String, Vec<AccumCall>, Option<Usage>)> {
-    let tries = 3;
+    let tries = 4;
     let mut last: Option<(String, Vec<AccumCall>, Option<Usage>)> = None;
     for attempt in 1..=tries {
         if cancel.load(Ordering::Relaxed) {
@@ -446,10 +502,17 @@ pub fn chat_resilient(
         }
         match chat_stream(http, cfg, messages, Some(tools), cancel, &mut on_content, &mut on_reasoning) {
             Err(e) => {
-                if attempt == tries {
+                let Some(wait) = retry_delay(&e, attempt).filter(|_| attempt < tries) else {
                     return Err(e);
+                };
+                on_retry(&format!(
+                    "{e} — retry {attempt}/{} in {:.1}s",
+                    tries - 1,
+                    wait.as_secs_f32()
+                ));
+                if !sleep_unless_cancelled(wait, cancel) {
+                    break;
                 }
-                on_retry(&format!("network error — retry {attempt}/{}: {e}", tries - 1));
                 continue;
             }
             Ok((content, calls, usage)) => {
@@ -468,29 +531,37 @@ pub fn chat_resilient(
 }
 
 /// A plain (no tools) completion, with one retry on transient errors. Used for
-/// internal calls like summarizing the conversation during compaction.
+/// internal calls like summarizing the conversation during compaction. Returns
+/// the token usage too, so these background calls still count toward cost.
 pub fn chat_plain(
     http: &ureq::Agent,
     cfg: &Config,
     messages: &[Message],
     cancel: &AtomicBool,
-) -> Result<String> {
-    let mut last_err = anyhow!("no response");
-    for _ in 0..2 {
+) -> Result<(String, Option<Usage>)> {
+    let tries = 2;
+    for attempt in 1..=tries {
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
         }
         match chat_stream(http, cfg, messages, None, cancel, |_| {}, |_| {}) {
-            Ok((content, _, _)) => {
+            Ok((content, _, usage)) => {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(anyhow!("cancelled"));
                 }
-                return Ok(content);
+                return Ok((content, usage));
             }
-            Err(e) => last_err = e,
+            Err(e) => {
+                let Some(wait) = retry_delay(&e, attempt).filter(|_| attempt < tries) else {
+                    return Err(e);
+                };
+                if !sleep_unless_cancelled(wait, cancel) {
+                    return Err(anyhow!("cancelled"));
+                }
+            }
         }
     }
-    Err(last_err)
+    Err(anyhow!("no response"))
 }
 
 /// DeepSeek account balance (best-effort; returns None for other providers).
@@ -611,6 +682,25 @@ pub fn truncate(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod balance_tests {
     use super::*;
+
+    #[test]
+    fn retries_only_what_a_retry_can_fix() {
+        let status = |code, retry_after| anyhow::Error::from(HttpStatus { code, retry_after, detail: String::new() });
+        // A bad request, bad key or missing model fails the same way again.
+        for code in [400, 401, 403, 404, 413, 422] {
+            assert!(retry_delay(&status(code, None), 1).is_none(), "HTTP {code} must not retry");
+        }
+        // Rate limits and server trouble back off, growing per attempt.
+        let first = retry_delay(&status(429, None), 1).unwrap();
+        let third = retry_delay(&status(503, None), 3).unwrap();
+        assert!(first >= Duration::from_secs(1) && first < Duration::from_secs(2));
+        assert!(third >= Duration::from_secs(4) && third < Duration::from_secs(6));
+        // The server's Retry-After wins, capped at a minute.
+        assert_eq!(retry_delay(&status(429, Some(7)), 1), Some(Duration::from_secs(7)));
+        assert_eq!(retry_delay(&status(503, Some(3600)), 1), Some(Duration::from_secs(60)));
+        // Network failures are transient.
+        assert!(retry_delay(&anyhow!("network error: connection reset"), 1).is_some());
+    }
 
     #[test]
     fn images_are_dropped_entirely_for_providers_without_vision() {

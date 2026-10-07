@@ -67,7 +67,8 @@ usage:
   picoder \"do a thing\"     one-shot task, then exit
   cmd | picoder \"task\"     one-shot with stdin attached as context (or as the task)
   picoder --continue      resume this directory's last session (alias: -c)
-  picoder --auto ...      auto-approve tool calls (deny rules still apply)
+  picoder --auto ...      auto-approve tool calls (deny rules still apply); one-shot
+                          runs otherwise follow config \"permission\" and decline prompts
   picoder --output FILE   one-shot: also write the final reply to FILE (alias: -o)
   picoder --json ...      one-shot: print one JSON object {result, usage, cost, …}
   picoder --stream-json   one-shot: print JSON-lines events as they happen
@@ -81,9 +82,11 @@ in the TUI: @path attaches a file · !cmd runs a shell command · Tab autocomple
 
 config: ~/.config/picoder/config.json  (key also via PICODER_API_KEY, or the
         configured provider's var, e.g. DEEPSEEK_API_KEY / OPENAI_API_KEY)
-project: .picoder/settings.json {permissions: {allow, deny}, hooks}
+project: .picoder/settings.json {permissions: {allow, deny}, hooks, auto_bump_version}
          .picoder/commands/*.md  custom slash commands ($ARGUMENTS)
-auto-loads PICODER.md / AGENTS.md / CLAUDE.md from the working directory";
+auto-loads the first of PICODER.md / AGENTS.md / CLAUDE.md / GEMINI.md in the working directory
+
+exit status: 0 ok · 1 the run reported an error · 2 bad usage";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -146,7 +149,7 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--output" || a == "-o") {
         if pos + 1 >= args.len() {
             eprintln!("--output needs a file path");
-            return;
+            std::process::exit(2);
         }
         output = Some(args.remove(pos + 1));
         args.remove(pos);
@@ -166,13 +169,13 @@ fn main() {
                 Ok(c) => cfg = c,
                 Err(e) => {
                     eprintln!("setup failed: {e}");
-                    return;
+                    std::process::exit(1);
                 }
             }
         }
         if cfg.api_key.is_empty() {
             eprintln!("Run: picoder --config");
-            return;
+            std::process::exit(1);
         }
     }
 
@@ -202,19 +205,22 @@ fn main() {
         // Only persist a one-shot turn when explicitly continuing a session,
         // so a stray `picoder "x"` can't clobber a richer interactive session.
         let session = cont.then(config::session_path);
-        run_oneshot(cfg, messages, session, task, output, out_mode);
+        let perm = start_perm(&cfg, auto);
+        if !run_oneshot(cfg, messages, session, task, output, out_mode, perm) {
+            std::process::exit(1);
+        }
     } else {
         if output.is_some() {
             eprintln!("--output only applies to one-shot mode (picoder \"task\" -o file)");
-            return;
+            std::process::exit(2);
         }
         if out_mode != OutputMode::Text {
             eprintln!("--json / --stream-json only apply to one-shot mode (picoder \"task\" --json)");
-            return;
+            std::process::exit(2);
         }
         if !std::io::stdin().is_terminal() {
             eprintln!("no task given and stdin is not a terminal — pass a task: picoder \"do a thing\"");
-            return;
+            std::process::exit(2);
         }
         let (messages, notes) = build_context(cont, &cfg);
         run_tui(cfg, messages, notes, auto);
@@ -362,6 +368,21 @@ fn read_stdin_capped(cap: u64) -> String {
     s
 }
 
+/// The permission mode a session starts in: `--auto` forces bypass, else the
+/// configured default.
+fn start_perm(cfg: &Config, auto: bool) -> u8 {
+    if auto {
+        return agent::PERM_AUTO;
+    }
+    match cfg.permission.as_str() {
+        "bypass" | "auto" => agent::PERM_AUTO,
+        "plan" => agent::PERM_PLAN,
+        _ => agent::PERM_ASK,
+    }
+}
+
+/// Run one task to completion without the TUI. Returns false when the run
+/// reported an error (or `--output` couldn't be written), for the exit status.
 fn run_oneshot(
     cfg: Config,
     messages: Vec<Message>,
@@ -369,12 +390,13 @@ fn run_oneshot(
     task: String,
     output: Option<String>,
     mode: OutputMode,
-) {
+    perm: u8,
+) -> bool {
     let started = std::time::Instant::now();
     let model = cfg.model.clone();
     let (price_in, price_out, price_currency) = (cfg.price_in, cfg.price_out, cfg.price_currency.clone());
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
-    let h = agent::spawn(cfg, messages, agent::PERM_AUTO, session, ui_tx);
+    let h = agent::spawn(cfg, messages, perm, session, ui_tx);
     let (task_text, attached) = ui::expand_attachments(&task);
     let (images, img_names) = ui::extract_images(&task);
     let mut all = attached;
@@ -475,7 +497,7 @@ fn run_oneshot(
                 emit(serde_json::json!({"type": "error", "text": s}));
                 errors.push(s);
             }
-            UiEvent::Usage { prompt, completion } => {
+            UiEvent::Usage { prompt, completion } | UiEvent::Spend { prompt, completion } => {
                 prompt_tokens += prompt as u64;
                 completion_tokens += completion as u64;
             }
@@ -500,9 +522,18 @@ fn run_oneshot(
                 emit(serde_json::json!({"type": "diff", "text": d}));
             }
             UiEvent::Approval { desc, .. } => {
-                // In auto mode we shouldn't get here, but answer yes just in case.
-                let _ = h.appr_tx.send(agent::ApprovalResponse::Yes);
-                eprintln!("\x1b[2m[auto-approved: {desc}]\x1b[0m");
+                // Nobody is at a terminal to ask. Bypass runs shouldn't get
+                // here; anything else is declined (the model is told and goes
+                // on), never silently approved.
+                if perm == agent::PERM_AUTO {
+                    let _ = h.appr_tx.send(agent::ApprovalResponse::Yes);
+                    eprintln!("\x1b[2m[auto-approved: {desc}]\x1b[0m");
+                } else {
+                    let _ = h.appr_tx.send(agent::ApprovalResponse::No);
+                    let note = format!("declined: {desc} (one-shot runs need --auto or \"permission\": \"bypass\")");
+                    eprintln!("\x1b[33m[{note}]\x1b[0m");
+                    emit(serde_json::json!({"type": "notice", "text": note}));
+                }
             }
             UiEvent::Question { prompt, reply } => {
                 // In auto mode, answer with an empty decline.
@@ -536,16 +567,21 @@ fn run_oneshot(
         });
         println!("{summary}");
     }
+    let mut ok = errors.is_empty();
     if let Some(path) = output {
         let mut text = result;
         text.push('\n');
         match std::fs::write(&path, text) {
             Ok(()) => eprintln!("\x1b[2mwrote {path}\x1b[0m"),
-            Err(e) => eprintln!("\x1b[31mcould not write {path}: {e}\x1b[0m"),
+            Err(e) => {
+                eprintln!("\x1b[31mcould not write {path}: {e}\x1b[0m");
+                ok = false;
+            }
         }
     }
     let _ = h.cmd_tx.send(WorkerCmd::Quit);
     let _ = h.join.join();
+    ok
 }
 
 fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) {
@@ -560,15 +596,7 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     let price_out = cfg.price_out;
     let price_currency = money::Currency::parse(&cfg.price_currency);
     let settings = cfg.clone();
-    let perm_start = if auto {
-        agent::PERM_AUTO
-    } else {
-        match cfg.permission.as_str() {
-            "bypass" | "auto" => agent::PERM_AUTO,
-            "plan" => agent::PERM_PLAN,
-            _ => agent::PERM_ASK,
-        }
-    };
+    let perm_start = start_perm(&cfg, auto);
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     // Wire up sudo askpass before the worker exists (it mutates process env).

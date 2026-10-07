@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// Fallback limit used when max_tool_calls is 0 ("auto"). High enough to let
@@ -46,6 +46,9 @@ pub enum UiEvent {
     ModelList(Vec<String>),
     ModelChanged(String),
     Usage { prompt: u32, completion: u32 },
+    /// Tokens spent by a background call (compaction summary, follow-up
+    /// suggestion): counted toward session cost, but not the ctx bar.
+    Spend { prompt: u32, completion: u32 },
     /// Re-estimate of the next prompt's size (after compaction) so the UI's
     /// context bar drops immediately, without touching session totals.
     Context(u32),
@@ -81,7 +84,9 @@ pub enum WorkerCmd {
     /// Permission rules or hooks changed on disk: re-read them.
     ReloadSettings,
     SetModel(String),
-    /// `/login <provider>`: run the OAuth subscription flow and store the token.
+    /// Run the OAuth subscription flow and store the token. No UI sends it
+    /// since `/login` was hidden; kept for when native adapters exist.
+    #[allow(dead_code)]
     Login(String),
     /// A `/config` panel change: apply to the live config and persist.
     Patch(ConfigPatch),
@@ -144,6 +149,10 @@ struct Worker {
     hooks: Hooks,
     /// Hashes of this turn's tool calls, newest last — thrashing detection.
     recent_calls: Vec<u64>,
+    /// Context window the provider's `/models` advertised, tagged with the
+    /// model it was fetched for (filled by a background thread). Preferred
+    /// over the built-in table when sizing auto-compaction.
+    ctx_detected: Arc<Mutex<Option<(String, u32)>>>,
 }
 
 pub fn spawn(
@@ -228,6 +237,7 @@ pub fn spawn(
             policy,
             hooks,
             recent_calls: Vec::new(),
+            ctx_detected: Arc::new(Mutex::new(None)),
         };
         w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
         w.refresh_balance(); // initial account balance for the status line
@@ -410,7 +420,11 @@ pub fn spawn(
                         w.suggest_cancel = cancel_flag.clone();
                         std::thread::spawn(move || {
                             match api::chat_plain(&suggest_http, &suggest_cfg, &suggest_msgs, &cancel_flag) {
-                                Ok(text) => {
+                                Ok((text, usage)) => {
+                                    // Billed even when the result arrives too late to show.
+                                    if let Some(u) = usage {
+                                        let _ = suggest_ui.send(spend(&u));
+                                    }
                                     // Drop a result that arrived after a new turn began.
                                     if cancel_flag.load(Ordering::Relaxed) {
                                         return;
@@ -446,9 +460,9 @@ impl Worker {
     }
 
     /// Set the context window for the current model. The built-in table is
-    /// authoritative and instant (used by auto-compaction); a background call
-    /// then refines the UI display from the provider's `/models` metadata for
-    /// providers that advertise one. A user-pinned window is left untouched.
+    /// instant; a background call then refines it from the provider's
+    /// `/models` metadata for providers that advertise one (see `ctx_limit`).
+    /// A user-pinned window is left untouched.
     fn refresh_context_window(&mut self) {
         if self.cfg.context_window_explicit {
             return;
@@ -458,9 +472,13 @@ impl Worker {
         let _ = self.ui.send(UiEvent::ContextLimit(table));
         let ui = self.ui.clone();
         let cfg = self.cfg.clone();
+        let detected = self.ctx_detected.clone();
         std::thread::spawn(move || {
             let http = api::agent_http();
             if let Some(n) = api::context_window(&http, &cfg, &cfg.model) {
+                if let Ok(mut d) = detected.lock() {
+                    *d = Some((cfg.model.clone(), n));
+                }
                 if n != table {
                     let _ = ui.send(UiEvent::ContextLimit(n));
                 }
@@ -556,12 +574,27 @@ impl Worker {
         }
     }
 
+    /// The context window auto-compaction sizes against: a user-pinned value,
+    /// else what the provider advertised for this model, else the table.
+    fn ctx_limit(&self) -> u32 {
+        if !self.cfg.context_window_explicit {
+            if let Ok(d) = self.ctx_detected.lock() {
+                if let Some((model, n)) = d.as_ref() {
+                    if *model == self.cfg.model {
+                        return *n;
+                    }
+                }
+            }
+        }
+        self.cfg.context_window
+    }
+
     /// Auto-compact when the last prompt crossed 80% of the context window.
     /// Does not save the session itself — the caller (User handler) saves
     /// after the turn, avoiding a double-write when compaction runs right
     /// before a new turn.
     fn maybe_auto_compact(&mut self) {
-        let limit = self.cfg.context_window.max(1);
+        let limit = self.ctx_limit().max(1);
         if self.last_prompt as f64 >= 0.8 * limit as f64 {
             let pct = (self.last_prompt as f64 / limit as f64 * 100.0).round() as u32;
             let _ = self
@@ -593,7 +626,7 @@ impl Worker {
         // When the latest exchange is itself what blew the window (one turn
         // with hundreds of tool calls), keeping it verbatim compacts nothing
         // and the next request still fails — summarize it too.
-        let limit = self.cfg.context_window.max(1) as usize;
+        let limit = self.ctx_limit().max(1) as usize;
         if tail_start < n && estimate_tokens(&self.messages[tail_start..]) as usize > limit / 2 {
             tail_start = n;
         }
@@ -623,7 +656,11 @@ impl Worker {
                 _ => format!("Summarize this conversation so far:\n\n{rendered}"),
             }),
         ];
-        match api::chat_plain(&self.http, &self.cfg, &req, &self.cancel) {
+        let res = api::chat_plain(&self.http, &self.cfg, &req, &self.cancel);
+        if let Ok((_, Some(u))) = &res {
+            let _ = self.ui.send(spend(u));
+        }
+        match res.map(|(text, _)| text) {
             Ok(summary) if !summary.trim().is_empty() => {
                 let mut new = self.messages[..self.system_len].to_vec();
                 new.push(Message::user(format!(
@@ -723,10 +760,40 @@ impl Worker {
         } else {
             self.cfg.max_tool_calls as usize
         };
+        // A failed or fruitless mid-turn compaction isn't retried every step.
+        let mut compact_failed = false;
         for _ in 0..max {
             if self.cancel.load(Ordering::Relaxed) {
                 let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
                 return String::new();
+            }
+            // A long turn can outgrow the window between user prompts, so check
+            // before every request, not only when a new turn starts. Tool results
+            // appended since the last response aren't in `last_prompt` yet, hence
+            // the estimate. Sub-agents run on their own short-lived history.
+            if !quiet && !compact_failed {
+                let used = self.last_prompt.max(estimate_tokens(&self.messages));
+                if used as f64 >= 0.8 * self.ctx_limit().max(1) as f64 {
+                    let _ = self.ui.send(UiEvent::Notice(
+                        "context nearly full mid-turn — compacting…".into(),
+                    ));
+                    // When the whole conversation was summarized it ends on the
+                    // assistant's acknowledgement; hand the turn back explicitly.
+                    if !self.compact(None) {
+                        compact_failed = true;
+                    } else {
+                        if self.messages.last().map(|m| m.role.as_str()) == Some("assistant") {
+                            self.messages.push(Message::user(
+                                "[Context was compacted mid-task.] Continue the task from the summary.",
+                            ));
+                        }
+                        // Still over the line: compacting again this turn would
+                        // only burn calls (the model re-reads what was summarized).
+                        if estimate_tokens(&self.messages) as f64 >= 0.8 * self.ctx_limit().max(1) as f64 {
+                            compact_failed = true;
+                        }
+                    }
+                }
             }
             let ui = self.ui.clone();
             let ui2 = self.ui.clone();
@@ -1425,6 +1492,14 @@ fn render_for_summary(messages: &[Message]) -> String {
 
 /// Crude size estimate (~4 chars/token, ~1000 tokens per image) for the
 /// post-compaction context bar.
+/// A background call's token usage as a session-cost event.
+fn spend(u: &api::Usage) -> UiEvent {
+    UiEvent::Spend {
+        prompt: u.prompt_tokens,
+        completion: u.total_tokens.saturating_sub(u.prompt_tokens),
+    }
+}
+
 fn estimate_tokens(messages: &[Message]) -> u32 {
     let chars: usize = messages
         .iter()

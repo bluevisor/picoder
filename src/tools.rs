@@ -716,8 +716,21 @@ fn run_proc(cmd: &mut Command, timeout_secs: u64) -> std::io::Result<std::proces
     }
 }
 
-/// Bump the patch version in `dir/Cargo.toml`. Returns the new version string,
-/// or None if there's no Cargo.toml or the version can't be bumped.
+/// Whether edit checkpoints also bump Cargo.toml's patch version. Opt-in with
+/// `"auto_bump_version": true` in config.json or the project's
+/// `.picoder/settings(.local).json` (the most specific layer wins): in someone
+/// else's crate a version bump per edit is noise, not a checkpoint.
+fn auto_bump_version() -> bool {
+    crate::config::settings_layers()
+        .iter()
+        .rev()
+        .find_map(|(_, v)| v.get("auto_bump_version").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Bump the `[package]` patch version in `dir/Cargo.toml`. Returns the new
+/// version string, or None if there's no Cargo.toml or no `[package]` version
+/// to bump (a workspace root, `version.workspace = true`).
 pub fn bump_cargo_version(dir: &Path) -> Option<String> {
     let path = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).ok()?;
@@ -726,38 +739,41 @@ pub fn bump_cargo_version(dir: &Path) -> Option<String> {
     // matches at the start of any line, not just the start of the string.
     let re = regex::Regex::new(r#"(?m)^(\s*version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")"#).ok()?;
     let mut bumped = String::new();
-    let mut found = false;
+    let mut new_version: Option<String> = None;
     let mut first = true;
+    // Only the [package] table's own version: a `[dependencies.foo]` table
+    // has a `version = "x.y.z"` line of exactly the same shape.
+    let mut in_package = false;
     for line in text.lines() {
         if !first {
             bumped.push('\n');
         }
         first = false;
-        if !found {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            in_package = t.trim_end().trim_end_matches(|c: char| c != ']') == "[package]";
+        }
+        if new_version.is_none() && in_package {
             if let Some(caps) = re.captures(line) {
                 let z: u64 = caps[4].parse().ok()?;
-                let new_version = format!("{}.{}.{}", &caps[2], &caps[3], z + 1);
-                bumped.push_str(&format!("{}{}{}", &caps[1], new_version, &caps[5]));
-                found = true;
+                let v = format!("{}.{}.{}", &caps[2], &caps[3], z + 1);
+                bumped.push_str(&format!("{}{}{}", &caps[1], v, &caps[5]));
+                new_version = Some(v);
                 continue;
             }
         }
         bumped.push_str(line);
     }
-    if !found {
-        return None;
-    }
+    let new_version = new_version?;
     if trailing_nl {
         bumped.push('\n');
     }
     std::fs::write(&path, &bumped).ok()?;
-    // Return the new version as e.g. "0.2.3".
-    let caps = re.captures(&bumped)?;
-    Some(format!("{}.{}.{}", &caps[2], &caps[3], &caps[4]))
+    Some(new_version)
 }
 
-/// Commit the given paths to the repo at `dir` as an edit checkpoint. Also bumps
-/// the patch version in Cargo.toml (if present) and includes it in the commit.
+/// Commit the given paths to the repo at `dir` as an edit checkpoint. With
+/// `auto_bump_version` on, also bumps Cargo.toml's patch version into it.
 /// Returns a short note like ` [committed a1b2c3d]` for the tool result, or ""
 /// when there was nothing to commit / not a repo. Best-effort: never surfaces an
 /// error.
@@ -797,9 +813,9 @@ pub fn git_autocommit(dir: &Path, paths: &[String], message: &str) -> String {
         return String::new(); // nothing changed
     }
 
-    // Bump Cargo.toml version if present, and add it to the commit.
+    // Bump Cargo.toml version if opted in, and add it to the commit.
     let cargo_toml = dir.join("Cargo.toml");
-    let version_bumped = if cargo_toml.exists() {
+    let version_bumped = if cargo_toml.exists() && auto_bump_version() {
         bump_cargo_version(dir)
     } else {
         None
@@ -1715,6 +1731,28 @@ mod tests {
         // Bump again.
         let new2 = bump_cargo_version(&dir).expect("second bump");
         assert_eq!(new2, "3.14.161");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bump_cargo_version_only_touches_the_package_table() {
+        let dir = std::env::temp_dir().join("picoder_bump_tables");
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("Cargo.toml");
+        // A dependency table ahead of [package] has the same `version = ` shape.
+        std::fs::write(
+            &toml,
+            "[dependencies.serde]\nversion = \"1.0.200\"\n\n[package] # the crate\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(bump_cargo_version(&dir).as_deref(), Some("0.1.1"));
+        let content = std::fs::read_to_string(&toml).unwrap();
+        assert!(content.contains("version = \"1.0.200\""), "dependency untouched: {content}");
+        assert!(content.contains("version = \"0.1.1\""));
+        // A workspace root has no [package] version to bump.
+        std::fs::write(&toml, "[workspace.package]\nversion = \"2.0.0\"\n").unwrap();
+        assert!(bump_cargo_version(&dir).is_none());
+        assert!(std::fs::read_to_string(&toml).unwrap().contains("\"2.0.0\""));
         std::fs::remove_dir_all(&dir).ok();
     }
 

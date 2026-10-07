@@ -76,7 +76,8 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   needs since it can't report Shift+Tab): ask / bypass / plan (read-only); colored
   diff before write/edit. Handled in every mode, and never confused with the
   composer's Tab autocomplete.
-- Auto-loads `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` as context.
+- Auto-loads the first of `PICODER.md`/`AGENTS.md`/`CLAUDE.md`/`GEMINI.md` in the
+  working directory as context (one file, 12k chars).
 - Session persistence + resume (`picoder --continue`, per working directory).
 - Composer: typing `/` opens a command palette (suggestions ranked by your
   usage history; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab
