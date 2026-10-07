@@ -231,7 +231,7 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"id":{"type":"integer","description":"Job id from bash."}},
             "required":["id"]
         })),
-        tool("read_file","Read a UTF-8 text file, optionally a 1-based inclusive line range.", serde_json::json!({
+        tool("read_file","Read a UTF-8 text file, optionally a 1-based inclusive line range. Each line comes back as `<line number><TAB><content>`: everything after the tab is the file's exact text, indentation included. Never copy the number or the tab into edit_file's old_text.", serde_json::json!({
             "type":"object",
             "properties":{
                 "path":{"type":"string"},
@@ -245,7 +245,7 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"path":{"type":"string"},"content":{"type":"string"}},
             "required":["path","content"]
         })),
-        tool("edit_file","Replace an exact substring in a file. old_text must appear exactly once. Use for surgical edits.", serde_json::json!({
+        tool("edit_file","Replace an exact substring in a file. old_text must appear exactly once; copy it from read_file's output after the tab, with the file's exact indentation. Use for surgical edits.", serde_json::json!({
             "type":"object",
             "properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},
             "required":["path","old_text","new_text"]

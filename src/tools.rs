@@ -381,7 +381,9 @@ pub fn read_file(path: &str, start: Option<u64>, end: Option<u64>) -> String {
     }
     let mut out = String::new();
     for (i, ln) in slice.iter().enumerate() {
-        out.push_str(&format!("{:>5}  {}", off + i, ln));
+        // A tab, like `cat -n`: with spaces the model mistook the separator
+        // for indentation and sent edit_file old_text indented 2 too deep.
+        out.push_str(&format!("{:>5}\t{}", off + i, ln));
         if !ln.ends_with('\n') {
             out.push('\n');
         }
@@ -579,10 +581,130 @@ fn splice_edit(data: &str, old_text: &str, new_text: &str, where_: &str) -> std:
     let data_nfc: String = unicode_normalization::UnicodeNormalization::nfc(data.chars()).collect();
     let old_nfc: String = unicode_normalization::UnicodeNormalization::nfc(old_text.chars()).collect();
     match count(&data_nfc, &old_nfc) {
-        0 => Err(format!("ERROR: {where_}old_text not found.")),
-        1 => Ok(data_nfc.replacen(&old_nfc, new_text, 1)),
-        n => Err(format!("ERROR: {where_}old_text matches {n} times; make it unique.")),
+        0 => {}
+        1 => return Ok(data_nfc.replacen(&old_nfc, new_text, 1)),
+        n => return Err(format!("ERROR: {where_}old_text matches {n} times; make it unique.")),
     }
+    // Models get whitespace wrong far more often than content: indentation off
+    // by a level, blank lines with stray spaces, read_file's line numbers
+    // pasted in. Match whole lines ignoring that, then re-indent the new text.
+    let (old_t, new_t) = match strip_line_numbers(old_text) {
+        Some(o) => (o, strip_line_numbers(new_text).unwrap_or_else(|| new_text.to_string())),
+        None => (old_text.to_string(), new_text.to_string()),
+    };
+    if let Some(r) = splice_loose(data, &old_t, &new_t, where_) {
+        return r;
+    }
+    Err(format!("ERROR: {where_}old_text not found.{}", closest_hint(data, &old_t)))
+}
+
+/// `text` without read_file's line-number prefixes (`   12<TAB>`, or the old
+/// `   12  `), when every non-blank line carries one. None otherwise.
+fn strip_line_numbers(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"^\s*\d+(\t| {2})").ok()?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut nonblank = lines.iter().filter(|l| !l.trim().is_empty()).peekable();
+    nonblank.peek()?;
+    if !nonblank.all(|l| re.is_match(l)) {
+        return None;
+    }
+    Some(lines.iter().map(|l| re.replace(l, "").into_owned()).collect::<Vec<_>>().join("\n"))
+}
+
+/// Leading spaces and tabs of a line.
+fn indent_of(line: &str) -> &str {
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+}
+
+/// Replace the one run of whole lines in `data` that equals `old_text` line
+/// for line once each line's surrounding whitespace is ignored (blank lines
+/// match blank lines), re-indenting `new_text` by the indentation the model
+/// got wrong. None when nothing matches that way.
+fn splice_loose(data: &str, old_text: &str, new_text: &str, where_: &str) -> Option<std::result::Result<String, String>> {
+    let old: Vec<&str> = old_text.trim_end_matches(['\n', '\r']).split('\n').collect();
+    let first = old.iter().position(|l| !l.trim().is_empty())?;
+    let lines: Vec<&str> = data.split_inclusive('\n').collect();
+    let k = old.len();
+    if k > lines.len() {
+        return None;
+    }
+    let hits: Vec<usize> =
+        (0..=lines.len() - k).filter(|&i| (0..k).all(|j| lines[i + j].trim() == old[j].trim())).collect();
+    let i = match hits.as_slice() {
+        [] => return None,
+        [i] => *i,
+        many => {
+            return Some(Err(format!(
+                "ERROR: {where_}old_text matches {} places when whitespace is ignored; include more \
+                 surrounding lines to make it unique.",
+                many.len()
+            )))
+        }
+    };
+    let start: usize = lines[..i].iter().map(|l| l.len()).sum();
+    let end = start + lines[i..i + k].iter().map(|l| l.len()).sum::<usize>();
+    let last = lines[i + k - 1];
+    let nl = if last.ends_with("\r\n") || data.contains("\r\n") { "\r\n" } else { "\n" };
+    let eol = if last.ends_with('\n') { nl } else { "" };
+    let (from, to) = (indent_of(old[first]), indent_of(lines[i + first]));
+    let shift = to.len() as isize - from.len() as isize;
+    let reindent = |line: &str| -> String {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            return String::new();
+        }
+        if let Some(rest) = line.strip_prefix(from) {
+            return format!("{to}{rest}");
+        }
+        // Shallower than old_text's first line (a closing brace, say): move it
+        // by the same amount, as far as its own indentation allows.
+        let lead = indent_of(line).len();
+        if shift < 0 {
+            line[(-shift as usize).min(lead)..].to_string()
+        } else {
+            format!("{}{line}", &to[..(shift as usize).min(to.len())])
+        }
+    };
+    let body = if new_text.is_empty() {
+        String::new()
+    } else {
+        let new: Vec<String> = new_text.trim_end_matches(['\n', '\r']).split('\n').map(reindent).collect();
+        format!("{}{eol}", new.join(nl))
+    };
+    Some(Ok(format!("{}{body}{}", &data[..start], &data[end..])))
+}
+
+/// For a failed edit: the stretch of `data` that best lines up with
+/// `old_text` (most lines equal ignoring whitespace), numbered like read_file,
+/// so the model can copy the real text instead of guessing again.
+fn closest_hint(data: &str, old_text: &str) -> String {
+    let old: Vec<&str> = old_text.trim_end_matches('\n').split('\n').map(str::trim).collect();
+    let lines: Vec<&str> = data.lines().collect();
+    let span = old.len().min(lines.len());
+    if span == 0 || old.len() > 400 || lines.len() > 50_000 {
+        return String::new();
+    }
+    let trimmed: Vec<&str> = lines.iter().map(|l| l.trim()).collect();
+    let (mut score, mut at) = (0, 0);
+    for i in 0..=lines.len() - span {
+        let s = (0..span).filter(|&j| !old[j].is_empty() && trimmed[i + j] == old[j]).count();
+        if s > score {
+            (score, at) = (s, i);
+        }
+    }
+    if score == 0 {
+        return " No line of it appears in the file; re-read the file before editing.".into();
+    }
+    let shown = &lines[at..(at + span).min(at + 40)];
+    let body: Vec<String> = shown.iter().enumerate().map(|(j, l)| format!("{:>5}\t{l}", at + j + 1)).collect();
+    format!(
+        " Closest match, lines {}-{} ({score} of {} lines agree ignoring whitespace) — copy old_text \
+         from here exactly (the text after each tab):\n{}",
+        at + 1,
+        at + shown.len(),
+        old.len(),
+        body.join("\n")
+    )
 }
 
 /// Read a file for editing, refusing symlinks atomically (O_NOFOLLOW).
@@ -1713,7 +1835,7 @@ mod tests {
         let p = f.to_str().unwrap();
         assert!(read_file(p, Some(10), None).starts_with("ERROR: start_line 10 is beyond"));
         assert!(read_file(p, Some(3), Some(2)).starts_with("ERROR: end_line 2 is before"));
-        assert!(read_file(p, Some(2), Some(2)).contains("    2  b"));
+        assert!(read_file(p, Some(2), Some(2)).contains("    2\tb"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1783,6 +1905,50 @@ mod tests {
         let new2 = bump_cargo_version(&dir).expect("second bump");
         assert_eq!(new2, "3.14.161");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The failures seen with a local Qwen (2026-10-06): old_text indented two
+    /// spaces too deep, with a whitespace-only blank line, from mistaking
+    /// read_file's separator for indentation.
+    #[test]
+    fn edit_tolerates_wrong_indentation_and_reindents_the_new_text() {
+        let data = "function frame(now) {\n    const dt = 1;\n    if (x) y();\n\n    gl.draw();\n  }\n";
+        let old = "      const dt = 1;\n      if (x) y();\n  \n      gl.draw();\n    }";
+        let new = "      const dt = 1;\n      if (x) y();\n\n      const d = 2;\n      gl.draw();\n    }";
+        assert_eq!(
+            splice_edit(data, old, new, "").unwrap(),
+            "function frame(now) {\n    const dt = 1;\n    if (x) y();\n\n    const d = 2;\n    gl.draw();\n  }\n",
+            "matched despite the indentation, and the new lines use the file's"
+        );
+    }
+
+    #[test]
+    fn edit_strips_line_numbers_copied_from_read_file() {
+        let data = "a\n    const dt = 1;\n    go();\nz\n";
+        let old = "    2\t    const dt = 1;\n    3\t    go();";
+        let new = "    2\t    const dt = 2;\n    3\t    go();";
+        assert_eq!(splice_edit(data, old, new, "").unwrap(), "a\n    const dt = 2;\n    go();\nz\n");
+    }
+
+    #[test]
+    fn loose_matching_keeps_crlf_and_refuses_ambiguity() {
+        let crlf = "if (a) {\r\n  x();\r\n}\r\n";
+        assert_eq!(splice_edit(crlf, "    x();", "    y();", "").unwrap(), "if (a) {\r\n  y();\r\n}\r\n");
+        // Two blocks that differ only by indentation: no guessing which.
+        let twice = "  call();\n    call();\n";
+        let err = splice_edit(twice, "\tcall();", "done();", "").unwrap_err();
+        assert!(err.contains("2 places"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_edit_shows_the_closest_real_lines() {
+        let data = "one\n  let a = 1;\n  let b = 2;\n  let c = 3;\nfour\n";
+        let err = splice_edit(data, "  let a = 1;\n  let b = 20;\n  let c = 3;", "x", "").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        assert!(err.contains("Closest match, lines 2-4 (2 of 3"), "{err}");
+        assert!(err.contains("    3\t  let b = 2;"), "real text, numbered like read_file: {err}");
+        let none = splice_edit(data, "nothing like it", "x", "").unwrap_err();
+        assert!(none.contains("re-read the file"), "{none}");
     }
 
     #[test]

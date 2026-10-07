@@ -327,7 +327,9 @@ impl App {
     }
 
     fn push(&mut self, kind: Kind, text: impl Into<String>) {
-        let text = text.into();
+        // The terminal can't lay out a raw tab (ratatui gives it no width), and
+        // read_file's line numbers end in one: show tabs as spaces.
+        let text = text.into().replace('\t', "    ");
         if text.is_empty() && kind != Kind::Banner && kind != Kind::BannerDim {
             return;
         }
@@ -453,7 +455,7 @@ impl App {
                     } else {
                         Kind::DiffCtx
                     };
-                    self.transcript.push(TLine { kind, text: ln.to_string(), lead: i == 0, color: None });
+                    self.transcript.push(TLine { kind, text: ln.replace('\t', "    "), lead: i == 0, color: None });
                 }
                 self.after_push();
             }

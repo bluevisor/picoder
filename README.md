@@ -30,6 +30,12 @@ dependencies.
 - **Crash-safe state** — `config.json` and session transcripts are written
   atomically (temp file → fsync → rename), so a power loss on the Pi's SD card
   leaves the old or new file intact, never a truncated one.
+- **Forgiving edits** — `read_file` numbers lines `cat -n` style (number, tab,
+  text) so the number can't be mistaken for indentation. When `edit_file`'s
+  `old_text` doesn't match exactly, it is matched line by line ignoring each
+  line's surrounding whitespace (and any pasted line numbers), and the new text
+  is re-indented to the file's own indentation. A miss returns the closest real
+  lines so the model can copy them.
 - **Symlink-safe file tools** — `read_file` / `list_files` / `write_file` /
   `edit_file` all refuse symlinked paths, and paths are lexically normalized so
   the path you approve is the path that's used.
