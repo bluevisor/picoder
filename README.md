@@ -116,6 +116,11 @@ dependencies.
   usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
   (commands + paths), history, word-skip and word-delete, code-block
   highlighting.
+- **Multi-line prompts** — pasted text keeps its newlines and tabs;
+  Shift+Enter, Alt+Enter, Ctrl+J or a trailing `\` + Enter start a new line;
+  the composer grows to a third of the screen, then scrolls. Multi-line
+  entries survive in history, and `/rewind` hands back the prompt exactly as
+  typed.
 - **Status bar** — model · session tokens + cost · context-window bar ·
   account balance. Both money figures carry their own currency, and the ISO
   code is added when they differ (DeepSeek bills China-region accounts in CNY
@@ -293,8 +298,10 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | Key | Action |
 | --- | --- |
 | `Enter` | send |
+| `Shift+Enter` / `Alt+Enter` / `Ctrl+J` / `\` then `Enter` | new line in the composer (the last two work on the Pi's console) |
 | `Shift+Tab` / `Ctrl+P` | cycle permission mode |
-| `↑` / `↓` | scroll the output (3 lines) |
+| `↑` / `↓` | move between the composer's lines; on its first/last line, scroll the output (3 lines) |
+| `Home` / `End` | start / end of the composer line |
 | `PgUp` / `PgDn` | scroll the output a page |
 | mouse wheel | scroll the output (when mouse capture is on) |
 | `Ctrl` / `Alt + ↑` / `↓` | composer history |

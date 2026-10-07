@@ -471,7 +471,7 @@ fn run_oneshot(
         }
         emit(serde_json::json!({"type": "attached", "files": all}));
     }
-    let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
+    let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images, typed: task });
 
     let mut out = std::io::stdout();
     let mut at_line_start = true;
@@ -742,23 +742,78 @@ fn model_subcommand(cfg: &Config, arg: Option<String>) {
     }
 }
 
+/// First line of a history file whose entries are escaped (`\\` and `\n`),
+/// so a multi-line prompt stays one line on disk. A file without it is the
+/// older one-entry-per-line format and is read as-is.
+const HISTORY_V2: &str = "#picoder-history v2";
+
 fn load_history() -> Vec<String> {
     std::fs::read_to_string(config::history_path())
-        .map(|s| s.lines().map(String::from).collect())
+        .map(|s| parse_history(&s))
         .unwrap_or_default()
 }
 
+fn parse_history(s: &str) -> Vec<String> {
+    let mut lines = s.lines();
+    if s.starts_with(HISTORY_V2) {
+        lines.next();
+        lines.map(unescape_history).collect()
+    } else {
+        lines.map(String::from).collect()
+    }
+}
+
 fn save_history(history: &[String]) {
-    let start = history.len().saturating_sub(1000);
-    let text = history[start..].join("\n");
     let _ = std::fs::create_dir_all(config::config_dir());
-    let _ = std::fs::write(config::history_path(), text);
+    let _ = std::fs::write(config::history_path(), format_history(history));
+}
+
+fn format_history(history: &[String]) -> String {
+    let start = history.len().saturating_sub(1000);
+    let mut out = String::from(HISTORY_V2);
+    for entry in &history[start..] {
+        out.push('\n');
+        out.push_str(&entry.replace('\\', "\\\\").replace('\n', "\\n"));
+    }
+    out
+}
+
+fn unescape_history(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn history_round_trips_multi_line_entries() {
+        let entries = vec![
+            "one line".to_string(),
+            "two\nlines".to_string(),
+            "a literal \\n and a backslash \\".to_string(),
+            "tab\there".to_string(),
+        ];
+        let text = format_history(&entries);
+        assert_eq!(text.lines().count(), entries.len() + 1, "one line per entry plus the marker");
+        assert_eq!(parse_history(&text), entries);
+        // The old format (no marker) is one entry per line, read verbatim.
+        assert_eq!(parse_history("old \\n entry\nsecond"), vec!["old \\n entry", "second"]);
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("picoder_ctx_{name}"));

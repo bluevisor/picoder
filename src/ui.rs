@@ -70,6 +70,28 @@ struct ComposerLayout {
     cur_row: usize,
     cur_col: usize,
     cur_idx: usize,
+    /// Char index (into the whole input) where each row starts. A row ended by
+    /// a newline doesn't hold the `\n`, so the next start skips past it.
+    starts: Vec<usize>,
+}
+
+/// Cells a tab takes in the composer (tabs are kept verbatim in the buffer,
+/// e.g. a pasted Makefile, but drawn as spaces).
+const TAB_W: usize = 4;
+
+/// Lines of a prompt echoed into the transcript before the rest is elided.
+const ECHO_LINES: usize = 24;
+
+/// A prompt as echoed into the transcript: whole up to ECHO_LINES lines, else
+/// its first lines and a count of the rest.
+fn echo_excerpt(text: &str) -> String {
+    let n = text.lines().count();
+    if n <= ECHO_LINES {
+        return text.to_string();
+    }
+    let keep = ECHO_LINES - 4;
+    let head: Vec<&str> = text.lines().take(keep).collect();
+    format!("{}\n… (+{} more lines)", head.join("\n"), n - keep)
 }
 
 pub struct App {
@@ -78,6 +100,10 @@ pub struct App {
     live_reasoning: String,
     input: String,
     cursor: usize, // char index
+    /// Terminal size at the last render, so key handlers can lay the composer
+    /// out exactly as drawn (Up/Down move between its wrapped rows).
+    term_w: u16,
+    term_h: u16,
     history: Vec<String>,
     hist_idx: usize,
     pending: String,
@@ -230,6 +256,8 @@ impl App {
             live_reasoning: String::new(),
             input: String::new(),
             cursor: 0,
+            term_w: 80,
+            term_h: 24,
             history,
             hist_idx,
             pending: String::new(),
@@ -609,23 +637,26 @@ impl App {
     }
 
     pub fn on_paste(&mut self, s: String) {
-        // Newlines never submit; control characters never enter any buffer
-        // (the composer path runs `insert_char`, which also expands tabs).
-        let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\t').collect();
+        // A paste never submits. The composer keeps its newlines (CRLF and lone
+        // CR become \n) and tabs verbatim; the single-line prompts drop both,
+        // and no other control character enters any buffer.
+        let s = s.replace("\r\n", "\n").replace('\r', "\n");
+        let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\t' || *c == '\n').collect();
+        let one_line = || clean.chars().filter(|c| *c != '\t' && *c != '\n');
         // Paste goes to whichever prompt owns the keyboard. A password pasted
         // from a manager must land in the masked prompt — not in the hidden
         // composer, where it would later show in clear and go to the model.
         match &mut self.mode {
-            Mode::Password { .. } => self.pw_input.extend(clean.chars().filter(|c| *c != '\t')),
-            Mode::Question { .. } => self.q_input.extend(clean.chars().filter(|c| *c != '\t')),
+            Mode::Password { .. } => self.pw_input.extend(one_line()),
+            Mode::Question { .. } => self.q_input.extend(one_line()),
             Mode::Select => {
                 if let Some(p) = self.picker.as_mut() {
-                    p.filter.extend(clean.chars().filter(|c| *c != '\t'));
+                    p.filter.extend(one_line());
                     p.cursor = 0;
                     p.scroll = 0;
                 }
             }
-            Mode::Settings { edit: Some(buf), .. } => buf.extend(clean.chars().filter(|c| *c != '\t')),
+            Mode::Settings { edit: Some(buf), .. } => buf.extend(one_line()),
             Mode::Settings { edit: None, .. } | Mode::Approval(_) | Mode::ThemeSelect { .. } => {}
             Mode::Idle | Mode::Busy => {
                 for c in clean.chars() {
@@ -640,10 +671,11 @@ impl App {
         // snippet copied from a colored terminal (or a log file) carries raw
         // ESC sequences; drawn into the frame they desync the terminal from
         // ratatui's cell grid, so the rest of the screen — transcript included —
-        // comes out in the wrong colors until a full repaint. Tabs are kept as
-        // spaces for the same reason clean_text expands them.
-        let c = if c == '\t' {
-            ' '
+        // comes out in the wrong colors until a full repaint.
+        // Newlines (Shift/Alt+Enter, Ctrl+J, a paste) and pasted tabs are text;
+        // every other control character is dropped.
+        let c = if c == '\n' || c == '\t' {
+            c
         } else if c.is_control() {
             return;
         } else if self.single_width && unicode_width::UnicodeWidthChar::width(c) != Some(1) {
@@ -662,10 +694,11 @@ impl App {
     /// Terminal cells a char occupies in the composer. Zero-width marks ride
     /// on the previous cell; CJK and most emoji take two.
     fn cell_w(&self, c: char) -> usize {
-        if self.single_width {
-            1
-        } else {
-            unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+        match c {
+            '\t' => TAB_W,
+            '\n' => 0,
+            _ if self.single_width => 1,
+            _ => unicode_width::UnicodeWidthChar::width(c).unwrap_or(0),
         }
     }
 
@@ -681,14 +714,16 @@ impl App {
     fn layout_input(&self, w: usize) -> ComposerLayout {
         let w = w.max(1);
         let mut rows: Vec<String> = vec![String::new()];
+        let mut starts = vec![0usize];
         let mut col = 0usize;
         let mut idx = 0usize;
         let (mut cur_row, mut cur_col, mut cur_idx) = (0usize, 0usize, 0usize);
         let mut placed = false;
         for (i, c) in self.input.chars().enumerate() {
             let cw = self.cell_w(c);
-            if col + cw > w && col > 0 {
+            if c != '\n' && col + cw > w && col > 0 {
                 rows.push(String::new());
+                starts.push(i);
                 col = 0;
                 idx = 0;
             }
@@ -698,6 +733,14 @@ impl App {
                 cur_idx = idx;
                 placed = true;
             }
+            if c == '\n' {
+                // A hard break: the row ends here and the newline isn't drawn.
+                rows.push(String::new());
+                starts.push(i + 1);
+                col = 0;
+                idx = 0;
+                continue;
+            }
             rows.last_mut().unwrap().push(c);
             col += cw;
             idx += 1;
@@ -706,6 +749,7 @@ impl App {
             // Cursor after the last char: a full last row spills onto a fresh one.
             if col >= w {
                 rows.push(String::new());
+                starts.push(self.char_len());
                 col = 0;
                 idx = 0;
             }
@@ -713,11 +757,86 @@ impl App {
             cur_col = col;
             cur_idx = idx;
         }
-        ComposerLayout { rows, cur_row, cur_col, cur_idx }
+        ComposerLayout { rows, cur_row, cur_col, cur_idx, starts }
+    }
+
+    /// Text width of the composer at the last rendered terminal size (the
+    /// same arithmetic as `input_rows`).
+    fn input_w(&self) -> usize {
+        (self.term_w as usize).saturating_sub(2 + self.prompt_w()).max(1)
+    }
+
+    /// Most rows the composer grows to before it scrolls: a third of the
+    /// terminal, between 5 and 12.
+    fn composer_cap(&self) -> usize {
+        (self.term_h as usize / 3).clamp(5, 12)
+    }
+
+    /// Move the cursor to the wrapped row above/below, keeping its column as
+    /// near as the row allows. False at the first/last row, so the caller can
+    /// give the key its single-line meaning (scrolling the transcript).
+    fn move_row(&mut self, down: bool) -> bool {
+        let lay = self.layout_input(self.input_w());
+        let target = if down {
+            lay.cur_row + 1
+        } else {
+            match lay.cur_row.checked_sub(1) {
+                Some(r) => r,
+                None => return false,
+            }
+        };
+        if target >= lay.rows.len() {
+            return false;
+        }
+        let start = lay.starts[target];
+        let row = &lay.rows[target];
+        let len = row.chars().count();
+        // A soft-wrapped row's end is the next row's start: stop one short so
+        // the cursor stays on the row it was moved to.
+        let soft = lay.starts.get(target + 1).is_some_and(|&next| next == start + len);
+        let max = if soft && len > 0 { len - 1 } else { len };
+        let (mut col, mut off) = (0usize, 0usize);
+        for c in row.chars().take(max) {
+            let cw = self.cell_w(c);
+            if col + cw > lay.cur_col {
+                break;
+            }
+            col += cw;
+            off += 1;
+        }
+        self.cursor = start + off;
+        true
+    }
+
+    /// Char index of the start / end of the cursor's line (between newlines).
+    fn line_bounds(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let cur = self.cursor.min(chars.len());
+        let start = chars[..cur].iter().rposition(|&c| c == '\n').map(|i| i + 1).unwrap_or(0);
+        let end = chars[cur..].iter().position(|&c| c == '\n').map(|i| cur + i).unwrap_or(chars.len());
+        (start, end)
+    }
+
+    /// Enter with a newline intent: Shift/Alt+Enter, or Enter right after a
+    /// trailing backslash (which the newline replaces) — the spelling that
+    /// works on the Pi's framebuffer console, where Shift+Enter is plain Enter.
+    fn enter_inserts_newline(&mut self, key: &KeyEvent) -> bool {
+        if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+            self.insert_char('\n');
+            return true;
+        }
+        if self.cursor > 0 && self.input.chars().nth(self.cursor - 1) == Some('\\') {
+            self.cursor -= 1;
+            let pos = self.byte_at(self.cursor);
+            self.input.remove(pos);
+            self.insert_char('\n');
+            return true;
+        }
+        false
     }
 
     fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        if self.mode == Mode::Idle && self.input.starts_with('/') && !self.input.contains(' ') {
+        if self.mode == Mode::Idle && self.input.starts_with('/') && !self.input.contains(char::is_whitespace) {
             let mut scored: Vec<_> = SLASH_COMMANDS
                 .iter()
                 .chain(self.custom_palette.iter())
@@ -1184,6 +1303,7 @@ impl App {
             {
                 self.interrupt(h);
             }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => self.insert_char('\n'),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_char(caps_char(&key, c));
             }
@@ -1194,11 +1314,27 @@ impl App {
                     self.input.remove(pos);
                 }
             }
-            KeyCode::Enter => self.queue_input(),
-            // Scroll the output transcript while the agent runs; the queued
-            // composer line stays put.
-            KeyCode::Up => self.scroll_lines(-SCROLL_STEP),
-            KeyCode::Down => self.scroll_lines(SCROLL_STEP),
+            KeyCode::Enter => {
+                if !self.enter_inserts_newline(&key) {
+                    self.queue_input();
+                }
+            }
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
+            KeyCode::Home => self.cursor = self.line_bounds().0,
+            KeyCode::End => self.cursor = self.line_bounds().1,
+            // Up/Down walk a multi-line draft; past its first/last row they
+            // scroll the output transcript while the agent runs.
+            KeyCode::Up => {
+                if !self.move_row(false) {
+                    self.scroll_lines(-SCROLL_STEP)
+                }
+            }
+            KeyCode::Down => {
+                if !self.move_row(true) {
+                    self.scroll_lines(SCROLL_STEP)
+                }
+            }
             KeyCode::PageUp => self.scroll_page(true),
             KeyCode::PageDown => self.scroll_page(false),
             _ => {}
@@ -1256,6 +1392,9 @@ impl App {
         self.last_ctrl_c = None;
 
         match key.code {
+            // Ctrl+J is a literal line feed: a newline everywhere, including the
+            // Pi's framebuffer console where Shift+Enter is plain Enter.
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => self.insert_char('\n'),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if c == '/' && self.input.is_empty() {
                     self.suggest_idx = 0;
@@ -1264,7 +1403,7 @@ impl App {
                 self.suggest_idx = 0;
             }
             KeyCode::Tab => {
-                if !self.input.starts_with('/') || self.input.contains(' ') {
+                if !self.input.starts_with('/') || self.input.contains(char::is_whitespace) {
                     // Cycle suggestion
                     if let Some(ref s) = self.suggestion {
                         if !self.input.is_empty() {
@@ -1314,15 +1453,28 @@ impl App {
                     self.cursor += 1;
                 }
             }
-            // Plain arrows roll the transcript output. This is the gesture that
-            // works on every terminal — Warp (and any terminal where we skip
-            // mouse capture) delivers no scroll-wheel events at all.
-            KeyCode::Up => self.scroll_lines(-SCROLL_STEP),
-            KeyCode::Down => self.scroll_lines(SCROLL_STEP),
+            KeyCode::Home => self.cursor = self.line_bounds().0,
+            KeyCode::End => self.cursor = self.line_bounds().1,
+            // Plain arrows move between the rows of a multi-line draft; on its
+            // first/last row (and so always for a one-line draft) they roll the
+            // transcript output. That is the gesture that works on every
+            // terminal — Warp (and any terminal where we skip mouse capture)
+            // delivers no scroll-wheel events at all.
+            KeyCode::Up => {
+                if !self.move_row(false) {
+                    self.scroll_lines(-SCROLL_STEP)
+                }
+            }
+            KeyCode::Down => {
+                if !self.move_row(true) {
+                    self.scroll_lines(SCROLL_STEP)
+                }
+            }
             KeyCode::Enter => {
-                self.last_ctrl_c = None;
-                self.submit(h);
-                return;
+                if !self.enter_inserts_newline(&key) {
+                    self.last_ctrl_c = None;
+                    self.submit(h);
+                }
             }
             // Scroll the output transcript; the input field is untouched.
             KeyCode::PageUp => self.scroll_page(true),
@@ -1591,7 +1743,9 @@ impl App {
         // Echo the prompt into the transcript (with its full-width band) before
         // the turn starts, so the user can see what they asked for while
         // scrolling back — and so the attachments they referenced are named.
-        self.push(Kind::User, shown);
+        // A long paste is echoed in part; the model still gets all of it.
+        let shown_typed = shown.clone();
+        self.push(Kind::User, echo_excerpt(&shown));
         let (task_text, attached) = expand_attachments(&text);
         let (images, img_names) = extract_images(&text);
         let mut all = attached;
@@ -1600,7 +1754,7 @@ impl App {
             self.push(Kind::Notice, format!("attached: {}", all.join(", ")));
         }
         self.set_busy();
-        let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
+        let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images, typed: shown_typed });
     }
 
     fn run_command(&mut self, cmd: &str, h: &Handles) {
@@ -1733,7 +1887,7 @@ impl App {
                      point if it exists. Working directory: {}",
                     cwd.display()
                 );
-                let _ = h.cmd_tx.send(WorkerCmd::User { text: task, images: vec![] });
+                let _ = h.cmd_tx.send(WorkerCmd::User { text: task, images: vec![], typed: "/init".into() });
             }
             "clear" => {
                 self.transcript.clear();
@@ -1953,7 +2107,9 @@ impl App {
         }
         self.push(Kind::Notice, String::from("  @file       attach a file"));
         self.push(Kind::Notice, String::from("  !cmd        run a shell command (output goes to the model too)"));
-        self.push(Kind::Notice, "  ↑/↓         scroll the output (3 lines)");
+        self.push(Kind::Notice, "  Shift/Alt+Enter, Ctrl+J, \\+Enter  new line (Enter sends)");
+        self.push(Kind::Notice, "  ↑/↓         move between draft lines, else scroll the output (3 lines)");
+        self.push(Kind::Notice, "  Home/End    start / end of the line");
         self.push(Kind::Notice, "  PgUp/PgDn   scroll the output a page");
         self.push(Kind::Notice, "  Ctrl/Alt+↑/↓  browse history");
         self.push(Kind::Notice, String::from("  Tab         autocomplete"));
@@ -2056,6 +2212,8 @@ impl App {
 
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
+        self.term_w = area.width;
+        self.term_h = area.height;
         // Paint the themed background first; spans drawn on top keep their own
         // fg and inherit this bg (Color::Reset on the default theme = no-op,
         // so the terminal's own background shows through).
@@ -2150,7 +2308,7 @@ impl App {
     /// Rows the composer text needs at this width (same in Idle and Busy).
     fn input_rows(&self, width: u16) -> u16 {
         let w = (width as usize).saturating_sub(2 + self.prompt_w()).max(1);
-        self.layout_input(w).rows.len().clamp(1, 5) as u16
+        self.layout_input(w).rows.len().clamp(1, self.composer_cap()) as u16
     }
 
     fn composer_rows(&self, width: u16) -> u16 {
@@ -2291,8 +2449,13 @@ impl App {
                 ])];
                 let mark = if self.ascii { "->" } else { "↳" };
                 for q in &self.queued {
+                    // One row per message: a multi-line one shows its first line.
+                    let mut ql = q.lines();
+                    let first = ql.next().unwrap_or("").replace('\t', "    ");
+                    let more = ql.count();
+                    let more = if more > 0 { format!(" (+{more} lines)") } else { String::new() };
                     lines.push(Line::from(Span::styled(
-                        format!("  {mark} queued: {q}"),
+                        format!("  {mark} queued: {first}{more}"),
                         Style::default().fg(self.dim_text()),
                     )));
                 }
@@ -2461,7 +2624,7 @@ impl App {
         let pw = self.prompt_w();
         let w = (inner.width as usize).saturating_sub(pw).max(1);
         let empty = self.input.is_empty();
-        let ComposerLayout { rows, cur_row, cur_col, cur_idx } = self.layout_input(w);
+        let ComposerLayout { rows, cur_row, cur_col, cur_idx, .. } = self.layout_input(w);
         let total_rows = rows.len();
         let max_rows = inner.height as usize;
         let start_row = if cur_row >= max_rows { cur_row - max_rows + 1 } else { 0 };
@@ -2472,6 +2635,8 @@ impl App {
         let accent = Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD);
         let cont = " ".repeat(pw);
 
+        // Tabs live in the buffer verbatim; on screen each is TAB_W spaces.
+        let tabs = |t: String| if t.contains('\t') { t.replace('\t', &" ".repeat(TAB_W)) } else { t };
         let mut lines: Vec<Line> = Vec::new();
         for r in start_row..(start_row + max_rows).min(total_rows.max(1)) {
             let prefix = if r == 0 { Span::styled(prompt, accent) } else { Span::raw(cont.clone()) };
@@ -2481,17 +2646,25 @@ impl App {
             if r == cur_row && cursor != CursorKind::Caret {
                 let before: String = row.chars().take(cur_idx).collect();
                 let after: String = row.chars().skip(cur_idx + 1).collect();
-                spans.push(Span::styled(before, text_style));
+                spans.push(Span::styled(tabs(before), text_style));
+                let at_char = row.chars().nth(cur_idx);
                 match cursor {
                     CursorKind::Block => spans.push(Span::styled(block, accent)),
                     _ => {
-                        let at = row.chars().nth(cur_idx).map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+                        let at = match at_char {
+                            Some('\t') | None => " ".to_string(),
+                            Some(c) => c.to_string(),
+                        };
                         spans.push(Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)));
                     }
                 }
-                spans.push(Span::styled(after, text_style));
+                // A tab under the cursor still spans TAB_W cells.
+                if at_char == Some('\t') {
+                    spans.push(Span::styled(" ".repeat(TAB_W - 1), text_style));
+                }
+                spans.push(Span::styled(tabs(after), text_style));
             } else {
-                spans.push(Span::styled(row.to_string(), text_style));
+                spans.push(Span::styled(tabs(row.to_string()), text_style));
             }
             if empty && r == 0 {
                 let hint = if matches!(self.mode, Mode::Busy) {
@@ -2638,8 +2811,8 @@ mod tests {
     use super::helpers::clean_text;
     use super::palette::palette_by_name;
     use super::{
-        palette_for, want_mouse_capture, App, ConfigPatch, Handles, KeyCode, KeyEvent,
-        KeyModifiers, Mode, THEMES, UiConfig, UiEvent, WorkerCmd,
+        echo_excerpt, palette_for, want_mouse_capture, App, ConfigPatch, Handles, KeyCode, KeyEvent,
+        KeyModifiers, Mode, ECHO_LINES, TAB_W, THEMES, UiConfig, UiEvent, WorkerCmd,
     };
 
     #[test]
@@ -2673,12 +2846,14 @@ mod tests {
     /// A pasted snippet often carries raw escapes (copied out of a colored
     /// terminal or a log file). Drawn into the frame they desync the terminal
     /// from ratatui's cell grid, so every later cell comes out in the wrong
-    /// color until a full repaint. Control bytes must never reach the buffer.
+    /// color until a full repaint. Control bytes must never reach the buffer —
+    /// except newlines and tabs, which are text (a pasted snippet keeps its
+    /// lines and its Makefile tabs); CRLF and lone CR become \n.
     #[test]
     fn pasted_control_characters_never_reach_the_composer() {
         let mut app = App::new(test_ui_config(), Vec::new());
-        app.on_paste("safe \x1b[31mred\x1b[0m text\tend".to_string());
-        assert_eq!(app.input, "safe [31mred[0m text end");
+        app.on_paste("safe \x1b[31mred\x1b[0m text\tend\r\nnext\rlast".to_string());
+        assert_eq!(app.input, "safe [31mred[0m text\tend\nnext\nlast");
         assert_eq!(app.cursor, app.input.chars().count());
     }
 
@@ -3168,6 +3343,150 @@ mod tests {
         // Second press inside the double-press window: quit.
         app.on_key(ctrl_c, &h);
         assert!(app.should_quit());
+    }
+
+    fn typed(app: &mut App, h: &Handles, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(KeyCode::Char(c)), h);
+        }
+    }
+
+    /// Every newline key inserts a line instead of sending: Shift/Alt+Enter,
+    /// Ctrl+J, and a trailing backslash + Enter (the backslash is consumed).
+    /// Plain Enter then sends the whole draft, newlines intact, and the worker
+    /// gets the typed text for /rewind.
+    #[test]
+    fn newline_keys_build_a_multi_line_prompt_and_enter_sends_it() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, rx) = test_handles();
+        typed(&mut app, &h, "one");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), &h);
+        typed(&mut app, &h, "two");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT), &h);
+        typed(&mut app, &h, "three");
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL), &h);
+        typed(&mut app, &h, "four\\");
+        app.on_key(key(KeyCode::Enter), &h);
+        typed(&mut app, &h, "five");
+        assert_eq!(app.input, "one\ntwo\nthree\nfour\nfive");
+        assert!(rx.try_recv().is_err(), "nothing sent yet");
+        app.on_key(key(KeyCode::Enter), &h);
+        match rx.try_recv() {
+            Ok(WorkerCmd::User { text, typed, .. }) => {
+                assert_eq!(text, "one\ntwo\nthree\nfour\nfive");
+                assert_eq!(typed, text, "/rewind gets the whole prompt back");
+            }
+            _ => panic!("Enter sends the draft"),
+        }
+        assert_eq!(app.history.last().map(String::as_str), Some("one\ntwo\nthree\nfour\nfive"));
+    }
+
+    #[test]
+    fn newlines_and_tabs_lay_out_as_hard_rows() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.input = "ab\n\tc\n".into();
+        app.cursor = 4; // just after the tab
+        let lay = app.layout_input(20);
+        assert_eq!(lay.rows, vec!["ab", "\tc", ""]);
+        assert_eq!(lay.starts, vec![0, 3, 6]);
+        assert_eq!((lay.cur_row, lay.cur_col, lay.cur_idx), (1, TAB_W, 1), "a tab is TAB_W cells");
+        app.cursor = 6; // after the trailing newline: the empty last row
+        let lay = app.layout_input(20);
+        assert_eq!((lay.cur_row, lay.cur_col), (2, 0));
+    }
+
+    /// Up/Down move between the draft's lines (keeping the column when they
+    /// can); on the first/last line they keep their old job and scroll.
+    #[test]
+    fn up_down_walk_the_draft_then_scroll_the_transcript() {
+        let (mut app, h) = scrollable_app();
+        app.input = "first line\nsecond\nthird line here".into();
+        app.cursor = app.char_len(); // end of "third line here"
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.cursor, "first line\nsecond".chars().count(), "clamped to the shorter line's end");
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.cursor, 6, "column 6 on the first line");
+        let before = app.scroll;
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.cursor, 6, "the first line doesn't move the cursor…");
+        assert!(app.scroll < before, "…it scrolls the transcript");
+        app.on_key(key(KeyCode::Down), &h);
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.cursor, "first line\nsecond\n".chars().count() + 6);
+        // Home/End stay on the cursor's line.
+        app.on_key(key(KeyCode::Home), &h);
+        assert_eq!(app.cursor, "first line\nsecond\n".chars().count());
+        app.on_key(key(KeyCode::End), &h);
+        assert_eq!(app.cursor, app.char_len());
+    }
+
+    /// A one-line draft wraps across rows by display width; Up/Down follow the
+    /// wrapped rows too, never landing on the next row's first char.
+    #[test]
+    fn up_down_follow_soft_wrapped_rows() {
+        let (mut app, h) = scrollable_app();
+        app.term_w = (2 + app.prompt_w() + 10) as u16; // 10 cells of text
+        app.input = "abcdefghij0123456789xyz".into();
+        app.cursor = app.char_len(); // on the third row, after "xyz"
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.cursor, 13, "row 2, column 3");
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.cursor, 3, "row 1, column 3");
+        app.cursor = 9; // end of the first (full) row
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.cursor, 19, "last char of row 2, not the start of row 3");
+    }
+
+    /// The things that read the draft cope with newlines: a newline ends the
+    /// `/` palette (it's not a bare command any more), and Tab completes an
+    /// @path on a later line.
+    #[test]
+    fn slash_palette_and_at_completion_handle_newlines() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.input = "/mo".into();
+        app.cursor = 3;
+        assert!(!app.slash_suggestions().is_empty());
+        app.input = "/mo\nmore".into();
+        assert!(app.slash_suggestions().is_empty());
+        let dir = std::env::temp_dir().join(format!("picoder_ml_tab_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shader.glsl"), "").unwrap();
+        let (h, _rx) = test_handles();
+        app.input = format!("look at\n@{}/sha", dir.display());
+        app.cursor = app.char_len();
+        app.on_key(key(KeyCode::Tab), &h);
+        assert_eq!(app.input, format!("look at\n@{}/shader.glsl", dir.display()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// While busy, a multi-line queued message is one row (its first line and
+    /// a count), and a multi-line draft draws one row per line, tabs as spaces.
+    #[test]
+    fn busy_view_draws_multi_line_queue_and_draft() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = App::new(test_ui_config(), Vec::new());
+        app.transcript.clear();
+        app.mode = Mode::Busy;
+        app.queued.push("queued first\nqueued second\nqueued third".into());
+        app.input = "draft one\n\tdraft two".into();
+        app.cursor = app.char_len();
+        let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        let screen = draw(&mut app, &mut term);
+        assert!(screen.contains("queued: queued first (+2 lines)"), "{screen}");
+        assert!(!screen.contains("queued second"), "{screen}");
+        assert!(screen.contains("draft one"), "{screen}");
+        assert!(screen.contains("    draft two"), "tab drawn as spaces:\n{screen}");
+    }
+
+    #[test]
+    fn a_long_prompt_is_echoed_in_part() {
+        let short = "a\nb\nc";
+        assert_eq!(echo_excerpt(short), short);
+        let long: String = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let shown = echo_excerpt(&long);
+        assert_eq!(shown.lines().count(), ECHO_LINES - 4 + 1);
+        assert!(shown.ends_with("… (+80 more lines)"), "{shown}");
     }
 
     /// `/rewind` round trip: the worker's list opens a picker, choosing an

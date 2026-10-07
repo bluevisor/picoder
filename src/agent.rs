@@ -74,7 +74,9 @@ pub enum UiEvent {
 
 /// UI → Worker control messages (processed between turns).
 pub enum WorkerCmd {
-    User { text: String, images: Vec<String> },
+    /// A prompt: `text` as the model gets it (attachments expanded), `typed`
+    /// as the user wrote it, which `/rewind` hands back to the composer.
+    User { text: String, images: Vec<String>, typed: String },
     Reset,
     /// `/compact [focus]`: summarize older turns, optionally steering the
     /// summary toward what the user wants preserved.
@@ -345,8 +347,10 @@ pub fn spawn(
                         .enumerate()
                         .rev()
                         .map(|(i, t)| {
-                            let line: String = t.prompt.chars().take(80).collect();
-                            let more = if t.prompt.chars().count() > 80 { "…" } else { "" };
+                            // One picker row: a multi-line prompt is flattened.
+                            let flat = t.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let line: String = flat.chars().take(80).collect();
+                            let more = if flat.chars().count() > 80 { "…" } else { "" };
                             format!("{}. {line}{more}", i + 1)
                         })
                         .collect();
@@ -394,7 +398,7 @@ pub fn spawn(
                         w.refresh_context_window(); // new provider/model window
                     }
                 }
-                WorkerCmd::User { text, images } => {
+                WorkerCmd::User { text, images, typed } => {
                     w.cancel.store(false, Ordering::Relaxed);
                     // Supersede the previous turn's follow-up suggestion: stop its
                     // call early and mark it stale so a late result is dropped.
@@ -421,7 +425,7 @@ pub fn spawn(
                         continue;
                     }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        w.run_turn(text, images);
+                        w.run_turn(text, images, typed);
                         w.run_stop_hooks();
                     }));
                     if result.is_err() {
@@ -749,15 +753,13 @@ impl Worker {
         }
     }
 
-    fn run_turn(&mut self, text: String, images: Vec<String>) {
+    fn run_turn(&mut self, text: String, images: Vec<String>, typed: String) {
         // Drop images a previous interrupted turn queued but never consumed,
         // so they can't surface mid-way through an unrelated turn.
         self.pending_images.clear();
         self.recent_calls.clear();
         if !self.quiet {
-            // The typed line only: attachments and hook context follow a blank line.
-            let prompt = text.split("\n\n").next().unwrap_or_default().to_string();
-            self.turns.push(TurnMark { at: self.messages.len(), head: self.checkpoint_head(), prompt });
+            self.turns.push(TurnMark { at: self.messages.len(), head: self.checkpoint_head(), prompt: typed });
         }
         self.messages.push(Message::user_with_images(text, images));
         self.run_loop();
