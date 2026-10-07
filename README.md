@@ -75,6 +75,12 @@ dependencies.
   unstaged work are left alone), the conversation is cut back to before that
   prompt, and the prompt returns to the composer to edit and resend. Edits made
   through `bash` aren't checkpointed, so they aren't undone.
+- **Loop breaker** — a response that turns into one block of text repeated
+  back to back (a sampling loop, common with local reasoning models) is cut
+  off with an error instead of streaming forever.
+- **Sampling** — picoder sends no `temperature` unless you set one in
+  `config.json` (`"temperature": 0.7`), so each model's recommended sampling
+  applies; the DeepSeek preset keeps `0.2`.
 - **Thrashing guard** — the same tool call with identical arguments three times
   in a row is short-circuited with a nudge to change approach.
 - **Scripting** — `git diff | picoder "review this"` attaches stdin as context

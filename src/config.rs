@@ -109,6 +109,10 @@ pub struct Config {
     /// Max tool-call rounds per turn. 0 means "auto" (an internal safe limit).
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: u32,
+    /// Sampling temperature. Unset, picoder sends none and the model's own
+    /// recommended sampling applies (see `temperature()`).
+    #[serde(default)]
+    pub temperature: Option<f64>,
     /// True when the current provider's key came from the environment; we never
     /// persist it then.
     #[serde(skip)]
@@ -246,6 +250,7 @@ impl Default for Config {
             thinking: false,
             permission: default_permission(),
             max_tool_calls: default_max_tool_calls(),
+            temperature: None,
             key_from_env: false,
             extra: BTreeMap::new(),
         }
@@ -457,6 +462,9 @@ impl Config {
                 if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
                     cfg.max_tool_calls = n as u32;
                 }
+                if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
+                    cfg.temperature = Some(t);
+                }
                 for key in ["permissions", "hooks", "auto_bump_version"] {
                     if let Some(x) = v.get(key) {
                         cfg.extra.insert(key.to_string(), x.clone());
@@ -568,10 +576,22 @@ impl Config {
         if on_disk.max_tool_calls != default_max_tool_calls() {
             json["max_tool_calls"] = serde_json::json!(on_disk.max_tool_calls);
         }
+        if let Some(t) = on_disk.temperature {
+            json["temperature"] = serde_json::json!(t);
+        }
         for (k, v) in &on_disk.extra {
             json[k.as_str()] = v.clone();
         }
         json
+    }
+
+    /// The temperature to request, if any: the configured one, else 0.2 for
+    /// DeepSeek (whose docs want a low one for code, and what picoder always
+    /// sent), else none at all. Forcing a low temperature on reasoning models
+    /// sends them into repetition loops (Qwen wants 0.6–1.0), and OpenAI's
+    /// reasoning models reject any value but 1.
+    pub fn temperature(&self) -> Option<f64> {
+        self.temperature.or_else(|| (self.provider == "deepseek").then_some(0.2))
     }
 
     /// Update only the model field on disk, preserving the rest of the file.
@@ -783,6 +803,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(r#"{"price_currency": "cny"}"#).unwrap();
         let code = v.get("price_currency").and_then(|x| x.as_str()).unwrap();
         assert_eq!(crate::money::Currency::parse(code).symbol, "¥");
+    }
+
+    #[test]
+    fn temperature_is_only_sent_when_configured_or_for_deepseek() {
+        let mut c = Config::default();
+        assert_eq!(c.provider, "deepseek");
+        assert_eq!(c.temperature(), Some(0.2), "DeepSeek keeps its old 0.2");
+        c.provider = "splash".into();
+        assert_eq!(c.temperature(), None, "others get the model's own sampling");
+        c.temperature = Some(0.7);
+        assert_eq!(c.temperature(), Some(0.7));
     }
 
     #[test]

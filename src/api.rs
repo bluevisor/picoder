@@ -30,11 +30,49 @@ impl std::fmt::Display for HttpStatus {
 
 impl std::error::Error for HttpStatus {}
 
+/// The model's stream turned into the same block of text over and over (a
+/// sampling loop): it would never end by itself, so the response is cut off.
+#[derive(Debug)]
+pub struct OutputLoop;
+
+impl std::fmt::Display for OutputLoop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the model got stuck repeating itself, so picoder stopped the response. Try again or \
+             rephrase; a local reasoning model may need its reasoning switched off."
+        )
+    }
+}
+
+impl std::error::Error for OutputLoop {}
+
+/// Whether `text` ends in one block repeated back to back: 8+ times, the block
+/// 40+ bytes with 10+ distinct bytes (so a long `=====` rule or a run of
+/// spaces isn't a loop).
+fn is_looping(text: &[u8]) -> bool {
+    const MIN_BLOCK: usize = 40;
+    const MAX_BLOCK: usize = 1200;
+    const REPEATS: usize = 8;
+    let n = text.len();
+    (MIN_BLOCK..=MAX_BLOCK.min(n / REPEATS)).any(|p| {
+        let span = &text[n - p * REPEATS..];
+        span[..span.len() - p] == span[p..] && {
+            let mut seen = [false; 256];
+            span[..p].iter().for_each(|&b| seen[b as usize] = true);
+            seen.iter().filter(|&&s| s).count() >= 10
+        }
+    })
+}
+
 /// How long to wait before retrying after `err` on attempt `attempt` (1-based),
 /// or None when a retry can't help: any 4xx but timeout/conflict/rate-limit
 /// would fail the same way again. Exponential backoff (1s, 2s, 4s…) plus
 /// jitter; a server's `Retry-After` wins, capped at a minute.
 fn retry_delay(err: &anyhow::Error, attempt: u32) -> Option<Duration> {
+    if err.downcast_ref::<OutputLoop>().is_some() {
+        return None;
+    }
     if let Some(s) = err.downcast_ref::<HttpStatus>() {
         if !matches!(s.code, 408 | 409 | 425 | 429 | 500..=599) {
             return None;
@@ -383,10 +421,12 @@ fn chat_stream(
     let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": messages_payload(messages, cfg.supports_images()),
-        "temperature": 0.2,
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+    if let Some(t) = cfg.temperature() {
+        body["temperature"] = serde_json::json!(t);
+    }
     if let Some(t) = tools {
         body["tools"] = t.clone();
         body["tool_choice"] = serde_json::json!("auto");
@@ -415,6 +455,22 @@ fn chat_stream(
     let mut content = String::new();
     let mut calls: Vec<AccumCall> = Vec::new();
     let mut usage: Option<Usage> = None;
+    // The last stretch of streamed text (reasoning and reply), checked every
+    // 512 bytes for a sampling loop.
+    let mut recent: Vec<u8> = Vec::new();
+    let mut unchecked = 0usize;
+    let mut looping = |t: &str| {
+        recent.extend_from_slice(t.as_bytes());
+        if recent.len() > 16_384 {
+            recent.drain(..recent.len() - 12_288);
+        }
+        unchecked += t.len();
+        if unchecked < 512 {
+            return false;
+        }
+        unchecked = 0;
+        is_looping(&recent)
+    };
     let reader = BufReader::new(resp.into_reader());
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
@@ -444,12 +500,18 @@ fn chat_stream(
         if let Some(r) = delta.reasoning_content {
             if !r.is_empty() {
                 on_reasoning(&r);
+                if looping(&r) {
+                    return Err(OutputLoop.into());
+                }
             }
         }
         if let Some(c) = delta.content {
             if !c.is_empty() {
                 on_content(&c);
                 content.push_str(&c);
+                if looping(&c) {
+                    return Err(OutputLoop.into());
+                }
             }
         }
         if let Some(tcs) = delta.tool_calls {
@@ -682,6 +744,34 @@ pub fn truncate(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod balance_tests {
     use super::*;
+
+    #[test]
+    fn a_paragraph_repeated_back_to_back_is_a_loop() {
+        // The paragraph a local Qwen got stuck on (2026-10-06).
+        let para = "The 3D Mandelbrot set is usually rendered by evaluating the DE in c-space: \
+                    z = c; iterate z = z^2 + c. The classic 3D Mandelbrot shape (the \"Mandelbrot\" \
+                    with the antenna) is obtained with c = (0,0,0.7885)? No, that's not right either.\n\n";
+        let mut text = String::from("Let me think about the shader first.\n\n");
+        for _ in 0..7 {
+            text.push_str(para);
+        }
+        assert!(!is_looping(text.as_bytes()), "7 repeats is still under the bar");
+        text.push_str(para);
+        assert!(is_looping(text.as_bytes()), "8 repeats is a loop");
+        // Mid-block: the tail still repeats, just phase-shifted.
+        text.push_str(&para[..90]);
+        assert!(is_looping(text.as_bytes()));
+    }
+
+    #[test]
+    fn ordinary_output_is_not_a_loop() {
+        let rule = "=".repeat(2000);
+        assert!(!is_looping(rule.as_bytes()), "a long rule has too few distinct bytes");
+        assert!(!is_looping(" ".repeat(5000).as_bytes()));
+        let prose: String = (0..300).map(|i| format!("Step {i}: update the uniform and redraw. ")).collect();
+        assert!(!is_looping(prose.as_bytes()), "similar lines that differ aren't a loop");
+        assert!(!is_looping(b"short"));
+    }
 
     #[test]
     fn retries_only_what_a_retry_can_fix() {
