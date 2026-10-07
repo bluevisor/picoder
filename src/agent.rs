@@ -196,6 +196,8 @@ struct Worker {
     ctx_detected: Arc<Mutex<Option<(String, u32)>>>,
     /// Where each prompt of this run starts, for `/rewind`.
     turns: Vec<TurnMark>,
+    /// When the session was last written mid-turn (see run_loop).
+    last_save: std::time::Instant,
 }
 
 /// A user prompt `/rewind` can go back to: its index in `messages` and the
@@ -295,6 +297,7 @@ pub fn spawn(
             recent_calls: Vec::new(),
             ctx_detected: Arc::new(Mutex::new(None)),
             turns: Vec::new(),
+            last_save: std::time::Instant::now(),
         };
         let _ = w.ui.send(UiEvent::SessionLabel(w.session_label()));
         w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
@@ -1256,6 +1259,14 @@ impl Worker {
             if interrupted {
                 return String::new();
             }
+            // A long turn used to live only in memory until it ended: a crash
+            // lost it, and nothing outside could inspect it. Save as it goes —
+            // at most every 20s, since a Pi's SD card shouldn't take a full
+            // rewrite every round. Sub-agents run on a swapped-in history.
+            if !quiet && self.last_save.elapsed() >= std::time::Duration::from_secs(20) {
+                self.save_session();
+                self.last_save = std::time::Instant::now();
+            }
             // view_image queues images to hand to the model on the next call;
             // add them as a user message after the tool results (which must
             // immediately follow their tool calls).
@@ -1700,6 +1711,10 @@ impl Worker {
                             &format!("multi_edit: {} file(s)", applied.len()),
                         );
                         let mut r = format!("OK applied edits to {} file(s){note}", applied.len());
+                        let noop = edits.iter().filter(|e| e.old_text == e.new_text).count();
+                        if noop > 0 {
+                            r.push_str(&format!(" (skipped {noop} edit(s) with identical old_text and new_text)"));
+                        }
                         if !errs.is_empty() {
                             r.push_str(&format!("\n{} failed:\n{}", errs.len(), errs.join("\n")));
                         }

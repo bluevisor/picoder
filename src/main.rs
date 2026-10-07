@@ -42,6 +42,14 @@ tiny. Avoid heavy installs/compiles unless asked."
         "- Use bash for git, builds, tests. This machine is reasonably capable (multi-core, GBs of \
 RAM + swap), so builds and compiles are fine when useful."
     };
+    // The model assumes GNU/Linux tools unless told otherwise.
+    let shell_rule = if cfg!(target_os = "macos") {
+        "\n- The shell is macOS (BSD userland): there is no GNU `timeout` (use the bash tool's \
+`timeout` argument instead), `sed -i` needs an explicit '' suffix, and `readlink -f`/`date -d` \
+differ from Linux."
+    } else {
+        ""
+    };
     let git_rule = if auto_commit {
         "\n- Every successful edit is auto-committed to git as a checkpoint. Use git history as a \
 clue: `git log`, `git show`, and `git diff` tell you what changed and let you restore a previous \
@@ -57,7 +65,7 @@ Rules:
 - Use tools to inspect and change the real filesystem; never invent file contents.
 - Prefer read_file/list_files/grep/glob before editing. Make minimal, correct edits with \
 edit_file; use write_file for new files; use multi_edit to change several files at once.
-{resource_rule}{git_rule}
+{resource_rule}{shell_rule}{git_rule}
 - When the task is complete, reply with a short plain-text summary and no tool call.
 - Be concise."
     )
@@ -935,6 +943,15 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// On a Mac the prompt said "Linux", and the model ran GNU-only `timeout`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_is_described_as_macos_with_its_shell_quirks() {
+        assert!(crate::sysinfo::os_name().starts_with("macOS"), "{}", crate::sysinfo::os_name());
+        let p = system_prompt(false);
+        assert!(p.contains("(macOS") && p.contains("no GNU `timeout`"), "{p}");
     }
 
     #[test]

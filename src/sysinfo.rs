@@ -210,9 +210,24 @@ pub fn host_descriptor() -> String {
     format!("{board}{arch}, {cores} {core_word}{mem} ({})", os_name())
 }
 
-/// Distro/OS pretty name from /etc/os-release (e.g. "Ubuntu 18.04.6 LTS"),
-/// falling back to "Linux" where it isn't present (e.g. the dev Mac).
+/// Distro/OS pretty name from /etc/os-release (e.g. "Ubuntu 18.04.6 LTS"), or
+/// "macOS 26.7.1" on a Mac (it used to say "Linux" there, and the model then
+/// reached for GNU tools like `timeout` that macOS doesn't have).
 pub fn os_name() -> String {
+    if cfg!(target_os = "macos") {
+        let plist = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").unwrap_or_default();
+        let version = plist
+            .split("<key>ProductVersion</key>")
+            .nth(1)
+            .and_then(|rest| rest.split("<string>").nth(1))
+            .and_then(|rest| rest.split("</string>").next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        return match version {
+            Some(v) => format!("macOS {v}"),
+            None => "macOS".to_string(),
+        };
+    }
     if let Ok(s) = std::fs::read_to_string("/etc/os-release") {
         for line in s.lines() {
             if let Some(v) = line.strip_prefix("PRETTY_NAME=") {

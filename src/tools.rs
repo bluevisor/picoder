@@ -578,7 +578,15 @@ pub fn multi_edit_plan(edits: &[EditReq]) -> std::result::Result<MultiEditPlan, 
     // file, and two spellings used to load it twice and let the later write
     // clobber the earlier edit.
     let mut shown: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // An edit that changes nothing is skipped, not fatal: rejecting a whole
+    // all-or-nothing batch over one no-op only makes the model resend it.
+    if edits.iter().all(|e| e.old_text == e.new_text) {
+        return Err("ERROR: every edit has identical old_text and new_text (no change).".into());
+    }
     for (i, e) in edits.iter().enumerate() {
+        if e.old_text == e.new_text {
+            continue;
+        }
         let key = expand(&e.path).to_string_lossy().into_owned();
         if !current.contains_key(&key) {
             let disk = read_for_edit(&expand(&e.path), &e.path)
@@ -2175,6 +2183,22 @@ mod tests {
     }
 
     /// The other slip seen live: a space dropped inside a line.
+    /// From a live session: one no-op edit in a batch of six used to reject
+    /// the whole batch.
+    #[test]
+    fn multi_edit_skips_a_no_op_edit() {
+        let dir = std::env::temp_dir().join(format!("picoder_noop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.txt");
+        std::fs::write(&f, "one\ntwo\n").unwrap();
+        let path = f.to_string_lossy().into_owned();
+        let req = |o: &str, n: &str| EditReq { path: path.clone(), old_text: o.into(), new_text: n.into() };
+        let plan = multi_edit_plan(&[req("one", "ONE"), req("two", "two")]).unwrap();
+        assert_eq!(plan.files[0].1, "ONE\ntwo\n");
+        assert!(multi_edit_plan(&[req("two", "two")]).unwrap_err().contains("every edit"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn edit_tolerates_a_space_dropped_mid_line() {
         let data = "  if (u_scene == 1) {\n    // ----- Menger: subdivision with continuous min -----\n    vec3 q = p;\n  }\n";
