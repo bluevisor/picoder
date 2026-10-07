@@ -1510,6 +1510,12 @@ impl App {
             // transcript output. That is the gesture that works on every
             // terminal — Warp (and any terminal where we skip mouse capture)
             // delivers no scroll-wheel events at all.
+            // While the `/` palette is open, plain arrows pick its entry.
+            KeyCode::Up | KeyCode::Down if !self.slash_suggestions().is_empty() => {
+                let n = self.slash_suggestions().len();
+                let cur = self.suggest_idx.min(n - 1);
+                self.suggest_idx = if key.code == KeyCode::Up { (cur + n - 1) % n } else { (cur + 1) % n };
+            }
             KeyCode::Up => {
                 if !self.move_row(false) {
                     self.scroll_lines(-SCROLL_STEP)
@@ -1523,6 +1529,13 @@ impl App {
             KeyCode::Enter => {
                 if !self.enter_inserts_newline(&key) {
                     self.last_ctrl_c = None;
+                    // `/mo` + Enter runs the highlighted `/model`; a command
+                    // typed out in full runs as typed.
+                    let sugg = self.slash_suggestions();
+                    if !sugg.is_empty() && !sugg.iter().any(|(c, _)| *c == self.input) {
+                        self.input = sugg[self.suggest_idx.min(sugg.len() - 1)].0.to_string();
+                        self.suggest_idx = 0;
+                    }
                     self.submit(h);
                 }
             }
@@ -3632,6 +3645,25 @@ mod tests {
         assert!(shown.ends_with("… (+80 more lines)"), "{shown}");
     }
 
+    /// The `/` palette: arrows move the highlight (wrapping) instead of
+    /// scrolling, and Enter on a partial command runs the highlighted one.
+    #[test]
+    fn slash_palette_arrows_select_and_enter_runs_the_highlight() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, _rx) = test_handles();
+        app.input = "/re".into();
+        app.cursor = 3;
+        let sugg: Vec<&str> = app.slash_suggestions().iter().map(|(c, _)| *c).collect();
+        assert!(sugg.len() >= 2, "{sugg:?}");
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.suggest_idx, 1);
+        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.suggest_idx, sugg.len() - 1, "wraps to the last entry");
+        app.on_key(key(KeyCode::Enter), &h);
+        assert_eq!(app.history.last().map(String::as_str), Some(sugg[sugg.len() - 1]), "ran the highlighted command");
+    }
+
     /// `/rewind` round trip: the worker's list opens a picker, choosing an
     /// entry asks for that turn (0-based), and the undone prompt comes back
     /// into the composer for editing.
@@ -3663,7 +3695,7 @@ mod tests {
     /// around it (it used to work only when the whole line began with `@`).
     #[test]
     fn tab_completes_an_at_path_anywhere_in_the_line() {
-        let dir = std::env::temp_dir().join("picoder_tab_mid");
+        let dir = std::env::temp_dir().join(format!("picoder_tab_mid-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("main_file.rs"), "").unwrap();
         let mut app = App::new(test_ui_config(), Vec::new());

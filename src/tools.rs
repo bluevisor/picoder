@@ -1985,7 +1985,7 @@ mod tests {
 
     #[test]
     fn multi_edit_composes_same_file() {
-        let dir = std::env::temp_dir().join("picoder_multi_edit_test");
+        let dir = std::env::temp_dir().join(format!("picoder_multi_edit_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
         let b = dir.join("b.txt");
@@ -2012,7 +2012,7 @@ mod tests {
 
     #[test]
     fn multi_edit_aborts_on_missing_match() {
-        let dir = std::env::temp_dir().join("picoder_multi_edit_abort");
+        let dir = std::env::temp_dir().join(format!("picoder_multi_edit_abort-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
         std::fs::write(&a, "keep me\n").unwrap();
@@ -2119,7 +2119,7 @@ mod tests {
 
     #[test]
     fn git_autocommit_checkpoints_edit() {
-        let dir = std::env::temp_dir().join("picoder_git_test");
+        let dir = std::env::temp_dir().join(format!("picoder_git_test-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[test]
     fn bump_cargo_version_increments_patch() {
-        let dir = std::env::temp_dir().join("picoder_bump_test");
+        let dir = std::env::temp_dir().join(format!("picoder_bump_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let toml = dir.join("Cargo.toml");
         std::fs::write(&toml, "[package]\nname = \"t\"\nversion = \"3.14.159\"\nedition = \"2021\"\n").unwrap();
@@ -2337,7 +2337,7 @@ mod tests {
 
     #[test]
     fn bump_cargo_version_only_touches_the_package_table() {
-        let dir = std::env::temp_dir().join("picoder_bump_tables");
+        let dir = std::env::temp_dir().join(format!("picoder_bump_tables-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let toml = dir.join("Cargo.toml");
         // A dependency table ahead of [package] has the same `version = ` shape.
@@ -2359,7 +2359,7 @@ mod tests {
 
     #[test]
     fn bump_cargo_version_no_cargo_toml() {
-        let dir = std::env::temp_dir().join("picoder_bump_nocargo");
+        let dir = std::env::temp_dir().join(format!("picoder_bump_nocargo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(bump_cargo_version(&dir).is_none());
         std::fs::remove_dir_all(&dir).ok();
@@ -2367,7 +2367,7 @@ mod tests {
 
     #[test]
     fn git_autocommit_bumps_version() {
-        let dir = std::env::temp_dir().join("picoder_git_bump_test");
+        let dir = std::env::temp_dir().join(format!("picoder_git_bump_test-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -2415,7 +2415,7 @@ mod tests {
         assert!(!is_image_path("notes.txt"));
         assert!(!is_image_path("Makefile"));
         // jpg maps to the image/jpeg mime.
-        let dir = std::env::temp_dir().join("picoder_img_test.jpg");
+        let dir = std::env::temp_dir().join(format!("picoder_img_test-{}.jpg", std::process::id()));
         std::fs::write(&dir, [0xff, 0xd8, 0xff, 0xe0]).unwrap();
         let uri = image_data_uri(dir.to_str().unwrap()).unwrap();
         assert!(uri.starts_with("data:image/jpeg;base64,/9j/"), "got: {uri}");
@@ -2501,7 +2501,7 @@ mod tests {
     #[cfg(unix)]
     fn file_tools_refuse_symlinks() {
         use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join("picoder_symlink_test");
+        let dir = std::env::temp_dir().join(format!("picoder_symlink_test-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("real.txt");

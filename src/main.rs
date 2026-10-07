@@ -931,7 +931,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("picoder_ctx_{name}"));
+        let d = std::env::temp_dir().join(format!("picoder_ctx_{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

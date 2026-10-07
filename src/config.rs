@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join("picoder_atomic_test");
+        let dir = std::env::temp_dir().join(format!("picoder_atomic_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.json");
         std::fs::write(&path, b"old contents").unwrap();

@@ -1743,7 +1743,7 @@ for line in sys.stdin:
     #[test]
     #[ignore] // needs python3; run with `cargo test -- --ignored`
     fn mcp_handshake_list_and_call() {
-        let path = std::env::temp_dir().join("picoder_mini_mcp.py");
+        let path = std::env::temp_dir().join(format!("picoder_mini_mcp-{}.py", std::process::id()));
         std::fs::write(&path, MINI_SERVER).unwrap();
         let cancel = AtomicBool::new(false);
         let cfg = stdio("python3", vec![path.to_string_lossy().into_owned()]);

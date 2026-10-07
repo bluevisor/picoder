@@ -137,8 +137,8 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   `--stream-json` prints JSON-lines events (`token`, `tool_start`, `tool_result`, `notice`,
   `error`, `diff`, `reasoning`, `result`).
 - `/config`: interactive settings panel — provider preset (deepseek/openai/anthropic/groq/openrouter/google),
-  base URL, model, API key (masked), thinking mode (DeepSeek-style
-  `"thinking":{"type":"enabled"}` request field; off by default), default
+  base URL, model, API key (masked), reasoning (auto/off/low/medium/high, sent
+  in each provider's own field; also `/effort`), default
   permission mode (ask/bypass/plan — applies live and saves for new sessions),
   auto-commit, theme, context window, max tool calls, price currency. Changes
   apply immediately and persist.
