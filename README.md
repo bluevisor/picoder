@@ -376,11 +376,11 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `Enter` | send |
 | `Shift+Enter` / `Alt+Enter` / `Ctrl+J` / `\` then `Enter` | new line in the composer (the last two work on the Pi's console) |
 | `Shift+Tab` / `Ctrl+P` | cycle permission mode |
-| `↑` / `↓` | move between the composer's lines; on its first/last line, scroll the output (3 lines) |
+| `↑` / `↓` | move between the composer's lines; on its first/last line, previous / next prompt |
 | `Home` / `End` | start / end of the composer line |
 | `PgUp` / `PgDn` | scroll the output a page |
 | mouse wheel | scroll the output (when mouse capture is on) |
-| `Ctrl` / `Alt + ↑` / `↓` | composer history |
+| `Ctrl` / `Alt + ↑` / `↓` | scroll the output (3 lines) |
 | `Alt`/`Ctrl`/`Cmd + ←/→` | word / line motion |
 | `Option`/`Alt + Backspace` | delete word backward |
 | `Option`/`Alt + Delete` | delete word forward |
@@ -397,7 +397,7 @@ Without it, some terminals (e.g. Warp in full-screen mode) flatten
 
 Mouse capture is skipped on Warp (`TERM_PROGRAM=WarpTerminal`) because it grabs
 click-drag text selection with no modifier to bypass it — Warp users scroll with
-`↑`/`↓` and `PgUp`/`PgDn` instead. Set `PICODER_MOUSE=1` to force capture on
+`Ctrl`+`↑`/`↓` and `PgUp`/`PgDn` instead. Set `PICODER_MOUSE=1` to force capture on
 (wheel scrolling, at the cost of native selection), or `PICODER_MOUSE=0` to turn
 it off everywhere.
 

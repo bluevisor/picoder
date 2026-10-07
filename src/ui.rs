@@ -1373,16 +1373,21 @@ impl App {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
             KeyCode::Home => self.cursor = self.line_bounds().0,
             KeyCode::End => self.cursor = self.line_bounds().1,
-            // Up/Down walk a multi-line draft; past its first/last row they
-            // scroll the output transcript while the agent runs.
+            // Ctrl/Alt+↑/↓ roll the transcript while the agent runs; plain
+            // ↑/↓ walk a multi-line draft, then the prompt history (as idle).
+            KeyCode::Up | KeyCode::Down
+                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.scroll_lines(if key.code == KeyCode::Up { -SCROLL_STEP } else { SCROLL_STEP })
+            }
             KeyCode::Up => {
                 if !self.move_row(false) {
-                    self.scroll_lines(-SCROLL_STEP)
+                    self.history_prev()
                 }
             }
             KeyCode::Down => {
                 if !self.move_row(true) {
-                    self.scroll_lines(SCROLL_STEP)
+                    self.history_next()
                 }
             }
             KeyCode::PageUp => self.scroll_page(true),
@@ -1478,8 +1483,10 @@ impl App {
             }
             KeyCode::Backspace => self.on_key_edit(key),
             KeyCode::Delete => self.on_key_edit(key),
-            // Modified arrows: Alt/Ctrl+←/→ move by word, Alt/Ctrl+↑/↓ walk the
-            // composer history (plain arrows are the transcript scroll below).
+            // Modified arrows: Alt/Ctrl+←/→ move by word, Alt/Ctrl+↑/↓ roll the
+            // transcript a few lines — the scroll gesture that works on every
+            // terminal (Warp, and any terminal without mouse capture, sends no
+            // wheel events). Plain ↑/↓ are the draft rows and history below.
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
                 if key.modifiers.contains(KeyModifiers::ALT)
                     || key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -1488,8 +1495,8 @@ impl App {
                 match key.code {
                     KeyCode::Left => self.cursor = self.prev_word(),
                     KeyCode::Right => self.cursor = self.next_word(),
-                    KeyCode::Up => self.history_prev(),
-                    KeyCode::Down => self.history_next(),
+                    KeyCode::Up => self.scroll_lines(-SCROLL_STEP),
+                    KeyCode::Down => self.scroll_lines(SCROLL_STEP),
                     _ => {}
                 }
             }
@@ -1505,25 +1512,23 @@ impl App {
             }
             KeyCode::Home => self.cursor = self.line_bounds().0,
             KeyCode::End => self.cursor = self.line_bounds().1,
-            // Plain arrows move between the rows of a multi-line draft; on its
-            // first/last row (and so always for a one-line draft) they roll the
-            // transcript output. That is the gesture that works on every
-            // terminal — Warp (and any terminal where we skip mouse capture)
-            // delivers no scroll-wheel events at all.
             // While the `/` palette is open, plain arrows pick its entry.
             KeyCode::Up | KeyCode::Down if !self.slash_suggestions().is_empty() => {
                 let n = self.slash_suggestions().len();
                 let cur = self.suggest_idx.min(n - 1);
                 self.suggest_idx = if key.code == KeyCode::Up { (cur + n - 1) % n } else { (cur + 1) % n };
             }
+            // Plain arrows move between the rows of a multi-line draft; on its
+            // first/last row (and so always for a one-line draft) they walk
+            // the prompt history, like a shell.
             KeyCode::Up => {
                 if !self.move_row(false) {
-                    self.scroll_lines(-SCROLL_STEP)
+                    self.history_prev()
                 }
             }
             KeyCode::Down => {
                 if !self.move_row(true) {
-                    self.scroll_lines(SCROLL_STEP)
+                    self.history_next()
                 }
             }
             KeyCode::Enter => {
@@ -3363,6 +3368,11 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// Ctrl+arrow: the transcript-scroll gesture.
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
     /// An idle app whose transcript is taller than the viewport, so scrolling
     /// has somewhere to go. `max_top`/`view_h` are normally set by the render
     /// pass; a unit test pokes them directly.
@@ -3376,22 +3386,32 @@ mod tests {
     }
 
     #[test]
-    fn arrows_roll_the_transcript_and_only_ctrl_arrows_recall_history() {
+    fn arrows_recall_history_and_ctrl_arrows_roll_the_transcript() {
         let (mut app, h) = scrollable_app();
 
-        // Plain Up/Down move the view, not the composer history.
+        // Plain Up/Down walk the prompt history, like a shell; the view stays.
         app.on_key(key(KeyCode::Up), &h);
-        assert_eq!(app.scroll, 37, "Up rolls the output back a step");
+        assert_eq!(app.input, "second", "Up recalls the previous prompt");
+        app.on_key(key(KeyCode::Up), &h);
+        assert_eq!(app.input, "first");
+        assert_eq!(app.scroll, 40, "history recall doesn't move the view");
+        app.on_key(key(KeyCode::Down), &h);
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.input, "", "Down past the newest returns to the empty draft");
+
+        // Ctrl+Up/Down move the view instead.
+        app.on_key(ctrl(KeyCode::Up), &h);
+        assert_eq!(app.scroll, 37, "Ctrl+Up rolls the output back a step");
         assert!(!app.follow, "scrolling up pins the view");
         assert!(app.scrolled_up, "the more-below hint shows");
-        assert_eq!(app.input, "", "Up must not type history into the composer");
+        assert_eq!(app.input, "", "Ctrl+Up must not type history into the composer");
 
-        app.on_key(key(KeyCode::Down), &h);
+        app.on_key(ctrl(KeyCode::Down), &h);
         assert_eq!(app.scroll, 40);
         assert!(app.follow, "returning to the live end resumes following");
         assert!(!app.scrolled_up);
 
-        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(ctrl(KeyCode::Up), &h);
         assert!(app.scrolled_up);
         assert!(!app.new_below, "a manual scroll-up has nothing new below");
 
@@ -3403,29 +3423,22 @@ mod tests {
         assert!(!app.follow, "...without yanking the view to the bottom");
         assert_eq!(app.scroll, 37, "the reading position is preserved");
 
-        app.on_key(key(KeyCode::Down), &h);
+        app.on_key(ctrl(KeyCode::Down), &h);
         assert!(app.follow);
         assert!(!app.scrolled_up && !app.new_below, "hint clears at the end");
-
-        // Ctrl+Up is where history recall lives now.
-        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), &h);
-        assert_eq!(app.input, "second", "Ctrl+Up recalls the previous prompt");
-        assert_eq!(app.scroll, 40, "history recall doesn't move the view");
-        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), &h);
-        assert_eq!(app.input, "", "Ctrl+Down returns to the empty draft");
     }
 
     #[test]
     fn scrolling_clamps_at_both_ends_and_never_pins_an_unscrollable_view() {
         let (mut app, h) = scrollable_app();
         for _ in 0..30 {
-            app.on_key(key(KeyCode::Down), &h);
+            app.on_key(ctrl(KeyCode::Down), &h);
         }
         assert_eq!(app.scroll, 40, "clamped at the live end");
         assert!(app.follow);
 
         for _ in 0..30 {
-            app.on_key(key(KeyCode::Up), &h);
+            app.on_key(ctrl(KeyCode::Up), &h);
         }
         assert_eq!(app.scroll, 0, "clamped at the top");
         assert!(!app.follow);
@@ -3436,7 +3449,7 @@ mod tests {
         app.follow = true;
         app.scrolled_up = false;
         app.new_below = false;
-        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(ctrl(KeyCode::Up), &h);
         assert_eq!((app.scroll, app.follow, app.scrolled_up), (0, true, false));
     }
 
@@ -3453,8 +3466,8 @@ mod tests {
     #[test]
     fn sending_a_message_snaps_back_to_the_live_end() {
         let (mut app, h) = scrollable_app();
-        app.on_key(key(KeyCode::Up), &h);
-        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(ctrl(KeyCode::Up), &h);
+        app.on_key(ctrl(KeyCode::Up), &h);
         assert!(!app.follow);
 
         for c in "hello".chars() {
@@ -3470,7 +3483,7 @@ mod tests {
     fn scrolling_works_while_the_agent_is_busy() {
         let (mut app, h) = scrollable_app();
         app.mode = Mode::Busy;
-        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(ctrl(KeyCode::Up), &h);
         assert_eq!(app.scroll, 37, "queued-input mode scrolls too");
         assert!(!app.follow);
         assert!(matches!(app.mode, Mode::Busy), "still busy, not interrupted");
@@ -3552,9 +3565,9 @@ mod tests {
     }
 
     /// Up/Down move between the draft's lines (keeping the column when they
-    /// can); on the first/last line they keep their old job and scroll.
+    /// can); on the first/last line they walk the prompt history.
     #[test]
-    fn up_down_walk_the_draft_then_scroll_the_transcript() {
+    fn up_down_walk_the_draft_then_the_history() {
         let (mut app, h) = scrollable_app();
         app.input = "first line\nsecond\nthird line here".into();
         app.cursor = app.char_len(); // end of "third line here"
@@ -3563,9 +3576,13 @@ mod tests {
         app.on_key(key(KeyCode::Up), &h);
         assert_eq!(app.cursor, 6, "column 6 on the first line");
         let before = app.scroll;
+        let draft = app.input.clone();
         app.on_key(key(KeyCode::Up), &h);
-        assert_eq!(app.cursor, 6, "the first line doesn't move the cursor…");
-        assert!(app.scroll < before, "…it scrolls the transcript");
+        assert_eq!(app.input, "second", "Up on the first line recalls the previous prompt…");
+        assert_eq!(app.scroll, before, "…without scrolling the transcript");
+        app.on_key(key(KeyCode::Down), &h);
+        assert_eq!(app.input, draft, "Down past the newest brings the draft back");
+        app.cursor = 6; // column 6 on the first line again
         app.on_key(key(KeyCode::Down), &h);
         app.on_key(key(KeyCode::Down), &h);
         assert_eq!(app.cursor, "first line\nsecond\n".chars().count() + 6);
@@ -3926,7 +3943,7 @@ mod tests {
         assert!(first.contains("transcript line 79"), "the live end is visible");
         assert!(!first.contains("end"), "no hint while following");
 
-        app.on_key(key(KeyCode::Up), &h);
+        app.on_key(ctrl(KeyCode::Up), &h);
         let scrolled = draw(&mut app, &mut term);
         assert!(
             !scrolled.contains("transcript line 79"),
