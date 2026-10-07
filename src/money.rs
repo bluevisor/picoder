@@ -126,8 +126,51 @@ pub fn fmt_cost_tagged(cost: f64, cur: &Currency) -> String {
     cur.amount_tagged(cost, decimals)
 }
 
+/// Tokens spent so far, split the way providers price them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spent {
+    /// Every input token, cached ones included.
+    pub prompt: u64,
+    pub completion: u64,
+    /// Input tokens served from the provider's prompt cache.
+    pub cached: u64,
+    /// Input tokens written to the cache (Anthropic bills these at 1.25x).
+    pub written: u64,
+}
+
+impl Spent {
+    pub fn add(&mut self, other: Spent) {
+        self.prompt += other.prompt;
+        self.completion += other.completion;
+        self.cached += other.cached;
+        self.written += other.written;
+    }
+
+    /// Cost in the price list's currency (prices per 1M tokens): cache hits at
+    /// `price_cached`, cache writes at 1.25x `price_in`, the rest of the input
+    /// at `price_in`.
+    pub fn cost(&self, price_in: f64, price_cached: f64, price_out: f64) -> f64 {
+        let fresh = self.prompt.saturating_sub(self.cached + self.written);
+        (fresh as f64 * price_in
+            + self.cached as f64 * price_cached
+            + self.written as f64 * price_in * 1.25
+            + self.completion as f64 * price_out)
+            / 1e6
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cached_input_is_priced_separately() {
+        let s = Spent { prompt: 1_000_000, completion: 1_000_000, cached: 600_000, written: 100_000 };
+        // 300k fresh at 1.0, 600k cached at 0.1, 100k written at 1.25, 1M out at 2.0.
+        let c = s.cost(1.0, 0.1, 2.0);
+        assert!((c - (0.3 + 0.06 + 0.125 + 2.0)).abs() < 1e-9, "{c}");
+        assert_eq!(Spent { prompt: 10, ..Default::default() }.cost(1e6, 0.0, 0.0), 10.0);
+    }
+
     use super::*;
 
     #[test]

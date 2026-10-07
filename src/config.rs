@@ -98,11 +98,6 @@ pub struct Config {
     /// every change is a restorable checkpoint. On by default; no-op outside a repo.
     #[serde(default = "default_true")]
     pub auto_commit: bool,
-    /// Ask the model to think before answering, via the DeepSeek-style
-    /// `"thinking": {"type": "enabled"}` request field. Off by default;
-    /// providers that don't know the field may reject requests — turn it off.
-    #[serde(default)]
-    pub thinking: bool,
     /// Default permission mode for new sessions: "ask", "bypass", or "plan".
     #[serde(default = "default_permission")]
     pub permission: String,
@@ -113,6 +108,22 @@ pub struct Config {
     /// recommended sampling applies (see `temperature()`).
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// How hard the model should reason: "auto" (send nothing; the model's own
+    /// default), "off", "low", "medium" or "high". Mapped per provider in
+    /// `api::reasoning_fields` / the native adapters. Replaces the old
+    /// DeepSeek-only `thinking` bool, which still loads (true → "medium").
+    #[serde(default = "default_reasoning")]
+    pub reasoning: String,
+    /// Wire protocol: "chat" (OpenAI chat/completions), "messages" (Anthropic)
+    /// or "responses" (OpenAI Responses). Unset, the provider decides (see
+    /// `api_kind`).
+    #[serde(default)]
+    pub api: Option<String>,
+    /// Price per 1M cached (cache-hit) input tokens. Unset: DeepSeek's cache-hit
+    /// price with the DeepSeek price list, else a tenth of `price_in` (see
+    /// `price_cached`).
+    #[serde(default)]
+    pub price_cached_in: Option<f64>,
     /// True when the current provider's key came from the environment; we never
     /// persist it then.
     #[serde(skip)]
@@ -142,7 +153,7 @@ fn default_max_tool_calls() -> u32 {
 pub const PROVIDERS: &[(&str, &str, &str)] = &[
     ("deepseek", "https://api.deepseek.com", "deepseek-v4-flash"),
     ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"),
+    ("anthropic", "https://api.anthropic.com/v1", "claude-opus-5-5"),
     ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     ("openrouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
     ("google", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
@@ -172,7 +183,8 @@ pub enum ConfigPatch {
     Provider { provider: String, base_url: String, model: String },
     BaseUrl(String),
     ApiKey(String),
-    Thinking(bool),
+    /// `/effort` or the /config row: one of `REASONING_LEVELS`.
+    Reasoning(String),
     Permission(String),
     AutoCommit(bool),
     ContextWindow(u32),
@@ -211,6 +223,9 @@ pub fn known_context_window(model: &str) -> u32 {
         1_000_000 // GLM-4-Plus advertises 1M
     } else if m.contains("glm") {
         128_000 // GLM-4-Flash / GLM-4-Air / etc.
+    } else if m.contains("claude") {
+        // Haiku 4.5 is 200k; the current Opus/Sonnet/Fable models are 1M.
+        if m.contains("haiku") { 200_000 } else { 1_000_000 }
     } else {
         // Unknown model: assume the conservative window rather than the 1M
         // default, or auto-compaction would wait until ~800k tokens and the
@@ -224,6 +239,40 @@ fn default_price_in() -> f64 {
 fn default_price_out() -> f64 {
     0.28
 }
+/// DeepSeek V4 Flash's cache-hit input price (USD per 1M), next to the default
+/// 0.14 miss / 0.28 output list.
+const DEEPSEEK_CACHE_HIT_PRICE: f64 = 0.0028;
+
+/// The reasoning settings, in `/config` cycling order.
+pub const REASONING_LEVELS: [&str; 5] = ["auto", "off", "low", "medium", "high"];
+
+fn default_reasoning() -> String {
+    "auto".to_string()
+}
+
+/// A reasoning setting from config or `/effort`: one of `REASONING_LEVELS`
+/// (with "none"/"false" read as off and "on"/"true" as medium), else auto.
+pub fn normalize_reasoning(r: &str) -> String {
+    let r = r.trim().to_ascii_lowercase();
+    match r.as_str() {
+        "none" | "false" | "disabled" => "off".into(),
+        "on" | "true" | "enabled" => "medium".into(),
+        _ if REASONING_LEVELS.contains(&r.as_str()) => r,
+        _ => default_reasoning(),
+    }
+}
+
+/// The wire protocol a request goes out on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiKind {
+    /// OpenAI chat/completions — every OpenAI-compatible server.
+    Chat,
+    /// Anthropic Messages.
+    Messages,
+    /// OpenAI Responses.
+    Responses,
+}
+
 /// The built-in prices are DeepSeek's USD list, so the default unit is USD.
 fn default_price_currency() -> String {
     "USD".to_string()
@@ -247,10 +296,12 @@ impl Default for Config {
             price_currency: default_price_currency(),
             mcp_servers: BTreeMap::new(),
             auto_commit: true,
-            thinking: false,
             permission: default_permission(),
             max_tool_calls: default_max_tool_calls(),
             temperature: None,
+            reasoning: default_reasoning(),
+            api: None,
+            price_cached_in: None,
             key_from_env: false,
             extra: BTreeMap::new(),
         }
@@ -440,8 +491,9 @@ impl Config {
                 if let Some(b) = v.get("auto_commit").and_then(|x| x.as_bool()) {
                     cfg.auto_commit = b;
                 }
-                if let Some(b) = v.get("thinking").and_then(|x| x.as_bool()) {
-                    cfg.thinking = b;
+                // The old DeepSeek-only switch: on meant "think", so "medium".
+                if let Some(true) = v.get("thinking").and_then(|x| x.as_bool()) {
+                    cfg.reasoning = "medium".into();
                 }
                 if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
                     cfg.permission = s.to_string();
@@ -454,6 +506,15 @@ impl Config {
                 }
                 if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
                     cfg.temperature = Some(t);
+                }
+                if let Some(r) = v.get("reasoning").and_then(|x| x.as_str()) {
+                    cfg.reasoning = normalize_reasoning(r);
+                }
+                if let Some(a) = v.get("api").and_then(|x| x.as_str()) {
+                    cfg.api = Some(a.to_string());
+                }
+                if let Some(p) = v.get("price_cached_in").and_then(|x| x.as_f64()) {
+                    cfg.price_cached_in = Some(p);
                 }
                 for key in [
                     "permissions",
@@ -565,9 +626,6 @@ impl Config {
         if on_disk.price_currency.to_ascii_uppercase() != default_price_currency() {
             json["price_currency"] = serde_json::json!(on_disk.price_currency);
         }
-        if on_disk.thinking {
-            json["thinking"] = serde_json::json!(true);
-        }
         if on_disk.permission != default_permission() {
             json["permission"] = serde_json::json!(on_disk.permission);
         }
@@ -579,6 +637,15 @@ impl Config {
         }
         if let Some(t) = on_disk.temperature {
             json["temperature"] = serde_json::json!(t);
+        }
+        if on_disk.reasoning != default_reasoning() {
+            json["reasoning"] = serde_json::json!(on_disk.reasoning);
+        }
+        if let Some(a) = &on_disk.api {
+            json["api"] = serde_json::json!(a);
+        }
+        if let Some(p) = on_disk.price_cached_in {
+            json["price_cached_in"] = serde_json::json!(p);
         }
         for (k, v) in &on_disk.extra {
             json[k.as_str()] = v.clone();
@@ -593,6 +660,33 @@ impl Config {
     /// reasoning models reject any value but 1.
     pub fn temperature(&self) -> Option<f64> {
         self.temperature.or_else(|| (self.provider == "deepseek").then_some(0.2))
+    }
+
+    /// The protocol to speak: the `api` setting, else Anthropic's own
+    /// Messages API for the anthropic preset, OpenAI's Responses API for the
+    /// openai preset, and chat/completions for everyone else.
+    pub fn api_kind(&self) -> ApiKind {
+        match self.api.as_deref().map(str::trim) {
+            Some("messages" | "anthropic") => ApiKind::Messages,
+            Some("responses") => ApiKind::Responses,
+            Some("chat" | "chat_completions" | "openai") => ApiKind::Chat,
+            _ => match self.provider.as_str() {
+                "anthropic" => ApiKind::Messages,
+                "openai" => ApiKind::Responses,
+                _ => ApiKind::Chat,
+            },
+        }
+    }
+
+    /// Price per 1M cached input tokens: the configured one; with the default
+    /// (DeepSeek) price list, DeepSeek's cache-hit price; otherwise a tenth of
+    /// `price_in`, the usual cache-read discount (Anthropic, OpenAI).
+    pub fn price_cached(&self) -> f64 {
+        self.price_cached_in.unwrap_or(if self.price_in == default_price_in() {
+            DEEPSEEK_CACHE_HIT_PRICE
+        } else {
+            self.price_in * 0.1
+        })
     }
 
     /// Update only the model field on disk, preserving the rest of the file.
@@ -668,7 +762,7 @@ impl Config {
                 self.api_keys.insert(self.provider.clone(), k.clone());
                 self.key_from_env = false;
             }
-            ConfigPatch::Thinking(b) => self.thinking = *b,
+            ConfigPatch::Reasoning(r) => self.reasoning = normalize_reasoning(r),
             ConfigPatch::Permission(m) => self.permission = m.clone(),
             ConfigPatch::AutoCommit(b) => self.auto_commit = *b,
             ConfigPatch::ContextWindow(n) => {
@@ -755,12 +849,12 @@ mod tests {
             model: "gpt-4o-mini".into(),
         });
         assert_eq!((c.provider.as_str(), c.model.as_str()), ("openai", "gpt-4o-mini"));
-        c.apply_patch(&ConfigPatch::Thinking(true));
+        c.apply_patch(&ConfigPatch::Reasoning("High".into()));
         c.apply_patch(&ConfigPatch::Permission("plan".into()));
         c.apply_patch(&ConfigPatch::AutoCommit(false));
         c.apply_patch(&ConfigPatch::ContextWindow(64000));
         c.apply_patch(&ConfigPatch::MaxToolCalls(42));
-        assert!(c.thinking);
+        assert_eq!(c.reasoning, "high");
         assert_eq!(c.permission, "plan");
         assert!(!c.auto_commit);
         assert_eq!(c.context_window, 64000);

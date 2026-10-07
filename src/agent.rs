@@ -49,10 +49,11 @@ pub enum UiEvent {
     /// After a rewind: the prompt that was undone, to put back in the composer.
     Rewound(String),
     ModelChanged(String),
-    Usage { prompt: u32, completion: u32 },
+    /// One completion's tokens (cached input broken out, for cost).
+    Usage(crate::money::Spent),
     /// Tokens spent by a background call (compaction summary, follow-up
     /// suggestion): counted toward session cost, but not the ctx bar.
-    Spend { prompt: u32, completion: u32 },
+    Spend(crate::money::Spent),
     /// Re-estimate of the next prompt's size (after compaction) so the UI's
     /// context bar drops immediately, without touching session totals.
     Context(u32),
@@ -905,6 +906,7 @@ impl Worker {
                     images: Vec::new(),
                     tool_calls: None,
                     tool_call_id: None,
+                    native: None,
                 });
                 // Prompts inside the summary can't be rewound to any more; the
                 // kept tail moves up behind the summary.
@@ -914,6 +916,11 @@ impl Worker {
                     t.at = t.at - tail_start + kept_from;
                 }
                 new.extend_from_slice(&self.messages[tail_start..]);
+                // A client-side summary rewrites the history that signed
+                // thinking was bound to: replay the kept turns without it.
+                for m in &mut new {
+                    m.native = None;
+                }
                 self.messages = new;
                 // Rough size estimate so the UI's ctx bar drops right away.
                 let est = estimate_tokens(&self.messages);
@@ -1106,7 +1113,7 @@ impl Worker {
                     let _ = ui3.send(UiEvent::Notice(m.to_string()));
                 },
             );
-            let (content, calls, usage) = match res {
+            let (content, calls, usage, native) = match res {
                 Ok(x) => x,
                 Err(e) => {
                     let _ = self.ui.send(UiEvent::Error(e.to_string()));
@@ -1115,10 +1122,7 @@ impl Worker {
             };
             if let Some(u) = usage {
                 self.last_prompt = u.prompt_tokens;
-                let _ = self.ui.send(UiEvent::Usage {
-                    prompt: u.prompt_tokens,
-                    completion: u.total_tokens.saturating_sub(u.prompt_tokens),
-                });
+                let _ = self.ui.send(UiEvent::Usage(u.spent()));
             }
             if !quiet {
                 let _ = self.ui.send(UiEvent::AssistantCommit);
@@ -1137,6 +1141,7 @@ impl Worker {
                         images: Vec::new(),
                         tool_calls: None,
                         tool_call_id: None,
+                        native: None,
                     });
                 }
                 let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
@@ -1149,6 +1154,7 @@ impl Worker {
                 images: Vec::new(),
                 tool_calls: None,
                 tool_call_id: None,
+                native,
             };
             if !calls.is_empty() {
                 msg.tool_calls = Some(
@@ -1885,10 +1891,7 @@ fn run_readonly(http: &ureq::Agent, name: &str, args: &Value) -> String {
 
 /// A background call's token usage as a session-cost event.
 fn spend(u: &api::Usage) -> UiEvent {
-    UiEvent::Spend {
-        prompt: u.prompt_tokens,
-        completion: u.total_tokens.saturating_sub(u.prompt_tokens),
-    }
+    UiEvent::Spend(u.spent())
 }
 
 fn estimate_tokens(messages: &[Message]) -> u32 {
@@ -2037,7 +2040,7 @@ mod tests {
         let mut msgs = vec![
             Message::system("s"),
             Message::user("u"),
-            Message { role: "assistant".into(), content: String::new(), images: vec![], tool_calls: Some(vec![call("a"), call("b"), call("c")]), tool_call_id: None },
+            Message { role: "assistant".into(), content: String::new(), images: vec![], tool_calls: Some(vec![call("a"), call("b"), call("c")]), tool_call_id: None, native: None },
             Message::tool("a".into(), "done".into()),
         ];
         repair_orphans(&mut msgs);

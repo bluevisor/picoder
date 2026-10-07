@@ -14,6 +14,7 @@ mod diff;
 mod hooks;
 mod mcp;
 mod money;
+mod native;
 mod policy;
 mod sandbox;
 mod sessions;
@@ -552,6 +553,7 @@ fn run_oneshot(
     let started = std::time::Instant::now();
     let model = cfg.model.clone();
     let (price_in, price_out, price_currency) = (cfg.price_in, cfg.price_out, cfg.price_currency.clone());
+    let price_cached = cfg.price_cached();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     let h = agent::spawn(cfg, messages, perm, session, ui_tx);
     let (task_text, attached) = ui::expand_attachments(&task);
@@ -578,7 +580,7 @@ fn run_oneshot(
     // so --output can write it to disk after the turn.
     let mut live = String::new();
     let mut final_text = String::new();
-    let (mut prompt_tokens, mut completion_tokens, mut tool_calls, mut errors) = (0u64, 0u64, 0u32, Vec::new());
+    let (mut spent, mut tool_calls, mut errors) = (money::Spent::default(), 0u32, Vec::new());
     while let Ok(ev) = ui_rx.recv() {
         match ev {
             UiEvent::Token(t) => {
@@ -654,10 +656,7 @@ fn run_oneshot(
                 emit(serde_json::json!({"type": "error", "text": s}));
                 errors.push(s);
             }
-            UiEvent::Usage { prompt, completion } | UiEvent::Spend { prompt, completion } => {
-                prompt_tokens += prompt as u64;
-                completion_tokens += completion as u64;
-            }
+            UiEvent::Usage(s) | UiEvent::Spend(s) => spent.add(s),
             UiEvent::TurnDone => break,
             UiEvent::Reasoning(t) => {
                 if text_mode {
@@ -707,14 +706,19 @@ fn run_oneshot(
     if text_mode && !at_line_start {
         println!();
     }
-    let cost = prompt_tokens as f64 / 1e6 * price_in + completion_tokens as f64 / 1e6 * price_out;
+    let cost = spent.cost(price_in, price_cached, price_out);
     let result = final_text.trim_end().to_string();
     if mode != OutputMode::Text {
         let summary = serde_json::json!({
             "type": "result",
             "result": result,
             "model": model,
-            "usage": { "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens },
+            "usage": {
+                "prompt_tokens": spent.prompt,
+                "completion_tokens": spent.completion,
+                "cached_tokens": spent.cached,
+                "cache_write_tokens": spent.written,
+            },
             "cost": cost,
             "cost_currency": price_currency,
             "tool_calls": tool_calls,

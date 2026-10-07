@@ -3,7 +3,8 @@
 A tiny full-screen **agentic coding CLI** written in Rust, small enough to run
 on a **Raspberry Pi Zero W** (ARMv6, single core, ~512 MB RAM) — and equally at
 home on a Pi 5 or your laptop. It talks to any OpenAI-compatible chat API
-(default: DeepSeek) and drives a Codex / Claude-Code-style tool loop inside a
+(default: DeepSeek), plus Anthropic's Messages API and OpenAI's Responses API
+natively, and drives a Codex / Claude-Code-style tool loop inside a
 [ratatui](https://ratatui.rs) terminal UI.
 
 The whole thing is one ~2.5 MB statically linked binary with no runtime
@@ -117,6 +118,22 @@ dependencies.
 - **Sampling** — picoder sends no `temperature` unless you set one in
   `config.json` (`"temperature": 0.7`), so each model's recommended sampling
   applies; the DeepSeek preset keeps `0.2`.
+- **Reasoning effort** — `/effort auto|off|low|medium|high` (or the `/config`
+  row) is translated per provider: DeepSeek/GLM `thinking`, OpenAI/Gemini/Groq
+  `reasoning_effort`, OpenRouter `reasoning`, Anthropic adaptive thinking +
+  `output_config.effort`, Responses `reasoning.effort`, and for self-hosted
+  servers (Splash, vLLM, SGLang, llama.cpp) the chat template's
+  `enable_thinking` — so `off` really stops a local Qwen from thinking. `auto`
+  sends nothing.
+- **Native APIs** — `"api": "chat" | "messages" | "responses"` picks the wire
+  protocol; the anthropic preset defaults to Messages and the openai preset to
+  Responses. Within a run, Anthropic's signed thinking and Responses' encrypted
+  reasoning (stateless, `store: false`) are replayed across tool turns.
+- **Prompt caching & cost** — Anthropic cache breakpoints on the system prompt
+  and the latest turn, an OpenAI `prompt_cache_key`, and cache hits read from
+  every protocol's usage. Cached input is priced at `price_cached_in` (default:
+  DeepSeek's cache-hit price with the DeepSeek list, else a tenth of
+  `price_in`); `/cost` and the one-shot JSON usage show cached tokens.
 - **Thrashing guard** — the same tool call with identical arguments three times
   in a row is short-circuited with a nudge to change approach.
 - **Scripting** — `git diff | picoder "review this"` attaches stdin as context
@@ -154,7 +171,7 @@ dependencies.
   while its published price lists are USD), with a one-time hint on how to
   align them.
 - **Settings panel** (`/config`) — provider preset, base URL, model, API key,
-  auth mode, thinking mode, default permission mode, auto-commit, theme, context
+  auth mode, reasoning effort, default permission mode, auto-commit, theme, context
   window, max tool calls, and price currency, edited in-TUI; changes apply live
   and persist to `config.json`.
 - **Themes** (`/theme`) — `Default`, `Apple ][` (green phosphor), `MSDOS`,
@@ -301,7 +318,8 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | Command | Action |
 | --- | --- |
 | `/model [id\|n]` | open the model picker, or set directly by id/number |
-| `/config` | settings panel (provider, model, key, auth, thinking, …) |
+| `/config` | settings panel (provider, model, key, reasoning, …) |
+| `/effort [level]` | reasoning effort: auto, off, low, medium, high |
 | `/compact [focus]` | summarize older turns to free context (auto at 80%) |
 | `/diff` | show everything changed since the session started |
 | `/undo` | revert the last picoder checkpoint commit |

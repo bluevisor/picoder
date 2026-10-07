@@ -182,6 +182,9 @@ pub struct App {
     last_prompt_tokens: u32,
     sess_prompt: u64,
     sess_completion: u64,
+    /// Session input tokens served from / written to the provider's cache.
+    sess_cached: u64,
+    sess_written: u64,
     balance: Option<money::Balance>,
     /// True once the "balance and prices are in different currencies" notice
     /// has been shown, so the per-turn balance refresh doesn't repeat it.
@@ -307,6 +310,8 @@ impl App {
             last_prompt_tokens: 0,
             sess_prompt: 0,
             sess_completion: 0,
+            sess_cached: 0,
+            sess_written: 0,
             balance: None,
             balance_units_flagged: false,
             settings: cfg.settings,
@@ -535,15 +540,11 @@ impl App {
             UiEvent::ModelChanged(m) => {
                 self.model_info = m;
             }
-            UiEvent::Usage { prompt, completion } => {
-                self.last_prompt_tokens = prompt;
-                self.sess_prompt += prompt as u64;
-                self.sess_completion += completion as u64;
+            UiEvent::Usage(s) => {
+                self.last_prompt_tokens = s.prompt as u32;
+                self.add_spent(s);
             }
-            UiEvent::Spend { prompt, completion } => {
-                self.sess_prompt += prompt as u64;
-                self.sess_completion += completion as u64;
-            }
+            UiEvent::Spend(s) => self.add_spent(s),
             UiEvent::Context(n) => {
                 self.last_prompt_tokens = n;
             }
@@ -1167,9 +1168,9 @@ impl App {
                 let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::AuthMode(next.to_string())));
             }
             5 => {
-                let v = !self.settings.thinking;
-                self.settings.thinking = v;
-                let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Thinking(v)));
+                let levels = crate::config::REASONING_LEVELS;
+                let i = levels.iter().position(|l| *l == self.settings.reasoning).unwrap_or(0);
+                self.set_reasoning(levels[cycle(i, levels.len())], h);
             }
             6 => {
                 let next = if dir >= 0 { (self.perm() + 1) % 3 } else { (self.perm() + 2) % 3 };
@@ -1817,6 +1818,24 @@ impl App {
             "config" => {
                 self.mode = Mode::Settings { cursor: 0, edit: None };
             }
+            "effort" => match _arg {
+                Some(a) => {
+                    let level = crate::config::normalize_reasoning(a);
+                    if level == "auto" && !a.eq_ignore_ascii_case("auto") {
+                        self.push(Kind::ErrorK, format!("unknown effort '{a}' — use auto, off, low, medium or high"));
+                    } else {
+                        self.set_reasoning(&level, h);
+                        self.push(Kind::Notice, format!("reasoning effort: {level}"));
+                    }
+                }
+                None => self.push(
+                    Kind::Notice,
+                    format!(
+                        "reasoning effort: {} (set with /effort auto|off|low|medium|high; auto leaves the model's default)",
+                        self.settings.reasoning
+                    ),
+                ),
+            },
             "compact" => {
                 self.set_busy();
                 let _ = h.cmd_tx.send(WorkerCmd::Compact(_arg.map(|a| a.trim().to_string()).filter(|a| !a.is_empty())));
@@ -2061,9 +2080,33 @@ impl App {
         }
     }
 
+    fn add_spent(&mut self, s: money::Spent) {
+        self.sess_prompt += s.prompt;
+        self.sess_completion += s.completion;
+        self.sess_cached += s.cached;
+        self.sess_written += s.written;
+    }
+
+    /// Session cost so far, cache hits at the cached-input price.
+    fn session_cost(&self) -> f64 {
+        let spent = money::Spent {
+            prompt: self.sess_prompt,
+            completion: self.sess_completion,
+            cached: self.sess_cached,
+            written: self.sess_written,
+        };
+        spent.cost(self.price_in, self.settings.price_cached(), self.price_out)
+    }
+
+    /// Change the reasoning setting: live in the worker, persisted, and shown.
+    fn set_reasoning(&mut self, level: &str, h: &Handles) {
+        self.settings.reasoning = level.to_string();
+        let _ = h.cmd_tx.send(WorkerCmd::Patch(ConfigPatch::Reasoning(level.to_string())));
+    }
+
     fn cost_lines(&self) -> Vec<String> {
         let tokens = self.sess_prompt + self.sess_completion;
-        let cost = self.sess_prompt as f64 / 1e6 * self.price_in + self.sess_completion as f64 / 1e6 * self.price_out;
+        let cost = self.session_cost();
         let mut v = vec![format!(
             "session: {} tokens ({} in / {} out) · {}",
             humanize(tokens),
@@ -2071,6 +2114,13 @@ impl App {
             humanize(self.sess_completion),
             money::fmt_cost_tagged(cost, &self.price_currency)
         )];
+        if self.sess_cached + self.sess_written > 0 {
+            v.push(format!(
+                "cache: {} input tokens read from cache, {} written",
+                humanize(self.sess_cached),
+                humanize(self.sess_written)
+            ));
+        }
         v.push(format!(
             "context: {} / {} tokens ({}%)",
             humanize(self.last_prompt_tokens as u64),
@@ -2346,7 +2396,7 @@ impl App {
                     "api key".into()
                 }
             }
-            5 => if s.thinking { "on".into() } else { "off".into() },
+            5 => s.reasoning.clone(),
             6 => perm_name(self.perm()).to_string(),
             7 => if s.auto_commit { "on".into() } else { "off".into() },
             8 => self.palette.name.to_string(),
@@ -2789,8 +2839,8 @@ impl App {
             self.model_info.clone(),
             Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD),
         )];
-        if self.settings.thinking {
-            spans.push(Span::styled(" think", gray));
+        if self.settings.reasoning != "auto" {
+            spans.push(Span::styled(format!(" effort:{}", self.settings.reasoning), gray));
         }
 
         let tokens = self.sess_prompt + self.sess_completion;
@@ -2805,8 +2855,7 @@ impl App {
             .map(|b| b.currency == self.price_currency)
             .unwrap_or(true);
         if tokens > 0 {
-            let cost = self.sess_prompt as f64 / 1e6 * self.price_in
-                + self.sess_completion as f64 / 1e6 * self.price_out;
+            let cost = self.session_cost();
             let cost = if aligned {
                 money::fmt_cost(cost, &self.price_currency)
             } else {
@@ -3605,6 +3654,20 @@ mod tests {
             "cursor lands after the completed path"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `/effort high` goes live in the worker and persists; nonsense is refused.
+    #[test]
+    fn effort_command_sets_reasoning() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, cmd_rx) = test_handles();
+        app.run_command("effort High", &h);
+        assert_eq!(app.settings.reasoning, "high");
+        let sent: Vec<WorkerCmd> = cmd_rx.try_iter().collect();
+        assert!(sent.iter().any(|c| matches!(c, WorkerCmd::Patch(ConfigPatch::Reasoning(r)) if r == "high")));
+        app.run_command("effort sideways", &h);
+        assert_eq!(app.settings.reasoning, "high", "unchanged by a bad value");
+        assert!(cmd_rx.try_iter().next().is_none());
     }
 
     /// Esc clears the line too (as the README promises) and must never quit.
