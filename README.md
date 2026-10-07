@@ -19,7 +19,9 @@ dependencies.
   `grep` (regex), `glob`, `web_fetch`, `web_search`, `todo` (a visible plan),
   `ask_user`, `view_image`, and `remember` / `recall` memory. A `max_tool_calls`
   budget (default `0` = auto, 500; editable in `/config`) caps the model
-  round-trips in a single turn.
+  round-trips in a single turn. Read-only calls the model sends together
+  (`read_file`, `list_files`, `grep`, `glob`, `web_fetch`, `web_search`,
+  `recall`) run in parallel; everything else runs one at a time, in order.
 - **Git auto-checkpoint** — every successful edit is committed to the
   working-directory repo (`auto_commit`, on by default), so each change is
   restorable; recent git history is fed into context as a clue. Set

@@ -883,18 +883,30 @@ impl Worker {
             // request — so an Esc here answers the skipped calls instead of
             // returning with the history dangling.
             let mut interrupted = false;
-            for (i, c) in calls.into_iter().enumerate() {
+            let mut i = 0;
+            while i < calls.len() {
                 if interrupted || self.cancel.load(Ordering::Relaxed) {
                     if !interrupted {
                         interrupted = true;
                         let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
                     }
+                    let c = &calls[i];
                     let id = if c.id.is_empty() { format!("call_{i}") } else { c.id.clone() };
                     self.messages
                         .push(Message::tool(id, "(interrupted by user; tool not run)".into()));
+                    i += 1;
                     continue;
                 }
-                self.handle_call(c, i);
+                // Consecutive read-only calls go out together; the rest run one
+                // at a time, in order (approvals, writes, sub-agents, MCP).
+                let run = calls[i..].iter().take_while(|c| parallel_safe(&c.name)).count();
+                if run >= 2 {
+                    self.handle_parallel(&calls[i..i + run], i);
+                    i += run;
+                } else {
+                    self.handle_call(calls[i].clone(), i);
+                    i += 1;
+                }
             }
             if interrupted {
                 return String::new();
@@ -973,30 +985,88 @@ impl Worker {
     }
 
     fn handle_call(&mut self, c: AccumCall, idx: usize) {
-        let id = if c.id.is_empty() { format!("call_{idx}") } else { c.id.clone() };
-        let name = c.name.clone();
-        let raw = if c.args.trim().is_empty() { "{}" } else { &c.args };
-        let parsed: Result<Value, _> = serde_json::from_str(raw);
-        let summary = parsed
-            .as_ref()
-            .ok()
-            .and_then(|a| {
-                ["command", "path", "pattern", "note", "query", "url", "question", "description"]
-                    .iter()
-                    .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
-            })
-            .unwrap_or("")
-            .to_string();
-        let _ = self.ui.send(UiEvent::ToolStart { name: name.clone(), summary });
+        let call = Call::new(&c, idx);
+        let _ = self.ui.send(UiEvent::ToolStart { name: call.name.clone(), summary: call.summary.clone() });
+        let result = match self.settle_early(&call) {
+            Some(e) => {
+                self.result_event(&e);
+                e
+            }
+            // settle_early returns Some for every unparsable call.
+            None => self.run_tool(&call.name, call.args.as_ref().unwrap_or(&Value::Null)),
+        };
+        self.messages.push(Message::tool(call.id, result));
+    }
 
-        // Thrashing guard: the same call with the same arguments three times in
-        // a row can't produce a different result — break the loop instead of
-        // burning tokens (Codex-style).
+    /// Run consecutive read-only calls side by side. Everything stateful (the
+    /// repeat guard, hooks, deny rules, transcript events, history) stays
+    /// sequential and in call order; only the tools' own work overlaps. The
+    /// transcript gets each call's start/result pair once the batch is done.
+    fn handle_parallel(&mut self, batch: &[AccumCall], base: usize) {
+        let _ = self.ui.send(UiEvent::Notice(format!(
+            "running {} read-only calls in parallel…",
+            batch.len()
+        )));
+        // A call settled up front (bad JSON, repeat, hook veto, deny rule) has
+        // its result already; the rest are run below.
+        let mut calls: Vec<(Call, Option<String>)> = Vec::with_capacity(batch.len());
+        for (k, c) in batch.iter().enumerate() {
+            let call = Call::new(c, base + k);
+            let early = self.settle_early(&call).or_else(|| {
+                let args = call.args.as_ref().unwrap_or(&Value::Null);
+                self.pre_tool(&call.name, args).err()
+            });
+            calls.push((call, early));
+        }
+        let http = &self.http;
+        let mut ran: Vec<Option<String>> = vec![None; calls.len()];
+        // Bounded fan-out: a Pi Zero has one core and 512 MB.
+        let todo: Vec<usize> = (0..calls.len()).filter(|&k| calls[k].1.is_none()).collect();
+        for chunk in todo.chunks(8) {
+            let out: Vec<(usize, String)> = std::thread::scope(|sc| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|&k| {
+                        let (call, _) = &calls[k];
+                        let args = call.args.as_ref().unwrap_or(&Value::Null);
+                        (k, sc.spawn(move || run_readonly(http, &call.name, args)))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|(k, h)| (k, h.join().unwrap_or_else(|_| "ERROR: tool panicked".into())))
+                    .collect()
+            });
+            for (k, r) in out {
+                ran[k] = Some(r);
+            }
+        }
+        for ((call, early), r) in calls.into_iter().zip(ran) {
+            let _ = self.ui.send(UiEvent::ToolStart { name: call.name.clone(), summary: call.summary.clone() });
+            let result = match (early, r) {
+                (Some(e), _) => e,
+                (None, Some(r)) => {
+                    let args = call.args.as_ref().unwrap_or(&Value::Null);
+                    self.post_tool(&call.name, args, r)
+                }
+                (None, None) => "ERROR: tool did not run".to_string(),
+            };
+            self.result_event(&result);
+            self.messages.push(Message::tool(call.id, result));
+        }
+    }
+
+    /// The result for a call that must not run: arguments that aren't JSON, or
+    /// the thrashing guard — the same call with the same arguments three times
+    /// in a row can't produce a different result, so break the loop instead of
+    /// burning tokens (Codex-style). None means go ahead.
+    fn settle_early(&mut self, call: &Call) -> Option<String> {
+        let name = &call.name;
         let sig = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             name.hash(&mut h);
-            raw.hash(&mut h);
+            call.raw.hash(&mut h);
             h.finish()
         };
         let n = self.recent_calls.len();
@@ -1006,28 +1076,19 @@ impl Worker {
             self.recent_calls.remove(0);
         }
         if repeated && name != "bash_output" && name != "ask_user" {
-            let e = format!(
+            return Some(format!(
                 "ERROR: `{name}` was just called twice with these exact arguments and the result \
                  will not change. Do not repeat it. Try a different approach (other arguments, \
                  another tool, or inspect why it failed), or explain the blocker to the user."
-            );
-            let _ = self.ui.send(UiEvent::ToolResult { ok: false, preview: e.clone() });
-            self.messages.push(Message::tool(id, e));
-            return;
+            ));
         }
-
-        let result = match parsed {
-            Err(_) => {
-                let e = format!(
-                    "ERROR: could not parse tool arguments as JSON. Re-issue with valid JSON. Received: {}",
-                    api::truncate(raw, 300)
-                );
-                let _ = self.ui.send(UiEvent::ToolResult { ok: false, preview: e.clone() });
-                e
-            }
-            Ok(args) => self.run_tool(&name, &args),
-        };
-        self.messages.push(Message::tool(id, result));
+        if call.args.is_none() {
+            return Some(format!(
+                "ERROR: could not parse tool arguments as JSON. Re-issue with valid JSON. Received: {}",
+                api::truncate(&call.raw, 300)
+            ));
+        }
+        None
     }
 
     /// What a permission rule's pattern is matched against for this call.
@@ -1050,31 +1111,43 @@ impl Worker {
     }
 
     fn run_tool(&mut self, name: &str, args: &Value) -> String {
-        // PreToolUse hooks see every call first and may veto it.
+        let decision = match self.pre_tool(name, args) {
+            Ok(d) => d,
+            Err(r) => {
+                self.result_event(&r);
+                return r;
+            }
+        };
+        let targets = Self::policy_targets(name, args);
+        let result = self.run_tool_inner(name, args, &decision, targets.first().map(String::as_str).unwrap_or(""));
+        self.post_tool(name, args, result)
+    }
+
+    /// PreToolUse hooks (which may veto) and the permission rules. Err is the
+    /// refusal to return as the call's result; deny rules are absolute, so
+    /// they hold in bypass mode too.
+    fn pre_tool(&mut self, name: &str, args: &Value) -> Result<Decision, String> {
         if self.hooks.has("PreToolUse") {
             match self.hooks.run("PreToolUse", name, &serde_json::json!({ "tool_input": args })) {
-                Outcome::Block(reason) => {
-                    let r = format!("DENIED by PreToolUse hook: {reason}");
-                    self.result_event(&r);
-                    return r;
-                }
+                Outcome::Block(reason) => return Err(format!("DENIED by PreToolUse hook: {reason}")),
                 Outcome::Continue { context } if !context.trim().is_empty() => {
                     let _ = self.ui.send(UiEvent::Notice(format!("hook: {}", crate::api::truncate(context.trim(), 300))));
                 }
                 _ => {}
             }
         }
-        // Deny rules are absolute — they hold in bypass mode too.
         let targets = Self::policy_targets(name, args);
         let target_refs: Vec<&str> = targets.iter().map(String::as_str).collect();
-        let decision = self.policy.check(name, &target_refs);
-        if let Decision::Deny(rule) = &decision {
-            let r = format!("DENIED by permission rule `{rule}` (see /permissions). Do not retry this call.");
-            self.result_event(&r);
-            return r;
+        match self.policy.check(name, &target_refs) {
+            Decision::Deny(rule) => Err(format!(
+                "DENIED by permission rule `{rule}` (see /permissions). Do not retry this call."
+            )),
+            d => Ok(d),
         }
-        let result = self.run_tool_inner(name, args, &decision, targets.first().map(String::as_str).unwrap_or(""));
-        // PostToolUse hooks can append feedback (e.g. a formatter's diagnostics).
+    }
+
+    /// PostToolUse hooks can append feedback (e.g. a formatter's diagnostics).
+    fn post_tool(&mut self, name: &str, args: &Value, result: String) -> String {
         if self.hooks.has("PostToolUse") {
             let payload = serde_json::json!({ "tool_input": args, "tool_response": crate::api::truncate(&result, 8000) });
             match self.hooks.run("PostToolUse", name, &payload) {
@@ -1106,52 +1179,13 @@ impl Worker {
             return r;
         }
         match name {
-            "read_file" => {
-                let r = tools::read_file(
-                    s("path"),
-                    args.get("start_line").and_then(|v| v.as_u64()),
-                    args.get("end_line").and_then(|v| v.as_u64()),
-                );
-                self.result_event(&r);
-                r
-            }
-            "list_files" => {
-                let r = tools::list_files(s("path"));
-                self.result_event(&r);
-                r
-            }
-            "grep" => {
-                let r = tools::grep(
-                    s("pattern"),
-                    s("path"),
-                    args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false),
-                );
-                self.result_event(&r);
-                r
-            }
-            "glob" => {
-                let r = tools::glob_search(s("pattern"));
+            n if parallel_safe(n) => {
+                let r = run_readonly(&self.http, n, args);
                 self.result_event(&r);
                 r
             }
             "remember" => {
                 let r = tools::remember(s("note"));
-                self.result_event(&r);
-                r
-            }
-            "recall" => {
-                let q = args.get("query").and_then(|v| v.as_str());
-                let r = tools::recall(q);
-                self.result_event(&r);
-                r
-            }
-            "web_fetch" => {
-                let r = tools::web_fetch(&self.http, s("url"));
-                self.result_event(&r);
-                r
-            }
-            "web_search" => {
-                let r = tools::web_search(&self.http, s("query"));
                 self.result_event(&r);
                 r
             }
@@ -1492,6 +1526,71 @@ fn render_for_summary(messages: &[Message]) -> String {
 
 /// Crude size estimate (~4 chars/token, ~1000 tokens per image) for the
 /// post-compaction context bar.
+/// One tool call from the model, parsed once.
+struct Call {
+    id: String,
+    name: String,
+    /// The arguments as sent (`{}` when empty), for errors and the repeat guard.
+    raw: String,
+    /// None when `raw` isn't valid JSON.
+    args: Option<Value>,
+    /// The argument shown next to the tool name in the transcript.
+    summary: String,
+}
+
+impl Call {
+    fn new(c: &AccumCall, idx: usize) -> Call {
+        let raw = if c.args.trim().is_empty() { "{}".to_string() } else { c.args.clone() };
+        let args: Option<Value> = serde_json::from_str(&raw).ok();
+        let summary = args
+            .as_ref()
+            .and_then(|a| {
+                ["command", "path", "pattern", "note", "query", "url", "question", "description"]
+                    .iter()
+                    .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
+            })
+            .unwrap_or("")
+            .to_string();
+        Call {
+            id: if c.id.is_empty() { format!("call_{idx}") } else { c.id.clone() },
+            name: c.name.clone(),
+            raw,
+            args,
+            summary,
+        }
+    }
+}
+
+/// Read-only tools that need no approval, prompt or worker state, so several
+/// from one response can run side by side.
+fn parallel_safe(name: &str) -> bool {
+    matches!(name, "read_file" | "list_files" | "grep" | "glob" | "web_fetch" | "web_search" | "recall")
+}
+
+/// The read-only tools' own work, free of the worker so a batch can run on
+/// threads. Also the sequential path for these tools, so both behave alike.
+fn run_readonly(http: &ureq::Agent, name: &str, args: &Value) -> String {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match name {
+        "read_file" => tools::read_file(
+            s("path"),
+            args.get("start_line").and_then(|v| v.as_u64()),
+            args.get("end_line").and_then(|v| v.as_u64()),
+        ),
+        "list_files" => tools::list_files(s("path")),
+        "grep" => tools::grep(
+            s("pattern"),
+            s("path"),
+            args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false),
+        ),
+        "glob" => tools::glob_search(s("pattern")),
+        "web_fetch" => tools::web_fetch(http, s("url")),
+        "web_search" => tools::web_search(http, s("query")),
+        "recall" => tools::recall(args.get("query").and_then(|v| v.as_str())),
+        _ => format!("ERROR: {name} is not a read-only tool"),
+    }
+}
+
 /// A background call's token usage as a session-cost event.
 fn spend(u: &api::Usage) -> UiEvent {
     UiEvent::Spend {
@@ -1568,6 +1667,21 @@ fn preview(s: &str, maxlines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_read_only_tools_run_in_parallel() {
+        for t in ["read_file", "list_files", "grep", "glob", "web_fetch", "web_search", "recall"] {
+            assert!(parallel_safe(t), "{t}");
+        }
+        // Anything that writes, prompts, recurses or touches worker state
+        // must keep running one at a time, in order.
+        for t in [
+            "bash", "bash_output", "bash_kill", "write_file", "edit_file", "multi_edit",
+            "remember", "view_image", "todo", "task", "ask_user", "mcp__fs__read",
+        ] {
+            assert!(!parallel_safe(t), "{t}");
+        }
+    }
 
     #[test]
     fn repair_orphans_answers_unanswered_tool_calls_only() {
