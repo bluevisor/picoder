@@ -75,11 +75,27 @@ fn deny_symlink(p: &Path, path: &str, verb: &str) -> Option<String> {
 
 // ----------------------------------------------------------------- bash -----
 
+/// `sh -c command`, inside the OS sandbox when one is configured (see
+/// `sandbox`). Returns the command, what must outlive its spawn, the active
+/// sandbox (to explain failures), and a one-time "unavailable" warning.
+fn shell(command: &str, cwd: &Path) -> (Command, Option<crate::sandbox::Guard>, Option<crate::sandbox::Sandbox>, Option<String>) {
+    match crate::sandbox::Sandbox::current(cwd) {
+        Some(sb) => {
+            let (cmd, guard, warn) = sb.shell(command);
+            (cmd, Some(guard), warn.is_none().then_some(sb), warn)
+        }
+        None => {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(command);
+            (cmd, None, None, None)
+        }
+    }
+}
+
 pub fn bash(command: &str, timeout: u64, cwd: &Path, cancel: &AtomicBool) -> String {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
+    // `_guard` keeps the Linux sandbox ruleset open until the child is spawned.
+    let (mut cmd, _guard, sandbox, warning) = shell(command, cwd);
+    cmd.current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -117,6 +133,13 @@ pub fn bash(command: &str, timeout: u64, cwd: &Path, cancel: &AtomicBool) -> Str
                 let code = output.status.code().unwrap_or(-1);
                 out = out.trim_end().to_string();
                 out.push_str(&format!("\n[exit {code}]"));
+                if let Some(note) = sandbox.as_ref().and_then(|sb| sb.explain(&out, code)) {
+                    out.push('\n');
+                    out.push_str(&note);
+                }
+                if let Some(w) = &warning {
+                    out = format!("{w}\n{out}");
+                }
                 return truncate(out.trim(), MAX_TOOL_OUTPUT);
             }
             Ok(Err(e)) => return format!("ERROR: {e}"),
@@ -169,10 +192,9 @@ const MAX_BG_JOBS: usize = 64;
 
 pub fn bash_background(command: &str, cwd: &Path) -> String {
     static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
+    // `_guard` keeps the Linux sandbox ruleset open until the child is spawned.
+    let (mut cmd, _guard, sandbox, warning) = shell(command, cwd);
+    cmd.current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -226,7 +248,14 @@ pub fn bash_background(command: &str, cwd: &Path) -> String {
         Job { pid, command: command.to_string(), buf, exit, read_to: 0 },
     );
     drop(map);
-    format!("Started background job {id} (pid {pid}). Poll with bash_output, stop with bash_kill.")
+    let mut msg = format!("Started background job {id} (pid {pid}). Poll with bash_output, stop with bash_kill.");
+    if let Some(sb) = &sandbox {
+        msg.push_str(&format!(" It runs in the {}.", sb.describe()));
+    }
+    if let Some(w) = warning {
+        msg = format!("{w}\n{msg}");
+    }
+    msg
 }
 
 /// Output produced since the last bash_output call, plus run status.
@@ -423,13 +452,25 @@ pub fn list_files(path: &str) -> String {
         }
     }
     names.sort();
+    // Leave out what .gitignore excludes, but say what was left out, so the
+    // model doesn't conclude a build dir is missing.
+    if let Some(ignored) = git_ignored_children(&p) {
+        let hidden: Vec<String> = names.iter().filter(|n| ignored.contains(*n)).cloned().collect();
+        if !hidden.is_empty() {
+            names.retain(|n| !ignored.contains(n));
+            let shown: Vec<&str> = hidden.iter().take(10).map(String::as_str).collect();
+            let more = if hidden.len() > 10 { ", …" } else { "" };
+            names.push(format!("({} git-ignored not shown: {}{more})", hidden.len(), shown.join(", ")));
+        }
+    }
     if unreadable > 0 {
         let s = if unreadable == 1 { "" } else { "s" };
         names.push(format!("({unreadable} unreadable entry{s})"));
     }
-    // Pin truncation notice to the very bottom.
+    // Pin the notes (truncation, ignored, unreadable) to the very bottom.
+    let note = |s: &str| s.starts_with("...") || s.starts_with('(');
     names.sort_by(|a, b| {
-        match (a.starts_with("..."), b.starts_with("...")) {
+        match (note(a), note(b)) {
             (true, false) => std::cmp::Ordering::Greater,
             (false, true) => std::cmp::Ordering::Less,
             _ => a.cmp(b),
@@ -1182,6 +1223,19 @@ pub fn grep(pattern: &str, path: &str, ignore_case: bool) -> String {
     let mut files: Vec<PathBuf> = Vec::new();
     if root.is_file() {
         files.push(root);
+    } else if let Some(listed) = git_visible_files(&root) {
+        // Inside a repo, git's own list honors .gitignore (no node_modules,
+        // target, generated files); the same hidden/build-dir skips and cap
+        // as the walker apply on top.
+        let skipped = |f: &&PathBuf| {
+            f.strip_prefix(&root).unwrap_or(f).parent().is_some_and(|d| {
+                d.components().any(|c| {
+                    let n = c.as_os_str().to_string_lossy();
+                    SKIP_DIRS.contains(&n.as_ref()) || n.starts_with('.') && n.len() > 1
+                })
+            })
+        };
+        files.extend(listed.iter().filter(|f| !skipped(f)).filter(|f| f.is_file()).take(5000).cloned());
     } else {
         collect_files(&root, &mut files, 0);
     }
@@ -1216,6 +1270,60 @@ pub fn grep(pattern: &str, path: &str, ignore_case: bool) -> String {
     }
 }
 
+/// The files git shows under `dir` — tracked, plus untracked ones .gitignore
+/// doesn't exclude — joined onto `dir`. None outside a repo or without git.
+fn git_visible_files(dir: &Path) -> Option<Vec<PathBuf>> {
+    let out = git_output(dir, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"], 20).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut files: Vec<PathBuf> = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| dir.join(String::from_utf8_lossy(s).as_ref()))
+        .collect();
+    files.dedup();
+    Some(files)
+}
+
+/// Match a relative glob against git's file list (and the directories on it)
+/// instead of walking the tree, so ignored trees are neither searched nor
+/// returned. Same matching as `glob::glob`: `*` stops at `/`, `**` spans dirs.
+fn glob_in_repo(pattern: &str, cwd: &Path, listed: &[PathBuf]) -> std::result::Result<Vec<String>, String> {
+    let dotted = pattern.starts_with("./");
+    let pat = glob::Pattern::new(pattern.trim_start_matches("./")).map_err(|e| format!("ERROR: bad glob: {e}"))?;
+    let opts = glob::MatchOptions { case_sensitive: true, require_literal_separator: true, require_literal_leading_dot: false };
+    let mut seen = std::collections::BTreeSet::new();
+    for f in listed {
+        let Ok(rel) = f.strip_prefix(cwd) else { continue };
+        // The file itself and each directory above it are candidates.
+        for p in rel.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            seen.insert(p.to_path_buf());
+        }
+    }
+    Ok(seen
+        .into_iter()
+        .filter(|p| pat.matches_path_with(p, opts) && cwd.join(p).exists())
+        .take(500)
+        .map(|p| if dotted { format!("./{}", p.display()) } else { p.display().to_string() })
+        .collect())
+}
+
+/// Entries directly in `dir` that git ignores (dirs as `name/`), or None
+/// outside a repo.
+fn git_ignored_children(dir: &Path) -> Option<std::collections::HashSet<String>> {
+    let args = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"];
+    let out = git_output(dir, &args, 20).ok().filter(|o| o.status.success())?;
+    Some(
+        out.stdout
+            .split(|&b| b == 0)
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .filter(|s| !s.is_empty() && !s.trim_end_matches('/').contains('/'))
+            .collect(),
+    )
+}
+
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 12 || out.len() > 5000 {
         return;
@@ -1238,7 +1346,15 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 
 pub fn glob_search(pattern: &str) -> String {
     let mut matches: Vec<String> = Vec::new();
-    match glob::glob(pattern) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let relative = !pattern.starts_with(['/', '~']) && !pattern.split('/').any(|c| c == "..");
+    if let Some(listed) = relative.then(|| git_visible_files(&cwd)).flatten() {
+        match glob_in_repo(pattern, &cwd, &listed) {
+            Ok(m) => matches = m,
+            Err(e) => return e,
+        }
+    } else {
+        match glob::glob(pattern) {
         Ok(paths) => {
             for entry in paths.flatten() {
                 matches.push(entry.display().to_string());
@@ -1248,6 +1364,7 @@ pub fn glob_search(pattern: &str) -> String {
             }
         }
         Err(e) => return format!("ERROR: bad glob: {e}"),
+        }
     }
     matches.sort();
     if matches.is_empty() {
@@ -1426,26 +1543,149 @@ fn decode_entities(s: &str) -> String {
 
 // ----------------------------------------------------------- web_search -----
 
-/// Search DuckDuckGo's HTML endpoint and return "title / url / snippet" rows.
+/// Where web_search goes. `"web_search"` in config/settings picks one
+/// (`searxng` / `brave` / `tavily` / `duckduckgo`); unset or `"auto"` takes the
+/// first that's configured — a `web_search_url` (SearXNG), TAVILY_API_KEY,
+/// BRAVE_API_KEY — and otherwise keyless DuckDuckGo. `web_search_key`
+/// stands in for the env key.
+#[derive(Debug, PartialEq)]
+enum SearchBackend {
+    Searxng(String),
+    Brave(String),
+    Tavily(String),
+    DuckDuckGo,
+}
+
+fn search_backend(
+    choice: Option<&str>,
+    url: Option<String>,
+    key: Option<String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> std::result::Result<SearchBackend, String> {
+    let need = |what: &str, v: Option<String>| v.ok_or(format!("ERROR: web_search is set to {what}"));
+    match choice.unwrap_or("auto").to_ascii_lowercase().as_str() {
+        "searxng" => Ok(SearchBackend::Searxng(need("searxng but web_search_url isn't set", url)?)),
+        "brave" => Ok(SearchBackend::Brave(need("brave but BRAVE_API_KEY isn't set", key.or_else(|| env("BRAVE_API_KEY")))?)),
+        "tavily" => {
+            Ok(SearchBackend::Tavily(need("tavily but TAVILY_API_KEY isn't set", key.or_else(|| env("TAVILY_API_KEY")))?))
+        }
+        "duckduckgo" | "ddg" => Ok(SearchBackend::DuckDuckGo),
+        _ => Ok(if let Some(u) = url {
+            SearchBackend::Searxng(u)
+        } else if let Some(k) = env("TAVILY_API_KEY") {
+            SearchBackend::Tavily(k)
+        } else if let Some(k) = env("BRAVE_API_KEY") {
+            SearchBackend::Brave(k)
+        } else {
+            SearchBackend::DuckDuckGo
+        }),
+    }
+}
+
+/// Search the web and return numbered "title / url / snippet" rows.
 pub fn web_search(http: &ureq::Agent, query: &str) -> String {
     if query.trim().is_empty() {
         return "ERROR: empty query".into();
     }
-    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencode(query));
-    let resp = http
-        .get(&url)
-        .timeout(Duration::from_secs(30))
-        .set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) picoder/0.1")
-        .call();
+    let s = |k: &str| crate::config::setting(k).and_then(|v| v.as_str().map(str::to_string)).filter(|v| !v.trim().is_empty());
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let backend = match search_backend(s("web_search").as_deref(), s("web_search_url"), s("web_search_key"), env) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let q = urlencode(query);
+    let get = |url: &str| http.get(url).timeout(Duration::from_secs(30)).set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) picoder/0.3");
+    let (name, resp) = match &backend {
+        SearchBackend::Searxng(base) => {
+            ("SearXNG", get(&format!("{}/search?q={q}&format=json", base.trim_end_matches('/'))).call())
+        }
+        SearchBackend::Brave(key) => (
+            "Brave",
+            get(&format!("https://api.search.brave.com/res/v1/web/search?q={q}&count=8"))
+                .set("Accept", "application/json")
+                .set("X-Subscription-Token", key)
+                .call(),
+        ),
+        SearchBackend::Tavily(key) => (
+            "Tavily",
+            http.post("https://api.tavily.com/search")
+                .timeout(Duration::from_secs(30))
+                .set("Authorization", &format!("Bearer {key}"))
+                .set("Content-Type", "application/json")
+                .send_string(&serde_json::json!({ "query": query, "max_results": 8 }).to_string()),
+        ),
+        SearchBackend::DuckDuckGo => ("DuckDuckGo", get(&format!("https://html.duckduckgo.com/html/?q={q}")).call()),
+    };
     let resp = match resp {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, _)) => return format!("ERROR: search returned HTTP {code}"),
-        Err(e) => return format!("ERROR: {e}"),
+        Err(ureq::Error::Status(code, r)) => {
+            let hint = match (code, &backend) {
+                (403, SearchBackend::Searxng(_)) => " (enable the json format in the instance's settings.yml)",
+                (401 | 403, _) => " (check the API key)",
+                (429, _) => " (rate limited; try again shortly)",
+                _ => "",
+            };
+            let _ = r.into_string();
+            return format!("ERROR: {name} search returned HTTP {code}{hint}");
+        }
+        Err(e) => return format!("ERROR: {name} search failed: {e}"),
     };
+    // DuckDuckGo answers a rate-limited client with 202 and a bot check.
+    let status = resp.status();
     // into_string() keeps ureq's deadline so a slow server can't hang us.
     let mut body = resp.into_string().unwrap_or_default();
     truncate_to_char_boundary(&mut body, 2_000_000);
-    parse_ddg(&body)
+    match backend {
+        SearchBackend::DuckDuckGo if status == 202 || ddg_blocked(&body) => DDG_BLOCKED.to_string(),
+        SearchBackend::DuckDuckGo => parse_ddg(&body),
+        SearchBackend::Searxng(_) => format_hits(name, parse_json_hits(&body, "/results", "content")),
+        SearchBackend::Tavily(_) => format_hits(name, parse_json_hits(&body, "/results", "content")),
+        SearchBackend::Brave(_) => format_hits(name, parse_json_hits(&body, "/web/results", "description")),
+    }
+}
+
+const DDG_BLOCKED: &str = "ERROR: DuckDuckGo is rate-limiting this connection with a bot check, so there are no \
+results. Wait a few minutes, or configure another search backend: \"web_search_url\" (a SearXNG \
+instance), BRAVE_API_KEY or TAVILY_API_KEY.";
+
+/// DuckDuckGo's anomaly / bot-check page instead of results.
+fn ddg_blocked(html: &str) -> bool {
+    ["anomaly-modal", "anomaly.js", "bots use DuckDuckGo too", "challenge-form"].iter().any(|m| html.contains(m))
+}
+
+/// (title, url, snippet) rows from a JSON search response: the array at
+/// `pointer`, each item's `title` / `url` and `snippet_key` text.
+fn parse_json_hits(body: &str, pointer: &str, snippet_key: &str) -> std::result::Result<Vec<(String, String, String)>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "the response wasn't JSON (for SearXNG, enable the json format)".to_string())?;
+    let items = v.pointer(pointer).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    Ok(items
+        .iter()
+        .filter_map(|it| {
+            let s = |k: &str| it.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let url = s("url");
+            (!url.is_empty()).then(|| (clean_inline(&s("title")), url, clean_inline(&s(snippet_key))))
+        })
+        .take(8)
+        .collect())
+}
+
+fn format_hits(name: &str, hits: std::result::Result<Vec<(String, String, String)>, String>) -> String {
+    let hits = match hits {
+        Ok(h) => h,
+        Err(e) => return format!("ERROR: {name} search: {e}"),
+    };
+    if hits.is_empty() {
+        return format!("(no results from {name})");
+    }
+    let mut out = String::new();
+    for (i, (title, url, snippet)) in hits.iter().enumerate() {
+        out.push_str(&format!("{}. {title}\n   {url}\n", i + 1));
+        if !snippet.is_empty() {
+            out.push_str(&format!("   {snippet}\n"));
+        }
+    }
+    truncate(&out, MAX_TOOL_OUTPUT)
 }
 
 fn parse_ddg(html: &str) -> String {
@@ -1971,6 +2211,85 @@ mod tests {
         assert!(err.contains("    3\t  let b = 2;"), "real text, numbered like read_file: {err}");
         let none = splice_edit(data, "nothing like it", "x", "").unwrap_err();
         assert!(none.contains("re-read the file"), "{none}");
+    }
+
+    #[test]
+    fn search_tools_honor_gitignore_in_a_repo() {
+        let dir = std::env::temp_dir().join(format!("picoder-gi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["src", "target/debug", "vendor"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let git = |args: &[&str]| {
+            let o = Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join(".gitignore"), "target/\n*.log\nvendor/\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn needle() {}\n").unwrap();
+        std::fs::write(dir.join("new.rs"), "// needle, untracked but not ignored\n").unwrap();
+        std::fs::write(dir.join("target/debug/gen.rs"), "fn needle() {}\n").unwrap();
+        std::fs::write(dir.join("vendor/dep.rs"), "fn needle() {}\n").unwrap();
+        std::fs::write(dir.join("run.log"), "needle\n").unwrap();
+        git(&["add", "src/lib.rs", ".gitignore"]);
+
+        let g = grep("needle", &dir.to_string_lossy(), false);
+        assert!(g.contains("src/lib.rs") && g.contains("new.rs"), "{g}");
+        assert!(!g.contains("target/") && !g.contains("vendor/") && !g.contains("run.log"), "ignored files searched: {g}");
+
+        let listed = git_visible_files(&dir).unwrap();
+        let rs = glob_in_repo("**/*.rs", &dir, &listed).unwrap();
+        assert_eq!(rs, ["new.rs", "src/lib.rs"]);
+        assert_eq!(glob_in_repo("./src/*", &dir, &listed).unwrap(), ["./src/lib.rs"]);
+        assert_eq!(glob_in_repo("s*", &dir, &listed).unwrap(), ["src"], "directories match too");
+        assert!(glob_in_repo("[", &dir, &listed).unwrap_err().contains("bad glob"));
+
+        let ls = list_files(&dir.to_string_lossy());
+        assert!(ls.contains("src/") && ls.contains("new.rs"), "{ls}");
+        assert!(!ls.lines().any(|l| l == "target/" || l == "vendor/" || l == "run.log"), "{ls}");
+        let last = ls.lines().last().unwrap();
+        assert!(last.starts_with("(3 git-ignored not shown:") && last.contains("target/"), "{ls}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn web_search_backend_is_picked_by_setting_or_available_key() {
+        let none = |_: &str| None::<String>;
+        let tavily = |k: &str| (k == "TAVILY_API_KEY").then(|| "tk".to_string());
+        assert_eq!(search_backend(None, None, None, none), Ok(SearchBackend::DuckDuckGo));
+        assert_eq!(search_backend(Some("auto"), None, None, tavily), Ok(SearchBackend::Tavily("tk".into())));
+        assert_eq!(
+            search_backend(None, Some("https://sx.local".into()), None, tavily),
+            Ok(SearchBackend::Searxng("https://sx.local".into())),
+            "a configured SearXNG wins in auto"
+        );
+        assert_eq!(search_backend(Some("Brave"), None, Some("bk".into()), none), Ok(SearchBackend::Brave("bk".into())));
+        assert!(search_backend(Some("brave"), None, None, none).unwrap_err().contains("BRAVE_API_KEY"));
+        assert!(search_backend(Some("searxng"), None, None, none).unwrap_err().contains("web_search_url"));
+        assert_eq!(search_backend(Some("ddg"), None, None, tavily), Ok(SearchBackend::DuckDuckGo));
+    }
+
+    #[test]
+    fn search_responses_parse_per_backend() {
+        let searx = r#"{"query":"rust","results":[{"title":"The Rust Book","url":"https://doc.rust-lang.org/book/","content":"Learn Rust."},{"title":"no url"}]}"#;
+        let out = format_hits("SearXNG", parse_json_hits(searx, "/results", "content"));
+        assert_eq!(out, "1. The Rust Book\n   https://doc.rust-lang.org/book/\n   Learn Rust.\n");
+        let brave = r#"{"web":{"results":[{"title":"Rust &amp; Cargo","url":"https://rust-lang.org","description":"A <strong>language</strong> empowering everyone"}]}}"#;
+        let out = format_hits("Brave", parse_json_hits(brave, "/web/results", "description"));
+        assert!(out.contains("1. Rust & Cargo") && out.contains("A language empowering everyone"), "{out}");
+        let tavily = r#"{"results":[{"title":"T","url":"https://t.example","content":"snippet","score":0.9}]}"#;
+        assert!(format_hits("Tavily", parse_json_hits(tavily, "/results", "content")).starts_with("1. T\n   https://t.example"));
+        assert_eq!(format_hits("Brave", parse_json_hits(r#"{"web":{"results":[]}}"#, "/web/results", "description")), "(no results from Brave)");
+        let html = format_hits("SearXNG", parse_json_hits("<html>no json</html>", "/results", "content"));
+        assert!(html.starts_with("ERROR: SearXNG search:") && html.contains("json format"), "{html}");
+    }
+
+    #[test]
+    fn duckduckgo_bot_check_is_reported_not_swallowed() {
+        let page = r#"<html><body><div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div><form id="challenge-form"></form></body></html>"#;
+        assert!(ddg_blocked(page));
+        assert!(!ddg_blocked(r#"<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">Ex</a>"#));
+        assert!(DDG_BLOCKED.contains("rate-limiting") && DDG_BLOCKED.contains("web_search_url"));
     }
 
     #[test]

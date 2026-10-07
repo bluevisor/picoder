@@ -321,6 +321,12 @@ pub fn settings_layers() -> Vec<(PathBuf, serde_json::Value)> {
         .collect()
 }
 
+/// The value of `key` in the most specific settings layer that sets it
+/// (project local > project > config.json).
+pub fn setting(key: &str) -> Option<serde_json::Value> {
+    settings_layers().into_iter().rev().find_map(|(_, v)| v.get(key).cloned())
+}
+
 pub fn history_path() -> PathBuf {
     config_dir().join("history")
 }
@@ -449,7 +455,18 @@ impl Config {
                 if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
                     cfg.temperature = Some(t);
                 }
-                for key in ["permissions", "hooks", "auto_bump_version", "shared_skills"] {
+                for key in [
+                    "permissions",
+                    "hooks",
+                    "auto_bump_version",
+                    "shared_skills",
+                    "sandbox",
+                    "sandbox_network",
+                    "sandbox_allow_write",
+                    "web_search",
+                    "web_search_url",
+                    "web_search_key",
+                ] {
                     if let Some(x) = v.get(key) {
                         cfg.extra.insert(key.to_string(), x.clone());
                     }

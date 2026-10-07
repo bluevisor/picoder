@@ -66,6 +66,25 @@ dependencies.
   the project's `.picoder/settings.json`. Deny rules hold even in bypass mode;
   pressing **P** at an approval prompt saves a "don't ask again" rule for that
   command prefix or directory. `/permissions` lists, adds, and removes them.
+- **OS sandbox for shell commands** — off by default. `"sandbox": "workspace"`
+  lets `bash`, background jobs and `!cmd` write only under the working
+  directory, its repo root, the temp dirs, picoder's config dir and any
+  `"sandbox_allow_write"` paths; `"readonly"` allows temp dirs only;
+  `"sandbox_network": false` also blocks network access. Reads are never
+  restricted. macOS uses `sandbox-exec`, Linux uses Landlock (network blocking
+  needs kernel 6.7+; a kernel without Landlock runs commands unsandboxed and
+  says so once). A blocked command comes back with a note naming the sandbox,
+  so the model asks instead of working around it. A repo's `.picoder/` settings
+  can tighten the sandbox but never loosen it, and only your own config.json
+  can add writable paths.
+- **Search that respects .gitignore** — inside a git repo, `grep` and `glob`
+  search git's own file list (tracked plus untracked-but-not-ignored), and
+  `list_files` leaves out ignored entries, naming them in a footer.
+- **Web search backends** — keyless DuckDuckGo by default; a bot-check page is
+  reported as such instead of returning nothing. Set `"web_search_url"` to a
+  SearXNG instance (with its JSON format enabled), or export `BRAVE_API_KEY` /
+  `TAVILY_API_KEY`. `"web_search": "searxng" | "brave" | "tavily" | "duckduckgo"`
+  pins one; `"web_search_key"` stands in for the env key.
 - **Hooks** — `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` /
   `SessionStart` shell hooks (same JSON shape as Claude Code's) receive the
   event on stdin; exit `2` blocks the action and feeds stderr back to the model.

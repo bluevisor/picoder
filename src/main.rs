@@ -15,6 +15,7 @@ mod hooks;
 mod mcp;
 mod money;
 mod policy;
+mod sandbox;
 mod sessions;
 mod sysinfo;
 mod tools;
