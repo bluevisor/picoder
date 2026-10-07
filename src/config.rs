@@ -8,14 +8,53 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// One MCP server entry from config.json (`mcp_servers`). Spawned over stdio.
+/// One MCP server entry: config.json's `mcp_servers`, or a project's
+/// `.mcp.json` (Claude Code's `mcpServers` shape). A `command` is spawned over
+/// stdio; a `url` is spoken to over Streamable HTTP. `${VAR}` / `${VAR:-x}`
+/// in any string field are expanded from the environment at launch.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// "stdio" or "http" ("streamable-http"); inferred from command/url when empty.
+    #[serde(default, rename = "type", alias = "transport", skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Static HTTP headers (e.g. `Authorization: Bearer ${TOKEN}`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// A pre-registered OAuth client, for servers without dynamic registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+impl McpServerConfig {
+    /// One `mcp_servers` entry, or None if it's malformed — including one with
+    /// neither a `command` nor a `url` (a typo like `"cmd"` parses otherwise).
+    pub fn parse(val: &serde_json::Value) -> Option<McpServerConfig> {
+        serde_json::from_value::<McpServerConfig>(val.clone())
+            .ok()
+            .filter(|c| !c.command.is_empty() || !c.url.is_empty())
+    }
+}
+
+/// OAuth client settings for one HTTP MCP server (all optional).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    #[serde(default, alias = "clientId", skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+    #[serde(default, alias = "clientSecret", skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Fixed localhost port for the redirect (0 = any free port).
+    #[serde(default, alias = "callbackPort")]
+    pub callback_port: u16,
 }
 
 /// A subscription-login token set for one provider (see auth.rs). Persisted to
@@ -471,11 +510,11 @@ impl Config {
                     let mut broken = false;
                     if let Some(obj) = m.as_object() {
                         for (k, val) in obj {
-                            match serde_json::from_value::<McpServerConfig>(val.clone()) {
-                                Ok(c) => {
+                            match McpServerConfig::parse(val) {
+                                Some(c) => {
                                     cfg.mcp_servers.insert(k.clone(), c);
                                 }
-                                Err(_) => {
+                                None => {
                                     eprintln!("config: mcp_servers.{k} is malformed and was skipped");
                                     broken = true;
                                 }
@@ -809,11 +848,11 @@ mod tests {
         let m = &v["mcp_servers"];
         let mut broken = false;
         for (k, val) in m.as_object().unwrap() {
-            match serde_json::from_value::<McpServerConfig>(val.clone()) {
-                Ok(c) => {
+            match McpServerConfig::parse(val) {
+                Some(c) => {
                     cfg.mcp_servers.insert(k.clone(), c);
                 }
-                Err(_) => broken = true,
+                None => broken = true,
             }
         }
         if broken {

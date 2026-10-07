@@ -44,6 +44,12 @@ pub enum UiEvent {
     /// answer back over `reply` (None = user declined).
     Question { prompt: String, reply: Sender<Option<String>> },
     ModelList(Vec<String>),
+    /// The running MCP servers' prompts, as (`/mcp__server__prompt`, description)
+    /// slash-palette entries.
+    McpPrompts(Vec<(String, String)>),
+    /// An MCP prompt fetched for `/mcp__server__prompt args`: send `text` as
+    /// the user's turn (echoed as `shown`).
+    McpPromptReady { shown: String, text: String },
     /// `/rewind` choices, newest first: "N. prompt preview".
     TurnList(Vec<String>),
     /// After a rewind: the prompt that was undone, to put back in the composer.
@@ -106,6 +112,10 @@ pub enum WorkerCmd {
     Patch(ConfigPatch),
     ListModels,
     ListMcp,
+    /// `/mcp approve|deny|login|logout <server>`.
+    Mcp(String),
+    /// `/mcp__server__prompt args`: fetch the prompt for the UI to send.
+    McpPrompt { name: String, args: String },
     /// `/rewind`: list this session's prompts for the picker.
     ListTurns,
     /// Rewind to just before turn N (0-based, oldest first): undo picoder's
@@ -240,18 +250,22 @@ pub fn spawn(
             }
         }
         let system_len = system_prefix_len(&messages);
-        // Launch MCP servers before the loop (can take a moment per server).
-        let mcp = if cfg.mcp_servers.is_empty() {
+        // Launch MCP servers (config.json's and the project's .mcp.json) before
+        // the loop; this can take a moment per server.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let entries = crate::mcp::entries(&cfg.mcp_servers, &cwd);
+        let mcp = if entries.is_empty() {
             Mcp::disabled()
         } else {
-            let _ = ui.send(UiEvent::Notice(format!(
-                "starting {} MCP server(s)…",
-                cfg.mcp_servers.len()
-            )));
-            let mcp = Mcp::launch(&cfg.mcp_servers);
+            let _ = ui.send(UiEvent::Notice(format!("starting {} MCP server(s)…", entries.len())));
+            let mcp = Mcp::start(entries, crate::config::config_dir());
             for s in mcp.status() {
                 let msg = format!("mcp {}: {}", s.name, s.detail);
-                let _ = ui.send(if s.ok { UiEvent::Notice(msg) } else { UiEvent::Error(msg) });
+                let _ = ui.send(if s.ok || s.waiting { UiEvent::Notice(msg) } else { UiEvent::Error(msg) });
+            }
+            let palette = mcp.prompt_palette();
+            if !palette.is_empty() {
+                let _ = ui.send(UiEvent::McpPrompts(palette));
             }
             mcp
         };
@@ -399,20 +413,58 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::ListMcp => {
-                    if w.mcp.status().is_empty() {
+                    if w.mcp.is_empty() {
                         let _ = w.ui.send(UiEvent::Notice(
-                            "no MCP servers configured (add \"mcp_servers\" to config.json).".into(),
+                            "no MCP servers configured (add \"mcp_servers\" to config.json, or a project .mcp.json).".into(),
                         ));
                     } else {
-                        for s in w.mcp.status() {
-                            let tag = if s.ok { "ok" } else { "FAILED" };
-                            let _ = w.ui.send(UiEvent::Notice(format!("mcp {} [{tag}]: {}", s.name, s.detail)));
-                        }
-                        for t in w.mcp.tools() {
-                            let _ = w.ui.send(UiEvent::Notice(format!("  {}", t.full_name)));
+                        for line in w.mcp.describe() {
+                            let _ = w.ui.send(UiEvent::Notice(line));
                         }
                     }
                     let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::Mcp(args) => {
+                    let mut words = args.split_whitespace();
+                    let (sub, name) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                    let ui = w.ui.clone();
+                    let result = match (sub, name) {
+                        (_, "") => Err("usage: /mcp [approve|deny|login|logout] <server>".to_string()),
+                        ("approve", n) => w.mcp.decide(n, true),
+                        ("deny", n) => w.mcp.decide(n, false),
+                        ("login", n) => w.mcp.login(n, &|m| {
+                            let _ = ui.send(UiEvent::Notice(m));
+                        }),
+                        ("logout", n) => w.mcp.logout(n),
+                        (other, _) => Err(format!("unknown /mcp command {other:?}: approve, deny, login or logout")),
+                    };
+                    match result {
+                        Ok(m) => {
+                            let _ = w.ui.send(UiEvent::Notice(m));
+                        }
+                        Err(e) => {
+                            let _ = w.ui.send(UiEvent::Error(e));
+                        }
+                    }
+                    // Servers may have started or stopped: refresh what the model sees.
+                    w.tools = api::tools_spec_with(w.mcp.tools());
+                    let _ = w.ui.send(UiEvent::McpPrompts(w.mcp.prompt_palette()));
+                    let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::McpPrompt { name, args } => {
+                    w.cancel.store(false, Ordering::Relaxed);
+                    let cancel = w.cancel.clone();
+                    match w.mcp.get_prompt(&name, &args, &cancel) {
+                        Ok(text) => {
+                            let shown = format!("/{name}{}", if args.is_empty() { String::new() } else { format!(" {args}") });
+                            // The UI sends it on as an ordinary turn (which ends with its own TurnDone).
+                            let _ = w.ui.send(UiEvent::McpPromptReady { shown, text });
+                        }
+                        Err(e) => {
+                            let _ = w.ui.send(UiEvent::Error(e));
+                            let _ = w.ui.send(UiEvent::TurnDone);
+                        }
+                    }
                 }
                 WorkerCmd::Patch(p) => {
                     w.cfg.apply_patch(&p);
@@ -1659,15 +1711,16 @@ impl Worker {
             other if self.mcp.handles(other) => {
                 // MCP tools can have side effects; gate them like bash unless
                 // auto-approve is on. Plan mode can't tell read from write, so
-                // it blocks them all.
-                if self.perm.load(Ordering::Relaxed) == PERM_PLAN {
+                // it blocks them all — except the resource tools, which only read.
+                let read_only = self.mcp.is_read_only(other);
+                if self.perm.load(Ordering::Relaxed) == PERM_PLAN && !read_only {
                     let r = "[plan mode] Not executed. picoder is in read-only plan mode — \
                              MCP tools may have side effects."
                         .to_string();
                     self.result_event(&r);
                     return r;
                 }
-                if !pre_approved && !self.approve(&format!("call MCP tool {other}"), Some(other.to_string())) {
+                if !pre_approved && !read_only && !self.approve(&format!("call MCP tool {other}"), Some(other.to_string())) {
                     let r = "DENIED by user.".to_string();
                     self.result_event(&r);
                     return r;

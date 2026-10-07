@@ -44,8 +44,12 @@ dependencies.
   the path you approve is the path that's used.
 - **Sub-agents** — the `task` tool delegates a self-contained job to a fresh
   agent with its own context and the same tools; only its report comes back.
-- **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
-  at start; their tools show up as `mcp__<server>__<tool>` (`/mcp` lists them).
+- **MCP** — servers from `mcp_servers` in `config.json` and from a project
+  `.mcp.json` (Claude Code's format), over stdio or Streamable HTTP (with OAuth
+  sign-in: `/mcp login <server>`). Tools show up as `mcp__<server>__<tool>`,
+  resources through `list_mcp_resources` / `read_mcp_resource`, and prompts as
+  `/mcp__<server>__<prompt>` commands. A project's servers only start once you
+  `/mcp approve` them. `/mcp` shows each server's state, transport and auth.
 - **Images** — `@image.png` attaches as a base64 data URI and `view_image`
   loads one from disk, sent as OpenAI multimodal content parts.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
@@ -298,18 +302,38 @@ rate), so put the numbers in the account's currency yourself — DeepSeek
 publishes a CNY price list alongside its USD one. An unrecognized code prints as
 a `CODE 12.34` prefix rather than guessing a symbol.
 
-To expose [MCP](https://modelcontextprotocol.io) tools, add an `mcp_servers`
-block to `config.json`; each entry is launched over stdio at start and its
-tools appear as `mcp__<server>__<tool>`:
+To expose [MCP](https://modelcontextprotocol.io) servers, add an `mcp_servers`
+block to `config.json`. A `command` is launched over stdio; a `url` is spoken
+to over Streamable HTTP, with optional static `headers`. `${VAR}` and
+`${VAR:-default}` are expanded from the environment in every field:
 
 ```json
 "mcp_servers": {
   "filesystem": {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/pi"]
+  },
+  "tracker": {
+    "url": "https://mcp.example.com/mcp",
+    "headers": {"X-Team": "${TEAM_ID}"}
   }
 }
 ```
+
+An HTTP server that answers 401 waits for `/mcp login <server>`: picoder finds
+its authorization server (protected-resource and authorization-server
+metadata), registers itself as a client when the server allows dynamic
+registration, and signs you in through the browser with PKCE. The token is kept
+in `~/.config/picoder/mcp-oauth.json` (mode `0600`) and refreshed when it
+expires; `/mcp logout <server>` forgets it. For a server without dynamic
+registration, give its client id: `"oauth": {"client_id": "…", "callback_port": 8976}`.
+Set `PICODER_BROWSER` to the command that opens the sign-in URL on a headless
+box.
+
+A project can also ship its servers in `.mcp.json` (`{"mcpServers": {…}}`, the
+working directory or the repo root). Those can run any command, so each one
+waits for `/mcp approve <name>` (or `/mcp deny <name>`); the decision is
+remembered for that exact entry, so a changed entry asks again.
 
 ## Commands
 
@@ -337,7 +361,8 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `/export [--all] [file]` | save the conversation as Markdown (`--all` keeps system/context messages) |
 | `/sessions [delete <id\|name>]` | list or delete this directory's saved sessions |
 | `/auto` | toggle bypass-permissions |
-| `/mcp` | list configured MCP servers and their tools |
+| `/mcp` | list MCP servers: state, transport, auth, tools and prompts |
+| `/mcp approve\|deny\|login\|logout <server>` | allow a project server, sign in to an HTTP one, … |
 | `/memory` | show persistent memory |
 | `/theme [n]` | open the theme picker, or switch directly |
 | `/init` | summarize this project into `PICODER.md` |

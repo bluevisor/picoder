@@ -202,6 +202,8 @@ pub struct App {
     /// The same, as palette rows (name/description leaked to 'static — they
     /// live as long as the process, and reloads are rare and tiny).
     custom_palette: Vec<(&'static str, &'static str)>,
+    /// MCP prompts (`/mcp__server__prompt`) as palette rows, from the worker.
+    mcp_palette: Vec<(&'static str, &'static str)>,
     /// Cached `(branch, dirty)` for the title's git indicator. `None` outside a
     /// repo. Refreshed on a throttle (see `git_checked_at`) since the agent's
     /// edits/auto-commits change the dirty state mid-session.
@@ -322,6 +324,7 @@ impl App {
             session_rev: std::env::current_dir().ok().and_then(|d| crate::tools::git_rev(&d)),
             custom_cmds: Vec::new(),
             custom_palette: Vec::new(),
+            mcp_palette: Vec::new(),
         };
         app.rebuild_cmd_uses();
         app.reload_custom_commands();
@@ -519,6 +522,15 @@ impl App {
                 self.q_reply = Some(reply);
                 self.mode = Mode::Question { prompt };
             }
+            UiEvent::McpPrompts(rows) => {
+                self.mcp_palette = rows
+                    .into_iter()
+                    .map(|(c, d)| -> (&'static str, &'static str) {
+                        (Box::leak(c.into_boxed_str()), Box::leak(d.into_boxed_str()))
+                    })
+                    .collect();
+            }
+            UiEvent::McpPromptReady { shown, text } => self.send_prompt_as(shown, text, h),
             UiEvent::ModelList(ids) => {
                 let current = ids.iter().position(|m| *m == self.model_info);
                 self.picker = Some(Picker {
@@ -872,6 +884,7 @@ impl App {
             let mut scored: Vec<_> = SLASH_COMMANDS
                 .iter()
                 .chain(self.custom_palette.iter())
+                .chain(self.mcp_palette.iter())
                 .filter(|(cmd, _)| cmd.starts_with(&self.input))
                 .map(|&(cmd, desc)| {
                     let count = self.cmd_uses.get(cmd).copied().unwrap_or(0);
@@ -1928,7 +1941,10 @@ impl App {
                 );
             }
             "mcp" => {
-                let _ = h.cmd_tx.send(WorkerCmd::ListMcp);
+                let _ = h.cmd_tx.send(match _arg {
+                    None => WorkerCmd::ListMcp,
+                    Some(a) => WorkerCmd::Mcp(a.to_string()),
+                });
             }
             "memory" => {
                 match crate::tools::load_memory() {
@@ -1976,6 +1992,14 @@ impl App {
                     let shown = format!("/{}{}", c.name, _arg.map(|a| format!(" {}", a.trim())).unwrap_or_default());
                     self.push(Kind::Notice, format!("{shown} → {}", c.source.display()));
                     self.send_prompt_as(shown, body, h);
+                } else if cmd.starts_with("mcp__") {
+                    // An MCP prompt: the worker fetches it, then hands it back
+                    // (McpPromptReady) to send as an ordinary turn.
+                    self.set_busy();
+                    let _ = h.cmd_tx.send(WorkerCmd::McpPrompt {
+                        name: cmd.to_string(),
+                        args: _arg.unwrap_or("").to_string(),
+                    });
                 } else {
                     self.push(Kind::ErrorK, format!("unknown command: /{cmd} (try /help)"));
                 }

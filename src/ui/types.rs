@@ -103,7 +103,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/effort", "reasoning effort: auto, off, low, medium, high"),
     ("/reset", "clear conversation context"),
     ("/auto", "toggle bypass-permissions"),
-    ("/mcp", "list MCP servers and their tools"),
+    ("/mcp", "MCP servers: state, tools, prompts · /mcp approve|deny|login|logout <server>"),
     ("/memory", "show persistent memory"),
     ("/theme", "open the theme picker"),
     ("/init", "summarize this project into PICODER.md"),
