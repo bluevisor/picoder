@@ -108,6 +108,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/init", "summarize this project into PICODER.md"),
     ("/diff", "show what changed since this session started"),
     ("/undo", "revert the last picoder checkpoint commit"),
+    ("/rewind", "pick an earlier prompt: undo picoder's edits since then and resume from there"),
     ("/review", "review the working tree / branch changes"),
     ("/status", "model, cwd, git, permissions, context, cost"),
     ("/cost", "session token usage and cost"),
@@ -193,6 +194,8 @@ pub enum Mode {
 pub enum PickAction {
     /// Switch model to the chosen id.
     #[allow(dead_code)] Model,
+    /// Rewind to before the chosen prompt ("N. preview").
+    Rewind,
 }
 
 /// State for `Mode::Select`: a filterable, scrollable list of choices.

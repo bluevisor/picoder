@@ -538,6 +538,29 @@ impl App {
                 }
                 self.balance = Some(b);
             }
+            UiEvent::TurnList(items) => {
+                if items.is_empty() {
+                    self.picker = None;
+                    self.mode = Mode::Idle;
+                } else {
+                    self.picker = Some(Picker {
+                        title: "Rewind to before which prompt? (edits since then are undone)".into(),
+                        items,
+                        current: None,
+                        filter: String::new(),
+                        cursor: 0,
+                        scroll: 0,
+                        action: PickAction::Rewind,
+                    });
+                    self.mode = Mode::Select;
+                }
+            }
+            UiEvent::Rewound(prompt) => {
+                // Hand the prompt back so it can be edited and re-sent.
+                self.input = prompt;
+                self.cursor = self.char_len();
+                self.git_checked_at = None;
+            }
             UiEvent::Notice(msg) => {
                 self.push(Kind::Notice, msg);
             }
@@ -1102,6 +1125,12 @@ impl App {
                         PickAction::Model => {
                             let _ = h.cmd_tx.send(WorkerCmd::SetModel(item));
                         }
+                        PickAction::Rewind => {
+                            let n = item.split_once('.').and_then(|(n, _)| n.parse::<usize>().ok());
+                            if let Some(n) = n.filter(|&n| n > 0) {
+                                let _ = h.cmd_tx.send(WorkerCmd::Rewind(n - 1));
+                            }
+                        }
                     }
                 }
                 self.mode = Mode::Idle;
@@ -1603,6 +1632,10 @@ impl App {
             }
             "diff" => self.show_diff(),
             "undo" => self.undo_checkpoint(h),
+            "rewind" => {
+                let _ = h.cmd_tx.send(WorkerCmd::ListTurns);
+                self.mode = Mode::Select;
+            }
             "cost" => {
                 for line in self.cost_lines() {
                     self.push(Kind::Notice, line);
@@ -3133,6 +3166,33 @@ mod tests {
         // Second press inside the double-press window: quit.
         app.on_key(ctrl_c, &h);
         assert!(app.should_quit());
+    }
+
+    /// `/rewind` round trip: the worker's list opens a picker, choosing an
+    /// entry asks for that turn (0-based), and the undone prompt comes back
+    /// into the composer for editing.
+    #[test]
+    fn rewind_picker_sends_the_chosen_turn_and_refills_the_prompt() {
+        let mut app = App::new(test_ui_config(), Vec::new());
+        let (h, cmd_rx) = test_handles();
+        app.handle_event(
+            UiEvent::TurnList(vec!["3. third".into(), "2. second".into(), "1. first".into()]),
+            &h,
+        );
+        assert!(matches!(app.mode, Mode::Select), "TurnList opens the picker");
+        app.on_key(key(KeyCode::Down), &h);
+        app.on_key(key(KeyCode::Enter), &h);
+        let sent: Vec<WorkerCmd> = cmd_rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|c| matches!(c, WorkerCmd::Rewind(1))),
+            "\"2. second\" is turn index 1"
+        );
+        app.handle_event(UiEvent::Rewound("second".into()), &h);
+        assert_eq!(app.input, "second");
+        assert_eq!(app.cursor, 6);
+        // An empty list (nothing to rewind) leaves no picker behind.
+        app.handle_event(UiEvent::TurnList(Vec::new()), &h);
+        assert!(app.picker.is_none() && !matches!(app.mode, Mode::Select));
     }
 
     /// Tab completes an `@path` mid-sentence, at the cursor, keeping the text

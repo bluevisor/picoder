@@ -961,6 +961,57 @@ pub fn git_run(dir: &Path, args: &[&str], timeout_secs: u64) -> std::result::Res
     }
 }
 
+/// Undo picoder's own checkpoint commits made after `base` (and `/undo`'s
+/// reverts of them), newest first, as one new commit. Anything else committed
+/// in between is left alone. Returns how many commits were reverted (0 when
+/// there was nothing to undo). Refuses with staged changes, since the commit
+/// would sweep them in; on a conflict everything is put back as it was.
+pub fn revert_checkpoints_since(dir: &Path, base: &str) -> std::result::Result<usize, String> {
+    let log = git_run(dir, &["log", "--format=%H %s", &format!("{base}..HEAD")], 10)?;
+    let shas: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, subject)| subject.starts_with("picoder:") || subject.starts_with("Revert \"picoder:"))
+        .map(|(sha, _)| sha)
+        .collect();
+    if shas.is_empty() {
+        return Ok(0);
+    }
+    let staged_clean = |d: &Path| {
+        git_output(d, &["diff", "--cached", "--quiet"], 10).map(|o| o.status.success()).unwrap_or(false)
+    };
+    if !staged_clean(dir) {
+        return Err("you have staged changes; commit or unstage them first".into());
+    }
+    let mut args = vec!["revert", "--no-commit"];
+    args.extend(shas.iter().copied());
+    if let Err(e) = git_run(dir, &args, 60) {
+        let _ = git_run(dir, &["revert", "--abort"], 10);
+        return Err(e);
+    }
+    if staged_clean(dir) {
+        // The checkpoints cancel out (e.g. already undone): nothing to commit.
+        let _ = git_run(dir, &["revert", "--quit"], 10);
+        return Ok(0);
+    }
+    let msg = format!("picoder: rewind (reverted {} checkpoint(s))", shas.len());
+    let commit = |ident: bool| {
+        let mut a: Vec<&str> = Vec::new();
+        if ident {
+            a.extend(["-c", "user.name=picoder", "-c", "user.email=picoder@localhost"]);
+        }
+        a.extend(["commit", "--no-verify", "-m", &msg]);
+        git_run(dir, &a, 30)
+    };
+    match commit(false).or_else(|_| commit(true)) {
+        Ok(_) => Ok(shas.len()),
+        Err(e) => {
+            let _ = git_run(dir, &["revert", "--abort"], 10);
+            Err(e)
+        }
+    }
+}
+
 pub fn git_head(dir: &Path) -> Option<(String, bool)> {
     if !in_git_repo(dir) {
         return None;
@@ -1731,6 +1782,49 @@ mod tests {
         // Bump again.
         let new2 = bump_cargo_version(&dir).expect("second bump");
         assert_eq!(new2, "3.14.161");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rewind_reverts_only_picoders_checkpoints() {
+        let dir = std::env::temp_dir().join(format!("picoder-rewind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let o = Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let commit = |msg: &str| git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", msg]);
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "base\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "base\n").unwrap();
+        git(&["add", "."]);
+        commit("init");
+        let base = git(&["rev-parse", "HEAD"]);
+        // Two picoder checkpoints with the user's own commit in between.
+        std::fs::write(dir.join("a.txt"), "picoder 1\n").unwrap();
+        commit("picoder: edit a.txt");
+        std::fs::write(dir.join("b.txt"), "mine\n").unwrap();
+        commit("user: my change");
+        std::fs::write(dir.join("a.txt"), "picoder 2\n").unwrap();
+        commit("picoder: edit a.txt");
+
+        assert_eq!(revert_checkpoints_since(&dir, &base), Ok(2));
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+        assert_eq!(read("a.txt"), "base\n", "picoder's edits are undone");
+        assert_eq!(read("b.txt"), "mine\n", "the user's commit is kept");
+        assert!(git(&["log", "-1", "--format=%s"]).starts_with("picoder: rewind"));
+        // Rewinding again to the same point has nothing left to undo.
+        assert_eq!(revert_checkpoints_since(&dir, &git(&["rev-parse", "HEAD"])), Ok(0));
+
+        // Staged work of the user's own blocks a rewind instead of being swept in.
+        std::fs::write(dir.join("a.txt"), "picoder 3\n").unwrap();
+        commit("picoder: edit a.txt");
+        std::fs::write(dir.join("b.txt"), "staged\n").unwrap();
+        git(&["add", "b.txt"]);
+        assert!(revert_checkpoints_since(&dir, &base).is_err());
+        assert_eq!(read("a.txt"), "picoder 3\n", "nothing changed on refusal");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -44,6 +44,10 @@ pub enum UiEvent {
     /// answer back over `reply` (None = user declined).
     Question { prompt: String, reply: Sender<Option<String>> },
     ModelList(Vec<String>),
+    /// `/rewind` choices, newest first: "N. prompt preview".
+    TurnList(Vec<String>),
+    /// After a rewind: the prompt that was undone, to put back in the composer.
+    Rewound(String),
     ModelChanged(String),
     Usage { prompt: u32, completion: u32 },
     /// Tokens spent by a background call (compaction summary, follow-up
@@ -92,6 +96,11 @@ pub enum WorkerCmd {
     Patch(ConfigPatch),
     ListModels,
     ListMcp,
+    /// `/rewind`: list this session's prompts for the picker.
+    ListTurns,
+    /// Rewind to just before turn N (0-based, oldest first): undo picoder's
+    /// checkpoints since then and drop that prompt and everything after it.
+    Rewind(usize),
     /// `/new`: delete the session file and reset to a clean slate.
     New,
     Quit,
@@ -153,6 +162,17 @@ struct Worker {
     /// model it was fetched for (filled by a background thread). Preferred
     /// over the built-in table when sizing auto-compaction.
     ctx_detected: Arc<Mutex<Option<(String, u32)>>>,
+    /// Where each prompt of this run starts, for `/rewind`.
+    turns: Vec<TurnMark>,
+}
+
+/// A user prompt `/rewind` can go back to: its index in `messages` and the
+/// git HEAD when it was sent (None without a checkpointed repo).
+#[derive(Clone)]
+struct TurnMark {
+    at: usize,
+    head: Option<String>,
+    prompt: String,
 }
 
 pub fn spawn(
@@ -238,6 +258,7 @@ pub fn spawn(
             hooks,
             recent_calls: Vec::new(),
             ctx_detected: Arc::new(Mutex::new(None)),
+            turns: Vec::new(),
         };
         w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
         w.refresh_balance(); // initial account balance for the status line
@@ -248,6 +269,7 @@ pub fn spawn(
                 WorkerCmd::Reset => {
                     let old_len = w.messages.len();
                     w.messages.truncate(w.system_len);
+                    w.turns.clear();
                     w.last_prompt = 0;
                     if w.messages.len() != old_len {
                         w.save_session();
@@ -261,6 +283,7 @@ pub fn spawn(
                         let _ = std::fs::remove_file(path);
                     }
                     w.messages.truncate(w.system_len);
+                    w.turns.clear();
                     w.last_prompt = 0;
                     let _ = w.ui.send(UiEvent::Notice("new session — fresh start.".into()));
                     let _ = w.ui.send(UiEvent::Context(0));
@@ -313,6 +336,28 @@ pub fn spawn(
                             let _ = w.ui.send(UiEvent::Error(format!("could not fetch models: {e}")));
                         }
                     }
+                    let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::ListTurns => {
+                    let items: Vec<String> = w
+                        .turns
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .map(|(i, t)| {
+                            let line: String = t.prompt.chars().take(80).collect();
+                            let more = if t.prompt.chars().count() > 80 { "…" } else { "" };
+                            format!("{}. {line}{more}", i + 1)
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        let _ = w.ui.send(UiEvent::Notice("nothing to rewind in this session yet.".into()));
+                    }
+                    let _ = w.ui.send(UiEvent::TurnList(items));
+                    let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::Rewind(n) => {
+                    w.rewind(n);
                     let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::ListMcp => {
@@ -674,6 +719,13 @@ impl Worker {
                     tool_calls: None,
                     tool_call_id: None,
                 });
+                // Prompts inside the summary can't be rewound to any more; the
+                // kept tail moves up behind the summary.
+                let kept_from = new.len();
+                self.turns.retain(|t| t.at >= tail_start);
+                for t in &mut self.turns {
+                    t.at = t.at - tail_start + kept_from;
+                }
                 new.extend_from_slice(&self.messages[tail_start..]);
                 self.messages = new;
                 // Rough size estimate so the UI's ctx bar drops right away.
@@ -702,8 +754,58 @@ impl Worker {
         // so they can't surface mid-way through an unrelated turn.
         self.pending_images.clear();
         self.recent_calls.clear();
+        if !self.quiet {
+            // The typed line only: attachments and hook context follow a blank line.
+            let prompt = text.split("\n\n").next().unwrap_or_default().to_string();
+            self.turns.push(TurnMark { at: self.messages.len(), head: self.checkpoint_head(), prompt });
+        }
         self.messages.push(Message::user_with_images(text, images));
         self.run_loop();
+    }
+
+    /// HEAD of the working-directory repo when edits are checkpointed there.
+    fn checkpoint_head(&self) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        if !self.cfg.auto_commit || !tools::in_git_repo(&cwd) {
+            return None;
+        }
+        tools::git_run(&cwd, &["rev-parse", "HEAD"], 10).ok().map(|s| s.trim().to_string())
+    }
+
+    /// Go back to just before turn `n`: undo picoder's checkpoints since then
+    /// (files first: if git refuses, the conversation is left alone too), then
+    /// drop that prompt and everything after it and hand it back to the composer.
+    fn rewind(&mut self, n: usize) {
+        let Some(mark) = self.turns.get(n).cloned() else {
+            let _ = self.ui.send(UiEvent::Error("that prompt is no longer in the conversation.".into()));
+            return;
+        };
+        let files = match &mark.head {
+            Some(head) => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                match tools::revert_checkpoints_since(&cwd, head) {
+                    Ok(0) => "no file changes to undo".to_string(),
+                    Ok(k) => format!("reverted {k} checkpoint commit(s)"),
+                    Err(e) => {
+                        let _ = self.ui.send(UiEvent::Error(format!("rewind stopped, nothing changed: {e}")));
+                        return;
+                    }
+                }
+            }
+            None => "files untouched (no git checkpoints for that prompt)".to_string(),
+        };
+        self.messages.truncate(mark.at);
+        self.turns.truncate(n);
+        let est = estimate_tokens(&self.messages);
+        self.last_prompt = est;
+        self.save_session();
+        let _ = self.ui.send(UiEvent::Context(est));
+        let _ = self.ui.send(UiEvent::Notice(format!(
+            "rewound to before prompt {}: {files}; conversation trimmed to {} messages.",
+            n + 1,
+            self.messages.len()
+        )));
+        let _ = self.ui.send(UiEvent::Rewound(mark.prompt));
     }
 
     /// Stop hooks run after the model's final reply. Exit 2 means "not done":

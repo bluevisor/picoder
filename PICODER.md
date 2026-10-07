@@ -109,7 +109,7 @@ tool events, diffs, and approval requests. This keeps the UI responsive and lets
   type to filter (handy for OpenRouter's hundreds), ↑/↓ + Enter to select;
   `/model <id|number>` still sets directly.
 - Slash commands: `/model /auto /reset /compact [focus] /config /mcp /memory /theme /init /new
-  /diff /undo /review /status /cost /permissions /hooks /commands /clear /help /exit`, plus any
+  /diff /undo /rewind /review /status /cost /permissions /hooks /commands /clear /help /exit`, plus any
   custom command from `.picoder/commands/<name>.md` (`$ARGUMENTS`). `!cmd` runs a shell
   command directly and records the output in the conversation.
 - Permission rules (`policy.rs`): `permissions.allow` / `permissions.deny` arrays merged from

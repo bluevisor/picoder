@@ -70,6 +70,11 @@ dependencies.
 - **`/diff`, `/undo`, `/review`** — see everything changed since the session
   started, revert the last picoder checkpoint commit, or ask for a code review
   of the working tree / branch. `/status` and `/cost` report where you stand.
+- **`/rewind`** — pick any earlier prompt from this run: picoder's checkpoint
+  commits since then are reverted (as one new commit; your own commits and
+  unstaged work are left alone), the conversation is cut back to before that
+  prompt, and the prompt returns to the composer to edit and resend. Edits made
+  through `bash` aren't checkpointed, so they aren't undone.
 - **Thrashing guard** — the same tool call with identical arguments three times
   in a row is short-circuited with a nudge to change approach.
 - **Scripting** — `git diff | picoder "review this"` attaches stdin as context
@@ -244,6 +249,7 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `/compact [focus]` | summarize older turns to free context (auto at 80%) |
 | `/diff` | show everything changed since the session started |
 | `/undo` | revert the last picoder checkpoint commit |
+| `/rewind` | pick an earlier prompt: undo picoder's edits since then and resume from there |
 | `/review [base]` | review uncommitted + branch changes vs `base` |
 | `/status` · `/cost` | model, cwd, git, rules, context · token usage and cost |
 | `/permissions [allow\|deny\|remove <rule>]` | list or edit permission rules |
