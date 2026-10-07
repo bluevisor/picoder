@@ -74,11 +74,14 @@ dependencies.
   same under `~/.config/picoder/`) and `/name args` runs it with `$ARGUMENTS`
   substituted. `.claude/commands/*.md` is read too.
 - **Skills the model uses itself** — any `<name>/SKILL.md` in `.picoder/skills`,
-  `.claude/skills` or `.agents/skills` (working directory up to the repo root),
-  `~/.config/picoder/skills`, `~/.agents/skills` or `~/.claude/skills` is listed
-  to the model by name and description only; when a task matches, it calls the
-  `skill` tool to load the full instructions and the paths of the skill's other
-  files. Project skills win over user ones; `/name` still runs a skill by hand.
+  `.claude/skills` or `.agents/skills` (working directory up to the repo root)
+  or `~/.config/picoder/skills` is listed to the model by name and description
+  only; when a task matches, it calls the `skill` tool to load the full
+  instructions and the paths of the skill's other files. Other agents'
+  user-wide folders (`~/.agents/skills`, `~/.claude/skills`) join the list only
+  with `"shared_skills": true`, since their names and descriptions would go out
+  with every request. Project skills win over user ones; `/name` still runs a
+  skill by hand.
 - **`!cmd`** — run a shell command straight from the composer; the output shows
   in the transcript and is added to the model's context.
 - **`/diff`, `/undo`, `/review`** — see everything changed since the session

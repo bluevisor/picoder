@@ -108,10 +108,23 @@ fn skills_in(roots: &[PathBuf]) -> Vec<Skill> {
     out
 }
 
-/// The skills available in the current working directory.
+/// Whether the model may see skills from other agents' user-wide folders
+/// (`~/.agents/skills`, `~/.claude/skills`). Off unless `"shared_skills": true`:
+/// those folders often hold work skills meant for one agent and one provider,
+/// and every listed name and description goes out with each request.
+fn shared_skills() -> bool {
+    crate::config::settings_layers()
+        .iter()
+        .rev()
+        .find_map(|(_, v)| v.get("shared_skills").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// The skills the model can see in the current working directory.
 pub fn discover_skills() -> Vec<Skill> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let (mut roots, user) = skill_roots(&cwd, &crate::config::config_dir(), home().as_deref());
+    let home = home().filter(|_| shared_skills());
+    let (mut roots, user) = skill_roots(&cwd, &crate::config::config_dir(), home.as_deref());
     roots.extend(user);
     skills_in(&roots)
 }

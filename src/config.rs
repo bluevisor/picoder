@@ -465,7 +465,7 @@ impl Config {
                 if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
                     cfg.temperature = Some(t);
                 }
-                for key in ["permissions", "hooks", "auto_bump_version"] {
+                for key in ["permissions", "hooks", "auto_bump_version", "shared_skills"] {
                     if let Some(x) = v.get(key) {
                         cfg.extra.insert(key.to_string(), x.clone());
                     }
