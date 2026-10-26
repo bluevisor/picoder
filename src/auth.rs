@@ -34,6 +34,9 @@ pub struct OAuthProvider {
     pub redirect_path: String,
     /// Extra query params appended to the authorize URL.
     pub extra: Vec<(String, String)>,
+    /// Extra form fields for the token requests (code exchange and refresh),
+    /// e.g. MCP's `resource` indicator (RFC 8707).
+    pub token_extra: Vec<(String, String)>,
 }
 
 /// Built-in defaults, overridable via `PICODER_OAUTH_<PROVIDER>_<FIELD>` env vars
@@ -53,6 +56,7 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             redirect_port: 54545,
             redirect_path: "/callback".into(),
             extra: vec![],
+            token_extra: vec![],
         },
         "openai" => OAuthProvider {
             key: "openai".into(),
@@ -69,6 +73,7 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
                 ("prompt".into(), "login".into()),
                 ("id_token_add_organizations".into(), "true".into()),
             ],
+            token_extra: vec![],
         },
         "google" => OAuthProvider {
             key: "google".into(),
@@ -90,6 +95,7 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
                 ("access_type".into(), "offline".into()),
                 ("prompt".into(), "consent".into()),
             ],
+            token_extra: vec![],
         },
         _ => return None,
     };
@@ -130,6 +136,23 @@ pub struct Login {
 /// Bind the localhost listener and build the authorize URL. Fails early if the
 /// redirect port is already in use.
 pub fn start(p: OAuthProvider) -> Result<Login> {
+    let (listener, redirect_uri) = bind_redirect(p.redirect_port, &p.redirect_path)?;
+    start_on(p, listener, redirect_uri)
+}
+
+/// Bind the redirect listener on `port` (0 = any free port) and return it with
+/// the redirect URI for the port actually bound. Split from `start_on` so a
+/// client that registers itself dynamically (MCP) can name that URI first.
+pub fn bind_redirect(port: u16, path: &str) -> Result<(TcpListener, String)> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+        anyhow!("cannot bind localhost:{port} for the OAuth redirect ({e}). Close whatever is using it and retry.")
+    })?;
+    let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    Ok((listener, format!("http://localhost:{bound}{path}")))
+}
+
+/// Build the authorize URL for a listener already bound by `bind_redirect`.
+pub fn start_on(p: OAuthProvider, listener: TcpListener, redirect_uri: String) -> Result<Login> {
     if p.client_id.is_empty() {
         let up = p.key.to_uppercase();
         bail!(
@@ -138,22 +161,23 @@ pub fn start(p: OAuthProvider) -> Result<Login> {
             p.label
         );
     }
-    let redirect_uri = format!("http://localhost:{}{}", p.redirect_port, p.redirect_path);
-    let listener = TcpListener::bind(("127.0.0.1", p.redirect_port)).map_err(|e| {
-        anyhow!("cannot bind localhost:{} for the OAuth redirect ({e}). Close whatever is using it and retry.", p.redirect_port)
-    })?;
     let verifier = rand_b64url(32);
     let challenge = b64url(&sha256(verifier.as_bytes()));
     let state = rand_b64url(16);
     let mut url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        "{}{}response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
         p.auth_url,
+        if p.auth_url.contains('?') { '&' } else { '?' },
         pct(&p.client_id),
         pct(&redirect_uri),
-        pct(&p.scope),
         pct(&state),
         pct(&challenge),
     );
+    // An empty `scope=` is an invalid_scope error on strict servers: leave it out.
+    if !p.scope.is_empty() {
+        url.push_str("&scope=");
+        url.push_str(&pct(&p.scope));
+    }
     for (k, v) in &p.extra {
         url.push('&');
         url.push_str(&pct(k));
@@ -185,6 +209,7 @@ fn exchange_code(p: &OAuthProvider, code: &str, verifier: &str, redirect_uri: &s
     if !p.client_secret.is_empty() {
         form.push(("client_secret", &p.client_secret));
     }
+    form.extend(p.token_extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     post_token(&p.token_url, &form)
 }
 
@@ -202,6 +227,7 @@ pub fn refresh(p: &OAuthProvider, token: &OAuthToken) -> Result<OAuthToken> {
     if !p.client_secret.is_empty() {
         form.push(("client_secret", &p.client_secret));
     }
+    form.extend(p.token_extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     let mut fresh = post_token(&p.token_url, &form)?;
     if fresh.refresh_token.is_empty() {
         fresh.refresh_token = token.refresh_token.clone();
@@ -338,6 +364,21 @@ fn write_http(stream: &mut std::net::TcpStream, body: &str) -> std::io::Result<(
 /// Open `url` in the system browser (best-effort; failure is non-fatal since the
 /// URL is also printed to the transcript).
 fn open_browser(url: &str) {
+    // An override for headless boxes and tests: the command gets the URL as
+    // its last argument (e.g. PICODER_BROWSER="curl -sL -o /dev/null").
+    if let Ok(cmd) = std::env::var("PICODER_BROWSER") {
+        if !cmd.trim().is_empty() {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{cmd} \"$1\""))
+                .arg("sh")
+                .arg(url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            return;
+        }
+    }
     #[cfg(target_os = "macos")]
     let prog = "open";
     #[cfg(target_os = "windows")]
@@ -439,7 +480,7 @@ fn b64url_decode(s: &str) -> Option<Vec<u8>> {
 
 /// SHA-256 (FIPS 180-4). Small and dependency-free; used for the PKCE S256
 /// challenge.
-fn sha256(msg: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(msg: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -499,7 +540,7 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
 }
 
 /// Percent-encode for query strings / form bodies (RFC 3986 unreserved set).
-fn pct(s: &str) -> String {
+pub(crate) fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

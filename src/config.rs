@@ -8,14 +8,53 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// One MCP server entry from config.json (`mcp_servers`). Spawned over stdio.
+/// One MCP server entry: config.json's `mcp_servers`, or a project's
+/// `.mcp.json` (Claude Code's `mcpServers` shape). A `command` is spawned over
+/// stdio; a `url` is spoken to over Streamable HTTP. `${VAR}` / `${VAR:-x}`
+/// in any string field are expanded from the environment at launch.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// "stdio" or "http" ("streamable-http"); inferred from command/url when empty.
+    #[serde(default, rename = "type", alias = "transport", skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Static HTTP headers (e.g. `Authorization: Bearer ${TOKEN}`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// A pre-registered OAuth client, for servers without dynamic registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+impl McpServerConfig {
+    /// One `mcp_servers` entry, or None if it's malformed — including one with
+    /// neither a `command` nor a `url` (a typo like `"cmd"` parses otherwise).
+    pub fn parse(val: &serde_json::Value) -> Option<McpServerConfig> {
+        serde_json::from_value::<McpServerConfig>(val.clone())
+            .ok()
+            .filter(|c| !c.command.is_empty() || !c.url.is_empty())
+    }
+}
+
+/// OAuth client settings for one HTTP MCP server (all optional).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    #[serde(default, alias = "clientId", skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+    #[serde(default, alias = "clientSecret", skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Fixed localhost port for the redirect (0 = any free port).
+    #[serde(default, alias = "callbackPort")]
+    pub callback_port: u16,
 }
 
 /// A subscription-login token set for one provider (see auth.rs). Persisted to
@@ -98,11 +137,6 @@ pub struct Config {
     /// every change is a restorable checkpoint. On by default; no-op outside a repo.
     #[serde(default = "default_true")]
     pub auto_commit: bool,
-    /// Ask the model to think before answering, via the DeepSeek-style
-    /// `"thinking": {"type": "enabled"}` request field. Off by default;
-    /// providers that don't know the field may reject requests — turn it off.
-    #[serde(default)]
-    pub thinking: bool,
     /// Default permission mode for new sessions: "ask", "bypass", or "plan".
     #[serde(default = "default_permission")]
     pub permission: String,
@@ -113,6 +147,22 @@ pub struct Config {
     /// recommended sampling applies (see `temperature()`).
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// How hard the model should reason: "auto" (send nothing; the model's own
+    /// default), "off", "low", "medium" or "high". Mapped per provider in
+    /// `api::reasoning_fields` / the native adapters. Replaces the old
+    /// DeepSeek-only `thinking` bool, which still loads (true → "medium").
+    #[serde(default = "default_reasoning")]
+    pub reasoning: String,
+    /// Wire protocol: "chat" (OpenAI chat/completions), "messages" (Anthropic)
+    /// or "responses" (OpenAI Responses). Unset, the provider decides (see
+    /// `api_kind`).
+    #[serde(default)]
+    pub api: Option<String>,
+    /// Price per 1M cached (cache-hit) input tokens. Unset: DeepSeek's cache-hit
+    /// price with the DeepSeek price list, else a tenth of `price_in` (see
+    /// `price_cached`).
+    #[serde(default)]
+    pub price_cached_in: Option<f64>,
     /// True when the current provider's key came from the environment; we never
     /// persist it then.
     #[serde(skip)]
@@ -142,7 +192,7 @@ fn default_max_tool_calls() -> u32 {
 pub const PROVIDERS: &[(&str, &str, &str)] = &[
     ("deepseek", "https://api.deepseek.com", "deepseek-v4-flash"),
     ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"),
+    ("anthropic", "https://api.anthropic.com/v1", "claude-opus-5-5"),
     ("groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     ("openrouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
     ("google", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
@@ -172,7 +222,8 @@ pub enum ConfigPatch {
     Provider { provider: String, base_url: String, model: String },
     BaseUrl(String),
     ApiKey(String),
-    Thinking(bool),
+    /// `/effort` or the /config row: one of `REASONING_LEVELS`.
+    Reasoning(String),
     Permission(String),
     AutoCommit(bool),
     ContextWindow(u32),
@@ -211,6 +262,9 @@ pub fn known_context_window(model: &str) -> u32 {
         1_000_000 // GLM-4-Plus advertises 1M
     } else if m.contains("glm") {
         128_000 // GLM-4-Flash / GLM-4-Air / etc.
+    } else if m.contains("claude") {
+        // Haiku 4.5 is 200k; the current Opus/Sonnet/Fable models are 1M.
+        if m.contains("haiku") { 200_000 } else { 1_000_000 }
     } else {
         // Unknown model: assume the conservative window rather than the 1M
         // default, or auto-compaction would wait until ~800k tokens and the
@@ -224,6 +278,40 @@ fn default_price_in() -> f64 {
 fn default_price_out() -> f64 {
     0.28
 }
+/// DeepSeek V4 Flash's cache-hit input price (USD per 1M), next to the default
+/// 0.14 miss / 0.28 output list.
+const DEEPSEEK_CACHE_HIT_PRICE: f64 = 0.0028;
+
+/// The reasoning settings, in `/config` cycling order.
+pub const REASONING_LEVELS: [&str; 5] = ["auto", "off", "low", "medium", "high"];
+
+fn default_reasoning() -> String {
+    "auto".to_string()
+}
+
+/// A reasoning setting from config or `/effort`: one of `REASONING_LEVELS`
+/// (with "none"/"false" read as off and "on"/"true" as medium), else auto.
+pub fn normalize_reasoning(r: &str) -> String {
+    let r = r.trim().to_ascii_lowercase();
+    match r.as_str() {
+        "none" | "false" | "disabled" => "off".into(),
+        "on" | "true" | "enabled" => "medium".into(),
+        _ if REASONING_LEVELS.contains(&r.as_str()) => r,
+        _ => default_reasoning(),
+    }
+}
+
+/// The wire protocol a request goes out on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiKind {
+    /// OpenAI chat/completions — every OpenAI-compatible server.
+    Chat,
+    /// Anthropic Messages.
+    Messages,
+    /// OpenAI Responses.
+    Responses,
+}
+
 /// The built-in prices are DeepSeek's USD list, so the default unit is USD.
 fn default_price_currency() -> String {
     "USD".to_string()
@@ -247,10 +335,12 @@ impl Default for Config {
             price_currency: default_price_currency(),
             mcp_servers: BTreeMap::new(),
             auto_commit: true,
-            thinking: false,
             permission: default_permission(),
             max_tool_calls: default_max_tool_calls(),
             temperature: None,
+            reasoning: default_reasoning(),
+            api: None,
+            price_cached_in: None,
             key_from_env: false,
             extra: BTreeMap::new(),
         }
@@ -321,6 +411,12 @@ pub fn settings_layers() -> Vec<(PathBuf, serde_json::Value)> {
         .collect()
 }
 
+/// The value of `key` in the most specific settings layer that sets it
+/// (project local > project > config.json).
+pub fn setting(key: &str) -> Option<serde_json::Value> {
+    settings_layers().into_iter().rev().find_map(|(_, v)| v.get(key).cloned())
+}
+
 pub fn history_path() -> PathBuf {
     config_dir().join("history")
 }
@@ -329,147 +425,164 @@ pub fn sessions_dir() -> PathBuf {
     config_dir().join("sessions")
 }
 
-/// Per-working-directory session file (so each project resumes its own chat).
-/// Uses a deterministic FNV-1a hash so the same directory always gets the
-/// same session file across invocations (DefaultHasher is randomly seeded).
-pub fn session_path() -> PathBuf {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    // FNV-1a 64-bit — deterministic, no dependency.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in cwd.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    sessions_dir().join(format!("{:016x}.json", h))
-}
-
 impl Config {
     /// Read config.json leniently: each known field is merged independently,
     /// so one malformed field (a typo in mcp_servers, say) can't reset the
     /// others. No env override — this is the on-disk truth, safe to rewrite.
+    /// Read every key picoder understands out of one config.json document.
+    fn absorb_disk(&mut self, v: &serde_json::Value) {
+        let cfg = self;
+        if let Some(s) = v.get("provider").and_then(|x| x.as_str()) {
+            cfg.provider = s.to_string();
+        }
+        if let Some(s) = v.get("base_url").and_then(|x| x.as_str()) {
+            cfg.base_url = s.to_string();
+        }
+        if let Some(s) = v.get("model").and_then(|x| x.as_str()) {
+            cfg.model = s.to_string();
+        }
+        // New-style per-provider keys (api_keys object).
+        if let Some(map) = v.get("api_keys").and_then(|x| x.as_object()) {
+            for (k, val) in map {
+                if let Some(s) = val.as_str() {
+                    cfg.api_keys.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        // Subscription-login tokens (one per provider).
+        // One malformed entry must not take its siblings with it: parse
+        // entry by entry, and keep the raw block in `extra` so a later
+        // model/theme rewrite preserves the broken entry verbatim
+        // instead of dropping the whole map from disk.
+        if let Some(m) = v.get("oauth") {
+            let mut broken = false;
+            if let Some(obj) = m.as_object() {
+                for (k, val) in obj {
+                    match serde_json::from_value::<OAuthToken>(val.clone()) {
+                        Ok(t) => {
+                            cfg.oauth.insert(k.clone(), t);
+                        }
+                        Err(_) => broken = true,
+                    }
+                }
+            } else {
+                broken = true;
+            }
+            if broken {
+                cfg.extra.insert("oauth".into(), m.clone());
+            }
+        }
+        // Legacy single api_key field — use as fallback for the current
+        // provider if no per-provider entry exists.
+        if let Some(s) = v.get("api_key").and_then(|x| x.as_str()) {
+            if !cfg.api_keys.contains_key(&cfg.provider) {
+                cfg.api_keys.insert(cfg.provider.clone(), s.to_string());
+            }
+        }
+        if let Some(s) = v.get("theme").and_then(|x| x.as_str()) {
+            let s = s.to_string();
+            // Validate; unknown theme names silently fall back to default
+            // so a hand-edited config can't cause a broken UI.
+            cfg.theme = if crate::ui::is_theme_name(&s) { s } else { default_theme() };
+        }
+        if let Some(n) = v.get("context_window").and_then(|x| x.as_u64()) {
+            cfg.context_window = n as u32;
+            cfg.context_window_explicit = true;
+        }
+        if let Some(n) = v.get("price_in").and_then(|x| x.as_f64()) {
+            cfg.price_in = n;
+        }
+        if let Some(n) = v.get("price_out").and_then(|x| x.as_f64()) {
+            cfg.price_out = n;
+        }
+        if let Some(s) = v.get("price_currency").and_then(|x| x.as_str()) {
+            let s = s.trim().to_ascii_uppercase();
+            // An empty or junk value keeps the documented default rather
+            // than producing a unitless (or bogus-symbol) readout.
+            cfg.price_currency = if s.is_empty() {
+                default_price_currency()
+            } else {
+                s
+            };
+        }
+        if let Some(m) = v.get("mcp_servers") {
+            let mut broken = false;
+            if let Some(obj) = m.as_object() {
+                for (k, val) in obj {
+                    match McpServerConfig::parse(val) {
+                        Some(c) => {
+                            cfg.mcp_servers.insert(k.clone(), c);
+                        }
+                        None => {
+                            eprintln!("config: mcp_servers.{k} is malformed and was skipped");
+                            broken = true;
+                        }
+                    }
+                }
+            } else {
+                broken = true;
+            }
+            if broken {
+                cfg.extra.insert("mcp_servers".into(), m.clone());
+            }
+        }
+        if let Some(b) = v.get("auto_commit").and_then(|x| x.as_bool()) {
+            cfg.auto_commit = b;
+        }
+        // The old `thinking` switch only ever reached DeepSeek and GLM
+        // (as their `thinking` field); every other provider ignored it.
+        // Keep that: "medium" there, nothing sent elsewhere — mapping it
+        // to "medium" for a local Qwen would switch reasoning on that
+        // the user never actually had.
+        if let Some(true) = v.get("thinking").and_then(|x| x.as_bool()) {
+            if matches!(cfg.provider.as_str(), "deepseek" | "zai") {
+                cfg.reasoning = "medium".into();
+            }
+        }
+        if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
+            cfg.permission = s.to_string();
+        }
+        // `auth_mode` is deliberately not read while `/login` is hidden:
+        // with no UI to switch back, a stale "sub" would strand the
+        // config on a token the provider's API doesn't accept.
+        if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
+            cfg.max_tool_calls = n as u32;
+        }
+        if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
+            cfg.temperature = Some(t);
+        }
+        if let Some(r) = v.get("reasoning").and_then(|x| x.as_str()) {
+            cfg.reasoning = normalize_reasoning(r);
+        }
+        if let Some(a) = v.get("api").and_then(|x| x.as_str()) {
+            cfg.api = Some(a.to_string());
+        }
+        if let Some(p) = v.get("price_cached_in").and_then(|x| x.as_f64()) {
+            cfg.price_cached_in = Some(p);
+        }
+        for key in [
+            "permissions",
+            "hooks",
+            "auto_bump_version",
+            "shared_skills",
+            "sandbox",
+            "sandbox_network",
+            "sandbox_allow_write",
+            "web_search",
+            "web_search_url",
+            "web_search_key",
+        ] {
+            if let Some(x) = v.get(key) {
+                cfg.extra.insert(key.to_string(), x.clone());
+            }
+        }
+    }
+
     fn load_disk() -> Config {
         let mut cfg = Config::default();
         if let Ok(text) = std::fs::read_to_string(config_path()) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(s) = v.get("provider").and_then(|x| x.as_str()) {
-                    cfg.provider = s.to_string();
-                }
-                if let Some(s) = v.get("base_url").and_then(|x| x.as_str()) {
-                    cfg.base_url = s.to_string();
-                }
-                if let Some(s) = v.get("model").and_then(|x| x.as_str()) {
-                    cfg.model = s.to_string();
-                }
-                // New-style per-provider keys (api_keys object).
-                if let Some(map) = v.get("api_keys").and_then(|x| x.as_object()) {
-                    for (k, val) in map {
-                        if let Some(s) = val.as_str() {
-                            cfg.api_keys.insert(k.clone(), s.to_string());
-                        }
-                    }
-                }
-                // Subscription-login tokens (one per provider).
-                // One malformed entry must not take its siblings with it: parse
-                // entry by entry, and keep the raw block in `extra` so a later
-                // model/theme rewrite preserves the broken entry verbatim
-                // instead of dropping the whole map from disk.
-                if let Some(m) = v.get("oauth") {
-                    let mut broken = false;
-                    if let Some(obj) = m.as_object() {
-                        for (k, val) in obj {
-                            match serde_json::from_value::<OAuthToken>(val.clone()) {
-                                Ok(t) => {
-                                    cfg.oauth.insert(k.clone(), t);
-                                }
-                                Err(_) => broken = true,
-                            }
-                        }
-                    } else {
-                        broken = true;
-                    }
-                    if broken {
-                        cfg.extra.insert("oauth".into(), m.clone());
-                    }
-                }
-                // Legacy single api_key field — use as fallback for the current
-                // provider if no per-provider entry exists.
-                if let Some(s) = v.get("api_key").and_then(|x| x.as_str()) {
-                    if !cfg.api_keys.contains_key(&cfg.provider) {
-                        cfg.api_keys.insert(cfg.provider.clone(), s.to_string());
-                    }
-                }
-                if let Some(s) = v.get("theme").and_then(|x| x.as_str()) {
-                    let s = s.to_string();
-                    // Validate; unknown theme names silently fall back to default
-                    // so a hand-edited config can't cause a broken UI.
-                    cfg.theme = if crate::ui::is_theme_name(&s) { s } else { default_theme() };
-                }
-                if let Some(n) = v.get("context_window").and_then(|x| x.as_u64()) {
-                    cfg.context_window = n as u32;
-                    cfg.context_window_explicit = true;
-                }
-                if let Some(n) = v.get("price_in").and_then(|x| x.as_f64()) {
-                    cfg.price_in = n;
-                }
-                if let Some(n) = v.get("price_out").and_then(|x| x.as_f64()) {
-                    cfg.price_out = n;
-                }
-                if let Some(s) = v.get("price_currency").and_then(|x| x.as_str()) {
-                    let s = s.trim().to_ascii_uppercase();
-                    // An empty or junk value keeps the documented default rather
-                    // than producing a unitless (or bogus-symbol) readout.
-                    cfg.price_currency = if s.is_empty() {
-                        default_price_currency()
-                    } else {
-                        s
-                    };
-                }
-                if let Some(m) = v.get("mcp_servers") {
-                    let mut broken = false;
-                    if let Some(obj) = m.as_object() {
-                        for (k, val) in obj {
-                            match serde_json::from_value::<McpServerConfig>(val.clone()) {
-                                Ok(c) => {
-                                    cfg.mcp_servers.insert(k.clone(), c);
-                                }
-                                Err(_) => {
-                                    eprintln!("config: mcp_servers.{k} is malformed and was skipped");
-                                    broken = true;
-                                }
-                            }
-                        }
-                    } else {
-                        broken = true;
-                    }
-                    if broken {
-                        cfg.extra.insert("mcp_servers".into(), m.clone());
-                    }
-                }
-                if let Some(b) = v.get("auto_commit").and_then(|x| x.as_bool()) {
-                    cfg.auto_commit = b;
-                }
-                if let Some(b) = v.get("thinking").and_then(|x| x.as_bool()) {
-                    cfg.thinking = b;
-                }
-                if let Some(s) = v.get("permission").and_then(|x| x.as_str()) {
-                    cfg.permission = s.to_string();
-                }
-                // `auth_mode` is deliberately not read while `/login` is hidden:
-                // with no UI to switch back, a stale "sub" would strand the
-                // config on a token the provider's API doesn't accept.
-                if let Some(n) = v.get("max_tool_calls").and_then(|x| x.as_u64()) {
-                    cfg.max_tool_calls = n as u32;
-                }
-                if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
-                    cfg.temperature = Some(t);
-                }
-                for key in ["permissions", "hooks", "auto_bump_version"] {
-                    if let Some(x) = v.get(key) {
-                        cfg.extra.insert(key.to_string(), x.clone());
-                    }
-                }
+                cfg.absorb_disk(&v);
             }
         }
         // Resolve the effective key from the per-provider map.
@@ -564,9 +677,6 @@ impl Config {
         if on_disk.price_currency.to_ascii_uppercase() != default_price_currency() {
             json["price_currency"] = serde_json::json!(on_disk.price_currency);
         }
-        if on_disk.thinking {
-            json["thinking"] = serde_json::json!(true);
-        }
         if on_disk.permission != default_permission() {
             json["permission"] = serde_json::json!(on_disk.permission);
         }
@@ -578,6 +688,15 @@ impl Config {
         }
         if let Some(t) = on_disk.temperature {
             json["temperature"] = serde_json::json!(t);
+        }
+        if on_disk.reasoning != default_reasoning() {
+            json["reasoning"] = serde_json::json!(on_disk.reasoning);
+        }
+        if let Some(a) = &on_disk.api {
+            json["api"] = serde_json::json!(a);
+        }
+        if let Some(p) = on_disk.price_cached_in {
+            json["price_cached_in"] = serde_json::json!(p);
         }
         for (k, v) in &on_disk.extra {
             json[k.as_str()] = v.clone();
@@ -592,6 +711,33 @@ impl Config {
     /// reasoning models reject any value but 1.
     pub fn temperature(&self) -> Option<f64> {
         self.temperature.or_else(|| (self.provider == "deepseek").then_some(0.2))
+    }
+
+    /// The protocol to speak: the `api` setting, else Anthropic's own
+    /// Messages API for the anthropic preset, OpenAI's Responses API for the
+    /// openai preset, and chat/completions for everyone else.
+    pub fn api_kind(&self) -> ApiKind {
+        match self.api.as_deref().map(str::trim) {
+            Some("messages" | "anthropic") => ApiKind::Messages,
+            Some("responses") => ApiKind::Responses,
+            Some("chat" | "chat_completions" | "openai") => ApiKind::Chat,
+            _ => match self.provider.as_str() {
+                "anthropic" => ApiKind::Messages,
+                "openai" => ApiKind::Responses,
+                _ => ApiKind::Chat,
+            },
+        }
+    }
+
+    /// Price per 1M cached input tokens: the configured one; with the default
+    /// (DeepSeek) price list, DeepSeek's cache-hit price; otherwise a tenth of
+    /// `price_in`, the usual cache-read discount (Anthropic, OpenAI).
+    pub fn price_cached(&self) -> f64 {
+        self.price_cached_in.unwrap_or(if self.price_in == default_price_in() {
+            DEEPSEEK_CACHE_HIT_PRICE
+        } else {
+            self.price_in * 0.1
+        })
     }
 
     /// Update only the model field on disk, preserving the rest of the file.
@@ -667,7 +813,7 @@ impl Config {
                 self.api_keys.insert(self.provider.clone(), k.clone());
                 self.key_from_env = false;
             }
-            ConfigPatch::Thinking(b) => self.thinking = *b,
+            ConfigPatch::Reasoning(r) => self.reasoning = normalize_reasoning(r),
             ConfigPatch::Permission(m) => self.permission = m.clone(),
             ConfigPatch::AutoCommit(b) => self.auto_commit = *b,
             ConfigPatch::ContextWindow(n) => {
@@ -714,11 +860,11 @@ mod tests {
         let m = &v["mcp_servers"];
         let mut broken = false;
         for (k, val) in m.as_object().unwrap() {
-            match serde_json::from_value::<McpServerConfig>(val.clone()) {
-                Ok(c) => {
+            match McpServerConfig::parse(val) {
+                Some(c) => {
                     cfg.mcp_servers.insert(k.clone(), c);
                 }
-                Err(_) => broken = true,
+                None => broken = true,
             }
         }
         if broken {
@@ -754,12 +900,12 @@ mod tests {
             model: "gpt-4o-mini".into(),
         });
         assert_eq!((c.provider.as_str(), c.model.as_str()), ("openai", "gpt-4o-mini"));
-        c.apply_patch(&ConfigPatch::Thinking(true));
+        c.apply_patch(&ConfigPatch::Reasoning("High".into()));
         c.apply_patch(&ConfigPatch::Permission("plan".into()));
         c.apply_patch(&ConfigPatch::AutoCommit(false));
         c.apply_patch(&ConfigPatch::ContextWindow(64000));
         c.apply_patch(&ConfigPatch::MaxToolCalls(42));
-        assert!(c.thinking);
+        assert_eq!(c.reasoning, "high");
         assert_eq!(c.permission, "plan");
         assert!(!c.auto_commit);
         assert_eq!(c.context_window, 64000);
@@ -803,6 +949,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(r#"{"price_currency": "cny"}"#).unwrap();
         let code = v.get("price_currency").and_then(|x| x.as_str()).unwrap();
         assert_eq!(crate::money::Currency::parse(code).symbol, "¥");
+    }
+
+    /// The old `thinking: true` did something only on DeepSeek/GLM. Elsewhere
+    /// (here: a local Qwen behind Splash) it must stay a no-op, not become a
+    /// request that switches reasoning on.
+    #[test]
+    fn legacy_thinking_flag_keeps_its_old_reach() {
+        let load = |v: serde_json::Value| {
+            let mut c = Config::default();
+            c.absorb_disk(&v);
+            c.reasoning
+        };
+        assert_eq!(load(serde_json::json!({"provider": "deepseek", "thinking": true})), "medium");
+        assert_eq!(load(serde_json::json!({"provider": "zai", "thinking": true})), "medium");
+        assert_eq!(load(serde_json::json!({"provider": "splash", "thinking": true})), default_reasoning());
+        // An explicit setting always wins.
+        assert_eq!(load(serde_json::json!({"provider": "splash", "thinking": true, "reasoning": "high"})), "high");
     }
 
     #[test]
@@ -857,7 +1020,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join("picoder_atomic_test");
+        let dir = std::env::temp_dir().join(format!("picoder_atomic_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.json");
         std::fs::write(&path, b"old contents").unwrap();

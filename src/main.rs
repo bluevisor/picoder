@@ -14,7 +14,10 @@ mod diff;
 mod hooks;
 mod mcp;
 mod money;
+mod native;
 mod policy;
+mod sandbox;
+mod sessions;
 mod sysinfo;
 mod tools;
 mod ui;
@@ -39,6 +42,14 @@ tiny. Avoid heavy installs/compiles unless asked."
         "- Use bash for git, builds, tests. This machine is reasonably capable (multi-core, GBs of \
 RAM + swap), so builds and compiles are fine when useful."
     };
+    // The model assumes GNU/Linux tools unless told otherwise.
+    let shell_rule = if cfg!(target_os = "macos") {
+        "\n- The shell is macOS (BSD userland): there is no GNU `timeout` (use the bash tool's \
+`timeout` argument instead), `sed -i` needs an explicit '' suffix, and `readlink -f`/`date -d` \
+differ from Linux."
+    } else {
+        ""
+    };
     let git_rule = if auto_commit {
         "\n- Every successful edit is auto-committed to git as a checkpoint. Use git history as a \
 clue: `git log`, `git show`, and `git diff` tell you what changed and let you restore a previous \
@@ -54,7 +65,7 @@ Rules:
 - Use tools to inspect and change the real filesystem; never invent file contents.
 - Prefer read_file/list_files/grep/glob before editing. Make minimal, correct edits with \
 edit_file; use write_file for new files; use multi_edit to change several files at once.
-{resource_rule}{git_rule}
+{resource_rule}{shell_rule}{git_rule}
 - When the task is complete, reply with a short plain-text summary and no tool call.
 - Be concise."
     )
@@ -66,7 +77,10 @@ usage:
   picoder                 interactive full-screen TUI
   picoder \"do a thing\"     one-shot task, then exit
   cmd | picoder \"task\"     one-shot with stdin attached as context (or as the task)
-  picoder --continue      resume this directory's last session (alias: -c)
+  picoder --continue      resume this directory's latest session (alias: -c)
+  picoder -r [id|name]    resume a saved session; with no id, pick one in the TUI (--resume)
+  picoder --fork-session  with -c / -r: carry on in a copy, leaving the original as it was
+  picoder sessions        list this directory's saved sessions (--json; delete <id|name>)
   picoder --auto ...      auto-approve tool calls (deny rules still apply); one-shot
                           runs otherwise follow config \"permission\" and decline prompts
   picoder --output FILE   one-shot: also write the final reply to FILE (alias: -o)
@@ -135,6 +149,15 @@ fn main() {
 
     let auto = args.iter().any(|a| a == "--auto");
     let cont = args.iter().any(|a| a == "--continue" || a == "-c");
+    let fork_session = args.iter().any(|a| a == "--fork-session");
+    // -r / --resume [id|name]: the next argument is the session unless it's a
+    // flag; with none, the TUI opens the session picker.
+    let mut resume: Option<Option<String>> = None;
+    if let Some(pos) = args.iter().position(|a| a == "-r" || a == "--resume") {
+        args.remove(pos);
+        let key = (pos < args.len() && !args[pos].starts_with('-')).then(|| args.remove(pos));
+        resume = Some(key);
+    }
     let out_mode = if args.iter().any(|a| a == "--stream-json") {
         OutputMode::StreamJson
     } else if args.iter().any(|a| a == "--json" || a == "--output-format=json") {
@@ -143,7 +166,10 @@ fn main() {
         OutputMode::Text
     };
     args.retain(|a| {
-        !matches!(a.as_str(), "--auto" | "--continue" | "-c" | "--json" | "--stream-json" | "--output-format=json")
+        !matches!(
+            a.as_str(),
+            "--auto" | "--continue" | "-c" | "--fork-session" | "--json" | "--stream-json" | "--output-format=json"
+        )
     });
 
     let mut output: Option<String> = None;
@@ -162,6 +188,29 @@ fn main() {
         model_subcommand(&cfg, args.get(1).cloned());
         return;
     }
+    if !args.is_empty() && args[0] == "sessions" {
+        // `--json` was taken off `args` with the one-shot output flags.
+        std::process::exit(sessions_subcommand(&args[1..], out_mode != OutputMode::Text));
+    }
+
+    // The saved session to start from, if any.
+    let store = sessions::Store::here();
+    let start = match &resume {
+        Some(Some(key)) => match store.find(key) {
+            Ok(hit) => Some(hit),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        _ if cont => store.latest(),
+        _ => None,
+    };
+    if fork_session && start.is_none() {
+        eprintln!("--fork-session needs a session to copy: add --continue or --resume <id|name>");
+        std::process::exit(2);
+    }
+    let resumed = start.and_then(|(meta, path)| sessions::load(&path).map(|msgs| (meta, path, msgs)));
 
     if cfg.api_key.is_empty() {
         eprintln!("\x1b[33mNo API key configured.\x1b[0m");
@@ -201,11 +250,16 @@ fn main() {
         }
     }
 
+    let wants_session = cont || resume.is_some();
     if !task.trim().is_empty() {
-        let (messages, _) = build_context(cont, &cfg);
+        if resume == Some(None) {
+            eprintln!("-r needs a session id or name in one-shot mode (`picoder sessions` lists them; -c resumes the latest)");
+            std::process::exit(2);
+        }
+        let (messages, session, _) = start_session(&store, resumed, fork_session, &cfg);
         // Only persist a one-shot turn when explicitly continuing a session,
-        // so a stray `picoder "x"` can't clobber a richer interactive session.
-        let session = cont.then(config::session_path);
+        // so a stray `picoder "x"` doesn't pile up sessions.
+        let session = wants_session.then_some(session);
         let perm = start_perm(&cfg, auto);
         if !run_oneshot(cfg, messages, session, task, output, out_mode, perm) {
             std::process::exit(1);
@@ -223,23 +277,90 @@ fn main() {
             eprintln!("no task given and stdin is not a terminal — pass a task: picoder \"do a thing\"");
             std::process::exit(2);
         }
-        let (messages, notes) = build_context(cont, &cfg);
-        run_tui(cfg, messages, notes, auto);
+        let replay = resumed.as_ref().map(|(_, _, msgs)| sessions::replay(msgs)).unwrap_or_default();
+        let (messages, session, notes) = start_session(&store, resumed, fork_session, &cfg);
+        run_tui(cfg, messages, notes, auto, session, replay, resume == Some(None));
     }
 }
 
-/// Build the starting conversation: a resumed session if asked for and present,
-/// otherwise a fresh one (system prompt + memory + auto-loaded project file).
-/// Returns the messages and human-readable startup notes for the UI.
-fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
-    let mut notes = Vec::new();
-    if cont {
-        if let Some(msgs) = load_session() {
-            notes.push(format!("resumed session ({} messages)", msgs.len()));
-            return (msgs, notes);
-        }
-        notes.push("no previous session here — starting fresh".into());
+/// The conversation to start with and the session file it saves to: a
+/// resumed session's own file, a copy of it with `--fork-session`, or a new
+/// session. Returns startup notes for the UI too.
+fn start_session(
+    store: &sessions::Store,
+    resumed: Option<(sessions::Meta, std::path::PathBuf, Vec<Message>)>,
+    fork: bool,
+    cfg: &Config,
+) -> (Vec<Message>, std::path::PathBuf, Vec<String>) {
+    let Some((meta, path, mut msgs)) = resumed else {
+        let (messages, notes) = build_context(cfg);
+        return (messages, store.new_path(), notes);
+    };
+    // A session saved mid tool-round (crash, kill) has tool_calls with no
+    // results; answer them so the first request on resume isn't a 400.
+    agent::repair_orphans(&mut msgs);
+    let mut notes = vec![format!("resumed session {}: {} ({} messages)", meta.id, meta.label(), meta.messages)];
+    if !fork {
+        return (msgs, path, notes);
     }
+    match sessions::fork(store, &path, &msgs) {
+        Ok(copy) => {
+            notes.push(format!(
+                "forked into {}; {} stays as it was",
+                copy.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+                meta.id
+            ));
+            (msgs, copy, notes)
+        }
+        Err(e) => {
+            eprintln!("could not fork session {}: {e}", meta.id);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `picoder sessions [--json]` lists this directory's sessions, newest first;
+/// `picoder sessions delete <id|name>` removes one. Returns the exit status.
+fn sessions_subcommand(args: &[String], json: bool) -> i32 {
+    let store = sessions::Store::here();
+    if args.first().map(String::as_str) == Some("delete") {
+        let Some(key) = args.get(1) else {
+            eprintln!("usage: picoder sessions delete <id|name>");
+            return 2;
+        };
+        return match store.find(key) {
+            Ok((m, p)) => {
+                sessions::delete(&p);
+                println!("deleted {} ({})", m.id, m.label());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
+    let list = store.list();
+    if json {
+        let metas: Vec<&sessions::Meta> = list.iter().map(|(m, _)| m).collect();
+        println!("{}", serde_json::to_string_pretty(&metas).unwrap_or_default());
+        return 0;
+    }
+    if list.is_empty() {
+        println!("no saved sessions in {}", store.cwd.display());
+        return 0;
+    }
+    let now = config::now_unix();
+    for (m, _) in &list {
+        println!("{}", sessions::summary_line(m, now, false));
+    }
+    0
+}
+
+/// A fresh conversation's start: system prompt, memory, instruction files and
+/// git state. Returns the messages and human-readable startup notes.
+fn build_context(cfg: &Config) -> (Vec<Message>, Vec<String>) {
+    let mut notes = Vec::new();
     let mut messages = vec![Message::system(system_prompt(cfg.auto_commit))];
     if let Ok(Some(mem)) = tools::load_memory() {
         messages.push(Message::system(format!(
@@ -249,6 +370,11 @@ fn build_context(cont: bool, cfg: &Config) -> (Vec<Message>, Vec<String>) {
     if let Some((msg, names)) = load_project_context() {
         messages.push(msg);
         notes.push(format!("loaded {}", names.join(", ")));
+    }
+    let skills = commands::discover_skills();
+    if let Some(list) = commands::skills_prompt(&skills) {
+        messages.push(Message::system(list));
+        notes.push(format!("{} skill(s) available", skills.len()));
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     if let Some(git) = tools::git_context(&cwd) {
@@ -361,19 +487,6 @@ fn read_capped(path: &std::path::Path) -> Option<String> {
     Some(s)
 }
 
-fn load_session() -> Option<Vec<Message>> {
-    let text = std::fs::read_to_string(config::session_path()).ok()?;
-    let mut msgs: Vec<Message> = serde_json::from_str(&text).ok()?;
-    if msgs.is_empty() {
-        None
-    } else {
-        // A session saved mid tool-round (crash, kill) has tool_calls with no
-        // results; answer them so the first request on resume isn't a 400.
-        agent::repair_orphans(&mut msgs);
-        Some(msgs)
-    }
-}
-
 /// How one-shot mode reports: streamed text (default), one JSON object at the
 /// end (`--json`), or one JSON object per event (`--stream-json`) — the shapes
 /// scripts and CI expect from Claude Code / Codex.
@@ -448,6 +561,7 @@ fn run_oneshot(
     let started = std::time::Instant::now();
     let model = cfg.model.clone();
     let (price_in, price_out, price_currency) = (cfg.price_in, cfg.price_out, cfg.price_currency.clone());
+    let price_cached = cfg.price_cached();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     let h = agent::spawn(cfg, messages, perm, session, ui_tx);
     let (task_text, attached) = ui::expand_attachments(&task);
@@ -466,7 +580,7 @@ fn run_oneshot(
         }
         emit(serde_json::json!({"type": "attached", "files": all}));
     }
-    let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images });
+    let _ = h.cmd_tx.send(WorkerCmd::User { text: task_text, images, typed: task });
 
     let mut out = std::io::stdout();
     let mut at_line_start = true;
@@ -474,7 +588,7 @@ fn run_oneshot(
     // so --output can write it to disk after the turn.
     let mut live = String::new();
     let mut final_text = String::new();
-    let (mut prompt_tokens, mut completion_tokens, mut tool_calls, mut errors) = (0u64, 0u64, 0u32, Vec::new());
+    let (mut spent, mut tool_calls, mut errors) = (money::Spent::default(), 0u32, Vec::new());
     while let Ok(ev) = ui_rx.recv() {
         match ev {
             UiEvent::Token(t) => {
@@ -550,10 +664,7 @@ fn run_oneshot(
                 emit(serde_json::json!({"type": "error", "text": s}));
                 errors.push(s);
             }
-            UiEvent::Usage { prompt, completion } | UiEvent::Spend { prompt, completion } => {
-                prompt_tokens += prompt as u64;
-                completion_tokens += completion as u64;
-            }
+            UiEvent::Usage(s) | UiEvent::Spend(s) => spent.add(s),
             UiEvent::TurnDone => break,
             UiEvent::Reasoning(t) => {
                 if text_mode {
@@ -603,14 +714,19 @@ fn run_oneshot(
     if text_mode && !at_line_start {
         println!();
     }
-    let cost = prompt_tokens as f64 / 1e6 * price_in + completion_tokens as f64 / 1e6 * price_out;
+    let cost = spent.cost(price_in, price_cached, price_out);
     let result = final_text.trim_end().to_string();
     if mode != OutputMode::Text {
         let summary = serde_json::json!({
             "type": "result",
             "result": result,
             "model": model,
-            "usage": { "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens },
+            "usage": {
+                "prompt_tokens": spent.prompt,
+                "completion_tokens": spent.completion,
+                "cached_tokens": spent.cached,
+                "cache_write_tokens": spent.written,
+            },
             "cost": cost,
             "cost_currency": price_currency,
             "tool_calls": tool_calls,
@@ -637,7 +753,15 @@ fn run_oneshot(
     ok
 }
 
-fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) {
+fn run_tui(
+    cfg: Config,
+    messages: Vec<Message>,
+    notes: Vec<String>,
+    auto: bool,
+    session: std::path::PathBuf,
+    replay: Vec<(String, String)>,
+    pick_session: bool,
+) {
     let console = ui::detect_ascii();
     let status = status_lines(&cfg, console);
     let history = load_history();
@@ -654,7 +778,7 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiEvent>();
     // Wire up sudo askpass before the worker exists (it mutates process env).
     askpass::setup(ui_tx.clone());
-    let h = agent::spawn(cfg, messages, perm_start, Some(config::session_path()), ui_tx);
+    let h = agent::spawn(cfg, messages, perm_start, Some(session), ui_tx);
 
     let mut terminal = match ui::setup_terminal() {
         Ok(t) => t,
@@ -679,8 +803,12 @@ fn run_tui(cfg: Config, messages: Vec<Message>, notes: Vec<String>, auto: bool) 
     );
     app.banner(ui::term_width(), status);
     app.welcome();
+    app.replay(replay);
     for n in notes {
         app.note(n);
+    }
+    if pick_session {
+        app.open_session_picker(&h);
     }
 
     let result = ui::run(&mut terminal, &mut app, ui_rx, &h);
@@ -737,17 +865,57 @@ fn model_subcommand(cfg: &Config, arg: Option<String>) {
     }
 }
 
+/// First line of a history file whose entries are escaped (`\\` and `\n`),
+/// so a multi-line prompt stays one line on disk. A file without it is the
+/// older one-entry-per-line format and is read as-is.
+const HISTORY_V2: &str = "#picoder-history v2";
+
 fn load_history() -> Vec<String> {
     std::fs::read_to_string(config::history_path())
-        .map(|s| s.lines().map(String::from).collect())
+        .map(|s| parse_history(&s))
         .unwrap_or_default()
 }
 
+fn parse_history(s: &str) -> Vec<String> {
+    let mut lines = s.lines();
+    if s.starts_with(HISTORY_V2) {
+        lines.next();
+        lines.map(unescape_history).collect()
+    } else {
+        lines.map(String::from).collect()
+    }
+}
+
 fn save_history(history: &[String]) {
-    let start = history.len().saturating_sub(1000);
-    let text = history[start..].join("\n");
     let _ = std::fs::create_dir_all(config::config_dir());
-    let _ = std::fs::write(config::history_path(), text);
+    let _ = std::fs::write(config::history_path(), format_history(history));
+}
+
+fn format_history(history: &[String]) -> String {
+    let start = history.len().saturating_sub(1000);
+    let mut out = String::from(HISTORY_V2);
+    for entry in &history[start..] {
+        out.push('\n');
+        out.push_str(&entry.replace('\\', "\\\\").replace('\n', "\\n"));
+    }
+    out
+}
+
+fn unescape_history(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -755,11 +923,35 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn history_round_trips_multi_line_entries() {
+        let entries = vec![
+            "one line".to_string(),
+            "two\nlines".to_string(),
+            "a literal \\n and a backslash \\".to_string(),
+            "tab\there".to_string(),
+        ];
+        let text = format_history(&entries);
+        assert_eq!(text.lines().count(), entries.len() + 1, "one line per entry plus the marker");
+        assert_eq!(parse_history(&text), entries);
+        // The old format (no marker) is one entry per line, read verbatim.
+        assert_eq!(parse_history("old \\n entry\nsecond"), vec!["old \\n entry", "second"]);
+    }
+
     fn scratch(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("picoder_ctx_{name}"));
+        let d = std::env::temp_dir().join(format!("picoder_ctx_{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// On a Mac the prompt said "Linux", and the model ran GNU-only `timeout`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_is_described_as_macos_with_its_shell_quirks() {
+        assert!(crate::sysinfo::os_name().starts_with("macOS"), "{}", crate::sysinfo::os_name());
+        let p = system_prompt(false);
+        assert!(p.contains("(macOS") && p.contains("no GNU `timeout`"), "{p}");
     }
 
     #[test]

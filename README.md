@@ -3,7 +3,8 @@
 A tiny full-screen **agentic coding CLI** written in Rust, small enough to run
 on a **Raspberry Pi Zero W** (ARMv6, single core, ~512 MB RAM) — and equally at
 home on a Pi 5 or your laptop. It talks to any OpenAI-compatible chat API
-(default: DeepSeek) and drives a Codex / Claude-Code-style tool loop inside a
+(default: DeepSeek), plus Anthropic's Messages API and OpenAI's Responses API
+natively, and drives a Codex / Claude-Code-style tool loop inside a
 [ratatui](https://ratatui.rs) terminal UI.
 
 The whole thing is one ~2.5 MB statically linked binary with no runtime
@@ -30,13 +31,25 @@ dependencies.
 - **Crash-safe state** — `config.json` and session transcripts are written
   atomically (temp file → fsync → rename), so a power loss on the Pi's SD card
   leaves the old or new file intact, never a truncated one.
+- **Forgiving edits** — `read_file` numbers lines `cat -n` style (number, tab,
+  text) so the number can't be mistaken for indentation. When `edit_file`'s
+  `old_text` doesn't match exactly, it is matched line by line ignoring each
+  line's surrounding whitespace (then all of it, for a dropped space) and any
+  pasted line numbers, and the new text is re-indented to the file's own
+  indentation. A miss returns the closest real lines so the model can copy
+  them. `multi_edit` takes a top-level `path` for single-file batches, and a
+  malformed edit fails the batch with its number instead of being skipped.
 - **Symlink-safe file tools** — `read_file` / `list_files` / `write_file` /
   `edit_file` all refuse symlinked paths, and paths are lexically normalized so
   the path you approve is the path that's used.
 - **Sub-agents** — the `task` tool delegates a self-contained job to a fresh
   agent with its own context and the same tools; only its report comes back.
-- **MCP** — stdio MCP servers from `mcp_servers` in `config.json` are launched
-  at start; their tools show up as `mcp__<server>__<tool>` (`/mcp` lists them).
+- **MCP** — servers from `mcp_servers` in `config.json` and from a project
+  `.mcp.json` (Claude Code's format), over stdio or Streamable HTTP (with OAuth
+  sign-in: `/mcp login <server>`). Tools show up as `mcp__<server>__<tool>`,
+  resources through `list_mcp_resources` / `read_mcp_resource`, and prompts as
+  `/mcp__<server>__<prompt>` commands. A project's servers only start once you
+  `/mcp approve` them. `/mcp` shows each server's state, transport and auth.
 - **Images** — `@image.png` attaches as a base64 data URI and `view_image`
   loads one from disk, sent as OpenAI multimodal content parts.
 - **Streaming TUI** — a Claude-style composer with a reverse-block cursor,
@@ -58,6 +71,25 @@ dependencies.
   the project's `.picoder/settings.json`. Deny rules hold even in bypass mode;
   pressing **P** at an approval prompt saves a "don't ask again" rule for that
   command prefix or directory. `/permissions` lists, adds, and removes them.
+- **OS sandbox for shell commands** — off by default. `"sandbox": "workspace"`
+  lets `bash`, background jobs and `!cmd` write only under the working
+  directory, its repo root, the temp dirs, picoder's config dir and any
+  `"sandbox_allow_write"` paths; `"readonly"` allows temp dirs only;
+  `"sandbox_network": false` also blocks network access. Reads are never
+  restricted. macOS uses `sandbox-exec`, Linux uses Landlock (network blocking
+  needs kernel 6.7+; a kernel without Landlock runs commands unsandboxed and
+  says so once). A blocked command comes back with a note naming the sandbox,
+  so the model asks instead of working around it. A repo's `.picoder/` settings
+  can tighten the sandbox but never loosen it, and only your own config.json
+  can add writable paths.
+- **Search that respects .gitignore** — inside a git repo, `grep` and `glob`
+  search git's own file list (tracked plus untracked-but-not-ignored), and
+  `list_files` leaves out ignored entries, naming them in a footer.
+- **Web search backends** — keyless DuckDuckGo by default; a bot-check page is
+  reported as such instead of returning nothing. Set `"web_search_url"` to a
+  SearXNG instance (with its JSON format enabled), or export `BRAVE_API_KEY` /
+  `TAVILY_API_KEY`. `"web_search": "searxng" | "brave" | "tavily" | "duckduckgo"`
+  pins one; `"web_search_key"` stands in for the env key.
 - **Hooks** — `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` /
   `SessionStart` shell hooks (same JSON shape as Claude Code's) receive the
   event on stdin; exit `2` blocks the action and feeds stderr back to the model.
@@ -65,6 +97,15 @@ dependencies.
   `.picoder/commands/<name>.md` (or a `.picoder/skills/<name>/SKILL.md`, or the
   same under `~/.config/picoder/`) and `/name args` runs it with `$ARGUMENTS`
   substituted. `.claude/commands/*.md` is read too.
+- **Skills the model uses itself** — any `<name>/SKILL.md` in `.picoder/skills`,
+  `.claude/skills` or `.agents/skills` (working directory up to the repo root)
+  or `~/.config/picoder/skills` is listed to the model by name and description
+  only; when a task matches, it calls the `skill` tool to load the full
+  instructions and the paths of the skill's other files. Other agents'
+  user-wide folders (`~/.agents/skills`, `~/.claude/skills`) join the list only
+  with `"shared_skills": true`, since their names and descriptions would go out
+  with every request. Project skills win over user ones; `/name` still runs a
+  skill by hand.
 - **`!cmd`** — run a shell command straight from the composer; the output shows
   in the transcript and is added to the model's context.
 - **`/diff`, `/undo`, `/review`** — see everything changed since the session
@@ -81,6 +122,22 @@ dependencies.
 - **Sampling** — picoder sends no `temperature` unless you set one in
   `config.json` (`"temperature": 0.7`), so each model's recommended sampling
   applies; the DeepSeek preset keeps `0.2`.
+- **Reasoning effort** — `/effort auto|off|low|medium|high` (or the `/config`
+  row) is translated per provider: DeepSeek/GLM `thinking`, OpenAI/Gemini/Groq
+  `reasoning_effort`, OpenRouter `reasoning`, Anthropic adaptive thinking +
+  `output_config.effort`, Responses `reasoning.effort`, and for self-hosted
+  servers (Splash, vLLM, SGLang, llama.cpp) the chat template's
+  `enable_thinking` — so `off` really stops a local Qwen from thinking. `auto`
+  sends nothing.
+- **Native APIs** — `"api": "chat" | "messages" | "responses"` picks the wire
+  protocol; the anthropic preset defaults to Messages and the openai preset to
+  Responses. Within a run, Anthropic's signed thinking and Responses' encrypted
+  reasoning (stateless, `store: false`) are replayed across tool turns.
+- **Prompt caching & cost** — Anthropic cache breakpoints on the system prompt
+  and the latest turn, an OpenAI `prompt_cache_key`, and cache hits read from
+  every protocol's usage. Cached input is priced at `price_cached_in` (default:
+  DeepSeek's cache-hit price with the DeepSeek list, else a tenth of
+  `price_in`); `/cost` and the one-shot JSON usage show cached tokens.
 - **Thrashing guard** — the same tool call with identical arguments three times
   in a row is short-circuited with a nudge to change approach.
 - **Scripting** — `git diff | picoder "review this"` attaches stdin as context
@@ -94,18 +151,31 @@ dependencies.
   a repo), loads the first of `PICODER.md` / `AGENTS.md` / `CLAUDE.md` /
   `GEMINI.md`. They stack general to specific, so the nearest file wins on
   conflicts; 12k chars per file, 32k in all, spent nearest-first.
-- **Sessions** — persisted per working directory; resume with `picoder --continue`.
+- **Sessions** — every TUI run is a saved session, many per working directory,
+  titled by its first prompt. `picoder -c` resumes the latest, `picoder -r
+  <id|name>` (or `/resume`, a picker) any of them; `/rename` names one, `/fork`
+  (or `--fork-session` at launch) carries on in a copy, `/export [--all] [file]`
+  writes a Markdown transcript, and `/new` starts another without deleting the
+  last. `picoder sessions [--json]` lists them for scripts; `/sessions delete`
+  or `picoder sessions delete <id>` removes one. The least recently used go
+  past 50 per directory or 400 overall. One-shot runs are saved only with
+  `-c` / `-r`.
 - **Composer niceties** — a `/` command palette (suggestions ranked by your
   usage; ↑/↓ select, Tab fills, Enter runs), `@file` attach, Tab autocomplete
   (commands + paths), history, word-skip and word-delete, code-block
   highlighting.
+- **Multi-line prompts** — pasted text keeps its newlines and tabs;
+  Shift+Enter, Alt+Enter, Ctrl+J or a trailing `\` + Enter start a new line;
+  the composer grows to a third of the screen, then scrolls. Multi-line
+  entries survive in history, and `/rewind` hands back the prompt exactly as
+  typed.
 - **Status bar** — model · session tokens + cost · context-window bar ·
   account balance. Both money figures carry their own currency, and the ISO
   code is added when they differ (DeepSeek bills China-region accounts in CNY
   while its published price lists are USD), with a one-time hint on how to
   align them.
 - **Settings panel** (`/config`) — provider preset, base URL, model, API key,
-  auth mode, thinking mode, default permission mode, auto-commit, theme, context
+  auth mode, reasoning effort, default permission mode, auto-commit, theme, context
   window, max tool calls, and price currency, edited in-TUI; changes apply live
   and persist to `config.json`.
 - **Themes** (`/theme`) — `Default`, `Apple ][` (green phosphor), `MSDOS`,
@@ -162,7 +232,8 @@ commands/     user-wide custom slash commands (*.md)
 skills/       user-wide skills (<name>/SKILL.md)
 memory.md     remember/recall store
 history       composer history
-sessions/     per-directory session transcripts
+sessions/     saved sessions: one folder per working directory, each
+              session a <id>.json conversation + <id>.meta.json
 ```
 
 Per-project settings live in `.picoder/` inside the working directory:
@@ -231,18 +302,38 @@ rate), so put the numbers in the account's currency yourself — DeepSeek
 publishes a CNY price list alongside its USD one. An unrecognized code prints as
 a `CODE 12.34` prefix rather than guessing a symbol.
 
-To expose [MCP](https://modelcontextprotocol.io) tools, add an `mcp_servers`
-block to `config.json`; each entry is launched over stdio at start and its
-tools appear as `mcp__<server>__<tool>`:
+To expose [MCP](https://modelcontextprotocol.io) servers, add an `mcp_servers`
+block to `config.json`. A `command` is launched over stdio; a `url` is spoken
+to over Streamable HTTP, with optional static `headers`. `${VAR}` and
+`${VAR:-default}` are expanded from the environment in every field:
 
 ```json
 "mcp_servers": {
   "filesystem": {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/pi"]
+  },
+  "tracker": {
+    "url": "https://mcp.example.com/mcp",
+    "headers": {"X-Team": "${TEAM_ID}"}
   }
 }
 ```
+
+An HTTP server that answers 401 waits for `/mcp login <server>`: picoder finds
+its authorization server (protected-resource and authorization-server
+metadata), registers itself as a client when the server allows dynamic
+registration, and signs you in through the browser with PKCE. The token is kept
+in `~/.config/picoder/mcp-oauth.json` (mode `0600`) and refreshed when it
+expires; `/mcp logout <server>` forgets it. For a server without dynamic
+registration, give its client id: `"oauth": {"client_id": "…", "callback_port": 8976}`.
+Set `PICODER_BROWSER` to the command that opens the sign-in URL on a headless
+box.
+
+A project can also ship its servers in `.mcp.json` (`{"mcpServers": {…}}`, the
+working directory or the repo root). Those can run any command, so each one
+waits for `/mcp approve <name>` (or `/mcp deny <name>`); the decision is
+remembered for that exact entry, so a changed entry asks again.
 
 ## Commands
 
@@ -251,7 +342,8 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | Command | Action |
 | --- | --- |
 | `/model [id\|n]` | open the model picker, or set directly by id/number |
-| `/config` | settings panel (provider, model, key, auth, thinking, …) |
+| `/config` | settings panel (provider, model, key, reasoning, …) |
+| `/effort [level]` | reasoning effort: auto, off, low, medium, high |
 | `/compact [focus]` | summarize older turns to free context (auto at 80%) |
 | `/diff` | show everything changed since the session started |
 | `/undo` | revert the last picoder checkpoint commit |
@@ -262,9 +354,15 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | `/hooks` · `/commands` | list hooks · reload and list custom commands |
 | `!cmd` | run a shell command; output goes to the transcript and the model |
 | `/reset` | clear conversation context |
-| `/new` | delete the session and start fresh |
+| `/new` | start a new session (the current one stays saved) |
+| `/resume [id\|name]` | switch to another saved session here (a picker without an argument) |
+| `/rename <name>` | name this session |
+| `/fork` | carry on in a copy of this conversation; the original stays as it was |
+| `/export [--all] [file]` | save the conversation as Markdown (`--all` keeps system/context messages) |
+| `/sessions [delete <id\|name>]` | list or delete this directory's saved sessions |
 | `/auto` | toggle bypass-permissions |
-| `/mcp` | list configured MCP servers and their tools |
+| `/mcp` | list MCP servers: state, transport, auth, tools and prompts |
+| `/mcp approve\|deny\|login\|logout <server>` | allow a project server, sign in to an HTTP one, … |
 | `/memory` | show persistent memory |
 | `/theme [n]` | open the theme picker, or switch directly |
 | `/init` | summarize this project into `PICODER.md` |
@@ -276,11 +374,13 @@ Type `/` in the composer for the ranked palette, or `/help` for the full list.
 | Key | Action |
 | --- | --- |
 | `Enter` | send |
+| `Shift+Enter` / `Alt+Enter` / `Ctrl+J` / `\` then `Enter` | new line in the composer (the last two work on the Pi's console) |
 | `Shift+Tab` / `Ctrl+P` | cycle permission mode |
-| `↑` / `↓` | scroll the output (3 lines) |
+| `↑` / `↓` | move between the composer's lines; on its first/last line, previous / next prompt |
+| `Home` / `End` | start / end of the composer line |
 | `PgUp` / `PgDn` | scroll the output a page |
 | mouse wheel | scroll the output (when mouse capture is on) |
-| `Ctrl` / `Alt + ↑` / `↓` | composer history |
+| `Ctrl` / `Alt + ↑` / `↓` | scroll the output (3 lines) |
 | `Alt`/`Ctrl`/`Cmd + ←/→` | word / line motion |
 | `Option`/`Alt + Backspace` | delete word backward |
 | `Option`/`Alt + Delete` | delete word forward |
@@ -297,7 +397,7 @@ Without it, some terminals (e.g. Warp in full-screen mode) flatten
 
 Mouse capture is skipped on Warp (`TERM_PROGRAM=WarpTerminal`) because it grabs
 click-drag text selection with no modifier to bypass it — Warp users scroll with
-`↑`/`↓` and `PgUp`/`PgDn` instead. Set `PICODER_MOUSE=1` to force capture on
+`Ctrl`+`↑`/`↓` and `PgUp`/`PgDn` instead. Set `PICODER_MOUSE=1` to force capture on
 (wheel scrolling, at the cost of native selection), or `PICODER_MOUSE=0` to turn
 it off everywhere.
 

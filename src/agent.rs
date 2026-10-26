@@ -2,7 +2,7 @@
 //! the blocking model/tool loop, talking to the UI thread over channels.
 
 use crate::api::{self, AccumCall, Message};
-use crate::config::{atomic_write, Config, ConfigPatch};
+use crate::config::{Config, ConfigPatch};
 use crate::hooks::{Hooks, Outcome};
 use crate::mcp::Mcp;
 use crate::policy::{Decision, Policy};
@@ -44,15 +44,22 @@ pub enum UiEvent {
     /// answer back over `reply` (None = user declined).
     Question { prompt: String, reply: Sender<Option<String>> },
     ModelList(Vec<String>),
+    /// The running MCP servers' prompts, as (`/mcp__server__prompt`, description)
+    /// slash-palette entries.
+    McpPrompts(Vec<(String, String)>),
+    /// An MCP prompt fetched for `/mcp__server__prompt args`: send `text` as
+    /// the user's turn (echoed as `shown`).
+    McpPromptReady { shown: String, text: String },
     /// `/rewind` choices, newest first: "N. prompt preview".
     TurnList(Vec<String>),
     /// After a rewind: the prompt that was undone, to put back in the composer.
     Rewound(String),
     ModelChanged(String),
-    Usage { prompt: u32, completion: u32 },
+    /// One completion's tokens (cached input broken out, for cost).
+    Usage(crate::money::Spent),
     /// Tokens spent by a background call (compaction summary, follow-up
     /// suggestion): counted toward session cost, but not the ctx bar.
-    Spend { prompt: u32, completion: u32 },
+    Spend(crate::money::Spent),
     /// Re-estimate of the next prompt's size (after compaction) so the UI's
     /// context bar drops immediately, without touching session totals.
     Context(u32),
@@ -70,11 +77,20 @@ pub enum UiEvent {
     TurnDone,
     /// A suggested follow-up prompt generated after the turn completes.
     Suggestion(String),
+    /// `/resume` choices, newest first: "id  label · when · n msgs".
+    SessionList(Vec<String>),
+    /// Now in another session: the transcript is replaced by `replay`
+    /// ((role, text) of its recent exchanges) and `label` names the session.
+    SessionSwitched { label: String, replay: Vec<(String, String)> },
+    /// The current session ("id — label"), for /status.
+    SessionLabel(String),
 }
 
 /// UI → Worker control messages (processed between turns).
 pub enum WorkerCmd {
-    User { text: String, images: Vec<String> },
+    /// A prompt: `text` as the model gets it (attachments expanded), `typed`
+    /// as the user wrote it, which `/rewind` hands back to the composer.
+    User { text: String, images: Vec<String>, typed: String },
     Reset,
     /// `/compact [focus]`: summarize older turns, optionally steering the
     /// summary toward what the user wants preserved.
@@ -96,13 +112,29 @@ pub enum WorkerCmd {
     Patch(ConfigPatch),
     ListModels,
     ListMcp,
+    /// `/mcp approve|deny|login|logout <server>`.
+    Mcp(String),
+    /// `/mcp__server__prompt args`: fetch the prompt for the UI to send.
+    McpPrompt { name: String, args: String },
     /// `/rewind`: list this session's prompts for the picker.
     ListTurns,
     /// Rewind to just before turn N (0-based, oldest first): undo picoder's
     /// checkpoints since then and drop that prompt and everything after it.
     Rewind(usize),
-    /// `/new`: delete the session file and reset to a clean slate.
+    /// `/new`: start a new session; the current one stays saved.
     New,
+    /// `/resume`: list this directory's sessions for the picker.
+    ListSessions,
+    /// Switch to the saved session `key` names (an id, id prefix or name).
+    Resume(String),
+    /// `/rename <name>` the current session.
+    Rename(String),
+    /// `/fork`: carry on in a copy of this conversation; the original stays.
+    Fork,
+    /// `/export [--all] [file]`: write the conversation as Markdown.
+    Export(String),
+    /// `/sessions [delete <id|name>]`: list or delete saved sessions.
+    Sessions(String),
     Quit,
 }
 
@@ -164,6 +196,8 @@ struct Worker {
     ctx_detected: Arc<Mutex<Option<(String, u32)>>>,
     /// Where each prompt of this run starts, for `/rewind`.
     turns: Vec<TurnMark>,
+    /// When the session was last written mid-turn (see run_loop).
+    last_save: std::time::Instant,
 }
 
 /// A user prompt `/rewind` can go back to: its index in `messages` and the
@@ -218,18 +252,22 @@ pub fn spawn(
             }
         }
         let system_len = system_prefix_len(&messages);
-        // Launch MCP servers before the loop (can take a moment per server).
-        let mcp = if cfg.mcp_servers.is_empty() {
+        // Launch MCP servers (config.json's and the project's .mcp.json) before
+        // the loop; this can take a moment per server.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let entries = crate::mcp::entries(&cfg.mcp_servers, &cwd);
+        let mcp = if entries.is_empty() {
             Mcp::disabled()
         } else {
-            let _ = ui.send(UiEvent::Notice(format!(
-                "starting {} MCP server(s)…",
-                cfg.mcp_servers.len()
-            )));
-            let mcp = Mcp::launch(&cfg.mcp_servers);
+            let _ = ui.send(UiEvent::Notice(format!("starting {} MCP server(s)…", entries.len())));
+            let mcp = Mcp::start(entries, crate::config::config_dir());
             for s in mcp.status() {
                 let msg = format!("mcp {}: {}", s.name, s.detail);
-                let _ = ui.send(if s.ok { UiEvent::Notice(msg) } else { UiEvent::Error(msg) });
+                let _ = ui.send(if s.ok || s.waiting { UiEvent::Notice(msg) } else { UiEvent::Error(msg) });
+            }
+            let palette = mcp.prompt_palette();
+            if !palette.is_empty() {
+                let _ = ui.send(UiEvent::McpPrompts(palette));
             }
             mcp
         };
@@ -259,7 +297,9 @@ pub fn spawn(
             recent_calls: Vec::new(),
             ctx_detected: Arc::new(Mutex::new(None)),
             turns: Vec::new(),
+            last_save: std::time::Instant::now(),
         };
+        let _ = w.ui.send(UiEvent::SessionLabel(w.session_label()));
         w.ensure_oauth_fresh(); // keep a resumed subscription login authenticated
         w.refresh_balance(); // initial account balance for the status line
         w.refresh_context_window(); // refine the ctx window from the provider
@@ -278,15 +318,28 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::Context(0));
                 }
                 WorkerCmd::New => {
-                    // Delete the session file so we start fresh.
-                    if let Some(ref path) = w.session {
-                        let _ = std::fs::remove_file(path);
+                    // The current session stays saved and resumable; carry on
+                    // in a fresh one (its file appears with the first save).
+                    if w.session.is_some() {
+                        w.session = Some(crate::sessions::Store::here().new_path());
                     }
                     w.messages.truncate(w.system_len);
                     w.turns.clear();
                     w.last_prompt = 0;
-                    let _ = w.ui.send(UiEvent::Notice("new session — fresh start.".into()));
+                    let _ = w.ui.send(UiEvent::Notice(
+                        "new session — the previous one stays saved (/resume to go back).".into(),
+                    ));
                     let _ = w.ui.send(UiEvent::Context(0));
+                    let _ = w.ui.send(UiEvent::SessionLabel(w.session_label()));
+                }
+                WorkerCmd::ListSessions
+                | WorkerCmd::Resume(_)
+                | WorkerCmd::Rename(_)
+                | WorkerCmd::Fork
+                | WorkerCmd::Export(_)
+                | WorkerCmd::Sessions(_) => {
+                    w.session_cmd(cmd);
+                    let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::Compact(focus) => {
                     w.cancel.store(false, Ordering::Relaxed);
@@ -345,8 +398,10 @@ pub fn spawn(
                         .enumerate()
                         .rev()
                         .map(|(i, t)| {
-                            let line: String = t.prompt.chars().take(80).collect();
-                            let more = if t.prompt.chars().count() > 80 { "…" } else { "" };
+                            // One picker row: a multi-line prompt is flattened.
+                            let flat = t.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let line: String = flat.chars().take(80).collect();
+                            let more = if flat.chars().count() > 80 { "…" } else { "" };
                             format!("{}. {line}{more}", i + 1)
                         })
                         .collect();
@@ -361,20 +416,58 @@ pub fn spawn(
                     let _ = w.ui.send(UiEvent::TurnDone);
                 }
                 WorkerCmd::ListMcp => {
-                    if w.mcp.status().is_empty() {
+                    if w.mcp.is_empty() {
                         let _ = w.ui.send(UiEvent::Notice(
-                            "no MCP servers configured (add \"mcp_servers\" to config.json).".into(),
+                            "no MCP servers configured (add \"mcp_servers\" to config.json, or a project .mcp.json).".into(),
                         ));
                     } else {
-                        for s in w.mcp.status() {
-                            let tag = if s.ok { "ok" } else { "FAILED" };
-                            let _ = w.ui.send(UiEvent::Notice(format!("mcp {} [{tag}]: {}", s.name, s.detail)));
-                        }
-                        for t in w.mcp.tools() {
-                            let _ = w.ui.send(UiEvent::Notice(format!("  {}", t.full_name)));
+                        for line in w.mcp.describe() {
+                            let _ = w.ui.send(UiEvent::Notice(line));
                         }
                     }
                     let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::Mcp(args) => {
+                    let mut words = args.split_whitespace();
+                    let (sub, name) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                    let ui = w.ui.clone();
+                    let result = match (sub, name) {
+                        (_, "") => Err("usage: /mcp [approve|deny|login|logout] <server>".to_string()),
+                        ("approve", n) => w.mcp.decide(n, true),
+                        ("deny", n) => w.mcp.decide(n, false),
+                        ("login", n) => w.mcp.login(n, &|m| {
+                            let _ = ui.send(UiEvent::Notice(m));
+                        }),
+                        ("logout", n) => w.mcp.logout(n),
+                        (other, _) => Err(format!("unknown /mcp command {other:?}: approve, deny, login or logout")),
+                    };
+                    match result {
+                        Ok(m) => {
+                            let _ = w.ui.send(UiEvent::Notice(m));
+                        }
+                        Err(e) => {
+                            let _ = w.ui.send(UiEvent::Error(e));
+                        }
+                    }
+                    // Servers may have started or stopped: refresh what the model sees.
+                    w.tools = api::tools_spec_with(w.mcp.tools());
+                    let _ = w.ui.send(UiEvent::McpPrompts(w.mcp.prompt_palette()));
+                    let _ = w.ui.send(UiEvent::TurnDone);
+                }
+                WorkerCmd::McpPrompt { name, args } => {
+                    w.cancel.store(false, Ordering::Relaxed);
+                    let cancel = w.cancel.clone();
+                    match w.mcp.get_prompt(&name, &args, &cancel) {
+                        Ok(text) => {
+                            let shown = format!("/{name}{}", if args.is_empty() { String::new() } else { format!(" {args}") });
+                            // The UI sends it on as an ordinary turn (which ends with its own TurnDone).
+                            let _ = w.ui.send(UiEvent::McpPromptReady { shown, text });
+                        }
+                        Err(e) => {
+                            let _ = w.ui.send(UiEvent::Error(e));
+                            let _ = w.ui.send(UiEvent::TurnDone);
+                        }
+                    }
                 }
                 WorkerCmd::Patch(p) => {
                     w.cfg.apply_patch(&p);
@@ -394,7 +487,7 @@ pub fn spawn(
                         w.refresh_context_window(); // new provider/model window
                     }
                 }
-                WorkerCmd::User { text, images } => {
+                WorkerCmd::User { text, images, typed } => {
                     w.cancel.store(false, Ordering::Relaxed);
                     // Supersede the previous turn's follow-up suggestion: stop its
                     // call early and mark it stale so a late result is dropped.
@@ -421,7 +514,7 @@ pub fn spawn(
                         continue;
                     }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        w.run_turn(text, images);
+                        w.run_turn(text, images, typed);
                         w.run_stop_hooks();
                     }));
                     if result.is_err() {
@@ -595,27 +688,177 @@ impl Worker {
         }
     }
 
-    fn save_session(&self) {
-        let Some(path) = &self.session else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Strip image payloads: a few photos would balloon the session file to
-        // multi-MB rewritten every turn (painful on a Pi Zero). The text
-        // around each image survives, so a resumed session stays coherent.
-        let slim: Vec<Message> = self
-            .messages
+    /// The conversation as sessions store it. Image payloads are stripped: a
+    /// few photos would balloon a file rewritten every turn (painful on a Pi
+    /// Zero); the text around each image keeps a resumed session coherent.
+    fn slim_messages(&self) -> Vec<Message> {
+        self.messages
             .iter()
             .map(|m| {
                 let mut m = m.clone();
                 m.images.clear();
                 m
             })
-            .collect();
-        if let Ok(json) = serde_json::to_string(&slim) {
-            // Atomic: a power loss mid-rewrite must not corrupt the session that
-            // `--continue` depends on — leave the previous turn's file intact.
-            let _ = atomic_write(path, json.as_bytes());
+            .collect()
+    }
+
+    fn save_session(&self) {
+        let Some(path) = &self.session else { return };
+        // Atomic writes: a power loss mid-save must not corrupt the session
+        // `--continue` depends on — the previous turn's file stays intact.
+        let _ = crate::sessions::save(&crate::sessions::Store::here(), path, &self.slim_messages());
+    }
+
+    /// "id — label" of the current session, for /status.
+    fn session_label(&self) -> String {
+        let Some(path) = &self.session else {
+            return "not saved (one-shot run)".into();
+        };
+        let meta = crate::sessions::read_meta(path).unwrap_or_else(|| crate::sessions::Meta {
+            id: path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+            title: crate::sessions::title_of(&self.messages),
+            ..Default::default()
+        });
+        format!("{} — {}", meta.id, meta.label())
+    }
+
+    /// /resume, /rename, /fork, /export and /sessions.
+    fn session_cmd(&mut self, cmd: WorkerCmd) {
+        use crate::sessions::{self as ss, Store};
+        let store = Store::here();
+        let now = crate::config::now_unix();
+        let err = |w: &Self, e: String| {
+            let _ = w.ui.send(UiEvent::Error(e));
+        };
+        match cmd {
+            WorkerCmd::ListSessions => {
+                let items: Vec<String> = store
+                    .list()
+                    .iter()
+                    .map(|(m, p)| ss::summary_line(m, now, self.session.as_ref() == Some(p)))
+                    .collect();
+                if items.is_empty() {
+                    let _ = self.ui.send(UiEvent::Notice("no saved sessions in this directory yet.".into()));
+                }
+                let _ = self.ui.send(UiEvent::SessionList(items));
+            }
+            WorkerCmd::Resume(key) => match store.find(&key) {
+                Err(e) => err(self, e),
+                Ok((_, path)) if self.session.as_ref() == Some(&path) => {
+                    let _ = self.ui.send(UiEvent::Notice("already in that session.".into()));
+                }
+                Ok((meta, path)) => match ss::load(&path) {
+                    None => err(self, format!("session {} is empty or unreadable.", meta.id)),
+                    Some(mut msgs) => {
+                        repair_orphans(&mut msgs);
+                        self.messages = msgs;
+                        self.system_len = system_prefix_len(&self.messages);
+                        self.session = Some(path);
+                        // Turn marks index the old conversation.
+                        self.turns.clear();
+                        self.recent_calls.clear();
+                        self.pending_images.clear();
+                        let est = estimate_tokens(&self.messages);
+                        self.last_prompt = est;
+                        let _ = self.ui.send(UiEvent::Context(est));
+                        let _ = self.ui.send(UiEvent::SessionSwitched {
+                            label: self.session_label(),
+                            replay: ss::replay(&self.messages),
+                        });
+                    }
+                },
+            },
+            WorkerCmd::Rename(name) => {
+                let Some(path) = self.session.clone() else {
+                    return err(self, "this run isn't saved, so it can't be named.".into());
+                };
+                self.save_session();
+                match ss::rename(&path, &name) {
+                    Ok(m) => {
+                        let _ = self.ui.send(UiEvent::Notice(format!("session {} is now \"{}\".", m.id, m.label())));
+                        let _ = self.ui.send(UiEvent::SessionLabel(self.session_label()));
+                    }
+                    Err(e) => err(self, format!("rename failed: {e}")),
+                }
+            }
+            WorkerCmd::Fork => {
+                let Some(from) = self.session.clone() else {
+                    return err(self, "this run isn't saved, so there's nothing to fork.".into());
+                };
+                match ss::fork(&store, &from, &self.slim_messages()) {
+                    Ok(to) => {
+                        let old = from.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                        self.session = Some(to);
+                        let _ = self.ui.send(UiEvent::Notice(format!(
+                            "forked: you're now in {}; {old} stays as it was (/resume to go back).",
+                            self.session_label()
+                        )));
+                        let _ = self.ui.send(UiEvent::SessionLabel(self.session_label()));
+                    }
+                    Err(e) => err(self, format!("fork failed: {e}")),
+                }
+            }
+            WorkerCmd::Export(arg) => {
+                let all = arg.split_whitespace().any(|a| a == "--all");
+                let file: String = arg.split_whitespace().filter(|a| *a != "--all").collect::<Vec<_>>().join(" ");
+                let meta = self.session.as_deref().and_then(ss::read_meta).unwrap_or_else(|| ss::Meta {
+                    id: self.session_label().split(' ').next().unwrap_or("").to_string(),
+                    title: ss::title_of(&self.messages),
+                    created: now,
+                    cwd: store.cwd.display().to_string(),
+                    ..Default::default()
+                });
+                let target = if file.is_empty() {
+                    let name = ss::export_name(&meta);
+                    let p = store.cwd.join(&name);
+                    if p.exists() {
+                        store.cwd.join(name.replace(".md", &format!("-{}.md", meta.id)))
+                    } else {
+                        p
+                    }
+                } else {
+                    store.cwd.join(tools::expand(&file))
+                };
+                match std::fs::write(&target, ss::to_markdown(&meta, &self.messages, all)) {
+                    Ok(()) => {
+                        let _ = self.ui.send(UiEvent::Notice(format!("exported the conversation to {}", target.display())));
+                    }
+                    Err(e) => err(self, format!("export failed: {e}")),
+                }
+            }
+            WorkerCmd::Sessions(arg) => {
+                let arg = arg.trim();
+                if let Some(key) = arg.strip_prefix("delete").map(str::trim).filter(|_| arg.starts_with("delete")) {
+                    if key.is_empty() {
+                        return err(self, "usage: /sessions delete <id|name>".into());
+                    }
+                    match store.find(key) {
+                        Err(e) => err(self, e),
+                        Ok((_, p)) if self.session.as_ref() == Some(&p) => {
+                            err(self, "that's the session you're in; /new or /resume another first.".into())
+                        }
+                        Ok((m, p)) => {
+                            ss::delete(&p);
+                            let _ = self.ui.send(UiEvent::Notice(format!("deleted session {} ({}).", m.id, m.label())));
+                        }
+                    }
+                } else if arg.is_empty() {
+                    let list = store.list();
+                    let _ = self.ui.send(UiEvent::Notice(format!(
+                        "{} saved session(s) here, newest first (/resume to switch, /sessions delete <id>):",
+                        list.len()
+                    )));
+                    for (m, p) in list.iter().take(30) {
+                        let _ = self.ui.send(UiEvent::Notice(format!(
+                            "  {}",
+                            ss::summary_line(m, now, self.session.as_ref() == Some(p))
+                        )));
+                    }
+                } else {
+                    err(self, "usage: /sessions, or /sessions delete <id|name>".into());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -718,6 +961,7 @@ impl Worker {
                     images: Vec::new(),
                     tool_calls: None,
                     tool_call_id: None,
+                    native: None,
                 });
                 // Prompts inside the summary can't be rewound to any more; the
                 // kept tail moves up behind the summary.
@@ -727,6 +971,11 @@ impl Worker {
                     t.at = t.at - tail_start + kept_from;
                 }
                 new.extend_from_slice(&self.messages[tail_start..]);
+                // A client-side summary rewrites the history that signed
+                // thinking was bound to: replay the kept turns without it.
+                for m in &mut new {
+                    m.native = None;
+                }
                 self.messages = new;
                 // Rough size estimate so the UI's ctx bar drops right away.
                 let est = estimate_tokens(&self.messages);
@@ -749,15 +998,13 @@ impl Worker {
         }
     }
 
-    fn run_turn(&mut self, text: String, images: Vec<String>) {
+    fn run_turn(&mut self, text: String, images: Vec<String>, typed: String) {
         // Drop images a previous interrupted turn queued but never consumed,
         // so they can't surface mid-way through an unrelated turn.
         self.pending_images.clear();
         self.recent_calls.clear();
         if !self.quiet {
-            // The typed line only: attachments and hook context follow a blank line.
-            let prompt = text.split("\n\n").next().unwrap_or_default().to_string();
-            self.turns.push(TurnMark { at: self.messages.len(), head: self.checkpoint_head(), prompt });
+            self.turns.push(TurnMark { at: self.messages.len(), head: self.checkpoint_head(), prompt: typed });
         }
         self.messages.push(Message::user_with_images(text, images));
         self.run_loop();
@@ -921,7 +1168,7 @@ impl Worker {
                     let _ = ui3.send(UiEvent::Notice(m.to_string()));
                 },
             );
-            let (content, calls, usage) = match res {
+            let (content, calls, usage, native) = match res {
                 Ok(x) => x,
                 Err(e) => {
                     let _ = self.ui.send(UiEvent::Error(e.to_string()));
@@ -930,10 +1177,7 @@ impl Worker {
             };
             if let Some(u) = usage {
                 self.last_prompt = u.prompt_tokens;
-                let _ = self.ui.send(UiEvent::Usage {
-                    prompt: u.prompt_tokens,
-                    completion: u.total_tokens.saturating_sub(u.prompt_tokens),
-                });
+                let _ = self.ui.send(UiEvent::Usage(u.spent()));
             }
             if !quiet {
                 let _ = self.ui.send(UiEvent::AssistantCommit);
@@ -952,6 +1196,7 @@ impl Worker {
                         images: Vec::new(),
                         tool_calls: None,
                         tool_call_id: None,
+                        native: None,
                     });
                 }
                 let _ = self.ui.send(UiEvent::Notice("(interrupted)".into()));
@@ -964,6 +1209,7 @@ impl Worker {
                 images: Vec::new(),
                 tool_calls: None,
                 tool_call_id: None,
+                native,
             };
             if !calls.is_empty() {
                 msg.tool_calls = Some(
@@ -1012,6 +1258,14 @@ impl Worker {
             }
             if interrupted {
                 return String::new();
+            }
+            // A long turn used to live only in memory until it ended: a crash
+            // lost it, and nothing outside could inspect it. Save as it goes —
+            // at most every 20s, since a Pi's SD card shouldn't take a full
+            // rewrite every round. Sub-agents run on a swapped-in history.
+            if !quiet && self.last_save.elapsed() >= std::time::Duration::from_secs(20) {
+                self.save_session();
+                self.last_save = std::time::Instant::now();
             }
             // view_image queues images to hand to the model on the next call;
             // add them as a user message after the tool results (which must
@@ -1208,6 +1462,7 @@ impl Worker {
             "glob" => s("pattern").into_iter().collect(),
             "web_fetch" => s("url").into_iter().collect(),
             "web_search" => s("query").into_iter().collect(),
+            "skill" => s("name").into_iter().collect(),
             _ => Vec::new(),
         }
     }
@@ -1389,8 +1644,9 @@ impl Worker {
                 r
             }
             "edit_file" => {
-                let path = s("path");
-                match tools::edit_preview(path, s("old_text"), s("new_text")) {
+                let a = |keys: &[&str]| str_arg(args, keys).unwrap_or("");
+                let path = a(&["path", "file_path"]);
+                match tools::edit_preview(path, a(&["old_text", "old_string"]), a(&["new_text", "new_string"])) {
                     tools::EditPreview::Err(e) => {
                         self.result_event(&e);
                         e
@@ -1414,12 +1670,14 @@ impl Worker {
                 }
             }
             "multi_edit" => {
-                let edits = parse_edits(args.get("edits"));
-                if edits.is_empty() {
-                    let r = "ERROR: multi_edit needs an 'edits' array of {path, old_text, new_text}.".to_string();
-                    self.result_event(&r);
-                    return r;
-                }
+                let edits = match parse_edits(args) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let r = format!("ERROR: multi_edit: {e}. Nothing was applied.");
+                        self.result_event(&r);
+                        return r;
+                    }
+                };
                 match tools::multi_edit_plan(&edits) {
                     Err(e) => {
                         self.result_event(&e);
@@ -1453,6 +1711,10 @@ impl Worker {
                             &format!("multi_edit: {} file(s)", applied.len()),
                         );
                         let mut r = format!("OK applied edits to {} file(s){note}", applied.len());
+                        let noop = edits.iter().filter(|e| e.old_text == e.new_text).count();
+                        if noop > 0 {
+                            r.push_str(&format!(" (skipped {noop} edit(s) with identical old_text and new_text)"));
+                        }
                         if !errs.is_empty() {
                             r.push_str(&format!("\n{} failed:\n{}", errs.len(), errs.join("\n")));
                         }
@@ -1464,15 +1726,16 @@ impl Worker {
             other if self.mcp.handles(other) => {
                 // MCP tools can have side effects; gate them like bash unless
                 // auto-approve is on. Plan mode can't tell read from write, so
-                // it blocks them all.
-                if self.perm.load(Ordering::Relaxed) == PERM_PLAN {
+                // it blocks them all — except the resource tools, which only read.
+                let read_only = self.mcp.is_read_only(other);
+                if self.perm.load(Ordering::Relaxed) == PERM_PLAN && !read_only {
                     let r = "[plan mode] Not executed. picoder is in read-only plan mode — \
                              MCP tools may have side effects."
                         .to_string();
                     self.result_event(&r);
                     return r;
                 }
-                if !pre_approved && !self.approve(&format!("call MCP tool {other}"), Some(other.to_string())) {
+                if !pre_approved && !read_only && !self.approve(&format!("call MCP tool {other}"), Some(other.to_string())) {
                     let r = "DENIED by user.".to_string();
                     self.result_event(&r);
                     return r;
@@ -1647,7 +1910,7 @@ impl Call {
         let summary = args
             .as_ref()
             .and_then(|a| {
-                ["command", "path", "pattern", "note", "query", "url", "question", "description"]
+                ["command", "path", "pattern", "note", "query", "url", "question", "description", "name"]
                     .iter()
                     .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
             })
@@ -1666,7 +1929,7 @@ impl Call {
 /// Read-only tools that need no approval, prompt or worker state, so several
 /// from one response can run side by side.
 fn parallel_safe(name: &str) -> bool {
-    matches!(name, "read_file" | "list_files" | "grep" | "glob" | "web_fetch" | "web_search" | "recall")
+    matches!(name, "read_file" | "list_files" | "grep" | "glob" | "web_fetch" | "web_search" | "recall" | "skill")
 }
 
 /// The read-only tools' own work, free of the worker so a batch can run on
@@ -1689,16 +1952,14 @@ fn run_readonly(http: &ureq::Agent, name: &str, args: &Value) -> String {
         "web_fetch" => tools::web_fetch(http, s("url")),
         "web_search" => tools::web_search(http, s("query")),
         "recall" => tools::recall(args.get("query").and_then(|v| v.as_str())),
+        "skill" => crate::commands::skill_tool(s("name")),
         _ => format!("ERROR: {name} is not a read-only tool"),
     }
 }
 
 /// A background call's token usage as a session-cost event.
 fn spend(u: &api::Usage) -> UiEvent {
-    UiEvent::Spend {
-        prompt: u.prompt_tokens,
-        completion: u.total_tokens.saturating_sub(u.prompt_tokens),
-    }
+    UiEvent::Spend(u.spent())
 }
 
 fn estimate_tokens(messages: &[Message]) -> u32 {
@@ -1723,18 +1984,40 @@ fn system_prefix_len(messages: &[Message]) -> usize {
 }
 
 /// Parse the `edits` argument of multi_edit into typed edit requests.
-fn parse_edits(v: Option<&Value>) -> Vec<tools::EditReq> {
-    let Some(arr) = v.and_then(|v| v.as_array()) else {
-        return Vec::new();
+/// The first string among `keys` in `v`: models trained on other agents send
+/// Claude Code's spellings (`file_path`, `old_string`, `new_string`).
+fn str_arg<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+}
+
+/// multi_edit's edits, all or nothing: a malformed edit is an error naming it,
+/// never silently dropped while the rest apply. An edit without a path uses
+/// the previous edit's, else the call's top-level `path`. `edits` may also
+/// arrive as a JSON string.
+fn parse_edits(args: &Value) -> Result<Vec<tools::EditReq>, String> {
+    let parsed;
+    let edits = match args.get("edits") {
+        Some(Value::String(s)) => {
+            parsed = serde_json::from_str::<Value>(s).map_err(|_| "'edits' is a string that isn't a JSON array".to_string())?;
+            &parsed
+        }
+        Some(v) => v,
+        None => return Err("missing 'edits'".into()),
     };
-    arr.iter()
-        .filter_map(|e| {
-            let path = e.get("path")?.as_str()?.to_string();
-            let old_text = e.get("old_text")?.as_str()?.to_string();
-            let new_text = e.get("new_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            Some(tools::EditReq { path, old_text, new_text })
-        })
-        .collect()
+    let arr = edits.as_array().filter(|a| !a.is_empty()).ok_or("'edits' must be a non-empty array")?;
+    let mut path = str_arg(args, &["path", "file_path"]).map(str::to_string);
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, e) in arr.iter().enumerate() {
+        let n = i + 1;
+        if let Some(p) = str_arg(e, &["path", "file_path"]) {
+            path = Some(p.to_string());
+        }
+        let path = path.clone().ok_or(format!("edit {n} has no 'path' (give each edit one, or a top-level 'path')"))?;
+        let old_text = str_arg(e, &["old_text", "old_string"]).ok_or(format!("edit {n} has no 'old_text'"))?.to_string();
+        let new_text = str_arg(e, &["new_text", "new_string"]).ok_or(format!("edit {n} has no 'new_text'"))?.to_string();
+        out.push(tools::EditReq { path, old_text, new_text });
+    }
+    Ok(out)
 }
 
 /// System prompt for a delegated sub-agent. Its whole job is one task; its
@@ -1752,8 +2035,11 @@ ask the user questions or spawn further sub-agents.
 - You have up to {max} tool-call rounds to complete the task.
 - Stay strictly within the delegated task.
 - When done, reply with a concise final report (findings, files changed, key results) \
-and no tool call. That report is ALL the parent agent sees, so make it self-contained.",
-        max = max
+and no tool call. That report is ALL the parent agent sees, so make it self-contained.{skills}",
+        max = max,
+        skills = crate::commands::skills_prompt(&crate::commands::discover_skills())
+            .map(|s| format!("\n\n{s}"))
+            .unwrap_or_default()
     )
 }
 
@@ -1771,8 +2057,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multi_edit_args_fail_loudly_and_paths_carry_over() {
+        use serde_json::json;
+        let e = |o: &str, n: &str| json!({"old_text": o, "new_text": n});
+        // No path anywhere: an error naming the edit (it used to be dropped).
+        let err = parse_edits(&json!({"edits": [e("a", "b")]})).unwrap_err();
+        assert!(err.contains("edit 1 has no 'path'"), "{err}");
+        // A top-level path, inherited by every edit; a later path takes over.
+        let ok = parse_edits(&json!({"path": "x.rs", "edits": [
+            e("a", "b"),
+            {"path": "y.rs", "old_string": "c", "new_string": "d"},
+            e("e", "f"),
+        ]}))
+        .unwrap();
+        let paths: Vec<&str> = ok.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["x.rs", "y.rs", "y.rs"]);
+        assert_eq!((ok[1].old_text.as_str(), ok[1].new_text.as_str()), ("c", "d"), "Claude Code spellings");
+        // A missing field fails the whole batch instead of being skipped.
+        let err = parse_edits(&json!({"path": "x", "edits": [e("a", "b"), {"old_text": "c"}]})).unwrap_err();
+        assert!(err.contains("edit 2 has no 'new_text'"), "{err}");
+        // edits sent as a JSON string still parse.
+        let s = json!({"path": "x", "edits": "[{\"old_text\":\"a\",\"new_text\":\"b\"}]"});
+        assert_eq!(parse_edits(&s).unwrap().len(), 1);
+        assert!(parse_edits(&json!({"edits": []})).is_err());
+    }
+
+    #[test]
     fn only_read_only_tools_run_in_parallel() {
-        for t in ["read_file", "list_files", "grep", "glob", "web_fetch", "web_search", "recall"] {
+        for t in ["read_file", "list_files", "grep", "glob", "web_fetch", "web_search", "recall", "skill"] {
             assert!(parallel_safe(t), "{t}");
         }
         // Anything that writes, prompts, recurses or touches worker state
@@ -1796,7 +2108,7 @@ mod tests {
         let mut msgs = vec![
             Message::system("s"),
             Message::user("u"),
-            Message { role: "assistant".into(), content: String::new(), images: vec![], tool_calls: Some(vec![call("a"), call("b"), call("c")]), tool_call_id: None },
+            Message { role: "assistant".into(), content: String::new(), images: vec![], tool_calls: Some(vec![call("a"), call("b"), call("c")]), tool_call_id: None, native: None },
             Message::tool("a".into(), "done".into()),
         ];
         repair_orphans(&mut msgs);

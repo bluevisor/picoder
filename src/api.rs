@@ -2,7 +2,7 @@
 //! model listing. Uses ureq (blocking) + rustls so it cross-compiles to ARMv6
 //! as a single static binary with no system TLS dependency.
 
-use crate::config::Config;
+use crate::config::{ApiKind, Config};
 use crate::money::{Balance, Currency};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -117,20 +117,26 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// An assistant turn in its provider's own wire form (Anthropic content
+    /// blocks with signed thinking, Responses output items with encrypted
+    /// reasoning), replayed verbatim to that same api/model within this run so
+    /// reasoning carries across tool turns. Never sent on chat/completions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<serde_json::Value>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Message {
-        Message { role: "system".into(), content: content.into(), images: Vec::new(), tool_calls: None, tool_call_id: None }
+        Message { role: "system".into(), content: content.into(), images: Vec::new(), tool_calls: None, tool_call_id: None, native: None }
     }
     pub fn user(content: impl Into<String>) -> Message {
-        Message { role: "user".into(), content: content.into(), images: Vec::new(), tool_calls: None, tool_call_id: None }
+        Message { role: "user".into(), content: content.into(), images: Vec::new(), tool_calls: None, tool_call_id: None, native: None }
     }
     pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Message {
-        Message { role: "user".into(), content: content.into(), images, tool_calls: None, tool_call_id: None }
+        Message { role: "user".into(), content: content.into(), images, tool_calls: None, tool_call_id: None, native: None }
     }
     pub fn tool(id: String, content: String) -> Message {
-        Message { role: "tool".into(), content, images: Vec::new(), tool_calls: None, tool_call_id: Some(id) }
+        Message { role: "tool".into(), content, images: Vec::new(), tool_calls: None, tool_call_id: Some(id), native: None }
     }
 }
 
@@ -142,15 +148,22 @@ fn messages_payload(messages: &[Message], supports_images: bool) -> Vec<serde_js
     messages
         .iter()
         .map(|m| {
+            let plain = |m: &Message| {
+                let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("native"); // picoder's own bookkeeping, not the wire format
+                }
+                v
+            };
             if m.images.is_empty() {
-                return serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+                return plain(m);
             }
             if !supports_images {
                 // Drop the payload, not just the multimodal form: serializing
                 // `m` as-is would ship the base64 blobs in an `images` field.
-                let mut plain = m.clone();
-                plain.images.clear();
-                return serde_json::to_value(&plain).unwrap_or(serde_json::Value::Null);
+                let mut stripped = m.clone();
+                stripped.images.clear();
+                return plain(&stripped);
             }
             let mut parts: Vec<serde_json::Value> = Vec::new();
             if !m.content.is_empty() {
@@ -231,7 +244,7 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"id":{"type":"integer","description":"Job id from bash."}},
             "required":["id"]
         })),
-        tool("read_file","Read a UTF-8 text file, optionally a 1-based inclusive line range.", serde_json::json!({
+        tool("read_file","Read a UTF-8 text file, optionally a 1-based inclusive line range. Each line comes back as `<line number><TAB><content>`: everything after the tab is the file's exact text, indentation included. Never copy the number or the tab into edit_file's old_text.", serde_json::json!({
             "type":"object",
             "properties":{
                 "path":{"type":"string"},
@@ -245,22 +258,25 @@ pub fn tools_spec() -> serde_json::Value {
             "properties":{"path":{"type":"string"},"content":{"type":"string"}},
             "required":["path","content"]
         })),
-        tool("edit_file","Replace an exact substring in a file. old_text must appear exactly once. Use for surgical edits.", serde_json::json!({
+        tool("edit_file","Replace an exact substring in a file. old_text must appear exactly once; copy it from read_file's output after the tab, with the file's exact indentation. Use for surgical edits.", serde_json::json!({
             "type":"object",
             "properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},
             "required":["path","old_text","new_text"]
         })),
         tool("multi_edit","Apply a batch of edits across one or more files in a single approval and commit. Edits apply in order (so several edits to the same file compose); each old_text must be unique in its file at the time it runs. All-or-nothing: if any edit can't be located, none are applied.", serde_json::json!({
             "type":"object",
-            "properties":{"edits":{"type":"array","items":{
-                "type":"object",
-                "properties":{
-                    "path":{"type":"string"},
-                    "old_text":{"type":"string"},
-                    "new_text":{"type":"string"}
-                },
-                "required":["path","old_text","new_text"]
-            }}},
+            "properties":{
+                "path":{"type":"string","description":"Default file for edits that don't name their own path."},
+                "edits":{"type":"array","items":{
+                    "type":"object",
+                    "properties":{
+                        "path":{"type":"string","description":"File to edit; defaults to the previous edit's path."},
+                        "old_text":{"type":"string"},
+                        "new_text":{"type":"string"}
+                    },
+                    "required":["old_text","new_text"]
+                }}
+            },
             "required":["edits"]
         })),
         tool("list_files","List entries in a directory (non-recursive).", serde_json::json!({
@@ -341,9 +357,24 @@ fn tool(name: &str, desc: &str, params: serde_json::Value) -> serde_json::Value 
 }
 
 /// The built-in tool schema plus any MCP tools, as one array for the request.
+/// The `skill` tool is only offered when skills are installed, so it costs no
+/// tokens otherwise.
 pub fn tools_spec_with(mcp: &[crate::mcp::McpTool]) -> serde_json::Value {
     let mut spec = tools_spec();
     if let Some(arr) = spec.as_array_mut() {
+        if !crate::commands::discover_skills().is_empty() {
+            arr.push(tool(
+                "skill",
+                "Load an installed skill by name (see the Skills list in your instructions): returns \
+                 its full instructions and the paths of its files. Call it before starting a task \
+                 that matches a skill's description, then follow it.",
+                serde_json::json!({
+                    "type":"object",
+                    "properties":{"name":{"type":"string","description":"The skill's name, as listed."}},
+                    "required":["name"]
+                }),
+            ));
+        }
         for t in mcp {
             arr.push(tool(&t.full_name, &t.description, t.schema.clone()));
         }
@@ -365,13 +396,63 @@ pub fn tools_spec_subagent(mcp: &[crate::mcp::McpTool]) -> serde_json::Value {
     spec
 }
 
-/// Token usage reported by the API (the final stream chunk).
-#[derive(Default, Clone, Copy, Deserialize)]
+/// Token usage of one completion, normalized across protocols.
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub struct Usage {
-    #[serde(default)]
+    /// Every input token, cached ones included.
     pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// Input tokens served from the provider's prompt cache.
+    pub cached_tokens: u32,
+    /// Input tokens written to the cache (Anthropic's cache_creation).
+    pub cache_write_tokens: u32,
+}
+
+impl Usage {
+    pub fn spent(&self) -> crate::money::Spent {
+        crate::money::Spent {
+            prompt: self.prompt_tokens as u64,
+            completion: self.completion_tokens as u64,
+            cached: self.cached_tokens as u64,
+            written: self.cache_write_tokens as u64,
+        }
+    }
+}
+
+/// chat/completions usage: OpenAI reports cache hits in
+/// `prompt_tokens_details.cached_tokens`, DeepSeek in `prompt_cache_hit_tokens`.
+#[derive(Default, Deserialize)]
+struct ChatUsage {
     #[serde(default)]
-    pub total_tokens: u32,
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: Option<u32>,
+    #[serde(default)]
+    total_tokens: u32,
+    #[serde(default)]
+    prompt_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u32>,
+}
+
+impl ChatUsage {
+    fn normalize(&self) -> Usage {
+        let cached = self.prompt_cache_hit_tokens.unwrap_or_else(|| {
+            self.prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32
+        });
+        Usage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self
+                .completion_tokens
+                .unwrap_or(self.total_tokens.saturating_sub(self.prompt_tokens)),
+            cached_tokens: cached.min(self.prompt_tokens),
+            cache_write_tokens: 0,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -379,7 +460,7 @@ struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
     #[serde(default)]
-    usage: Option<Usage>,
+    usage: Option<ChatUsage>,
 }
 #[derive(Deserialize)]
 struct StreamChoice {
@@ -405,10 +486,138 @@ struct DeltaFn {
     arguments: Option<String>,
 }
 
-/// One streaming completion. Calls `on_content`/`on_reasoning` as deltas arrive.
-/// Returns (assistant_text, tool_calls). `with_tools = false` omits the tool
-/// schema (used for internal calls like context compaction).
+/// What one streamed completion produced: the reply text, its tool calls,
+/// token usage, and the turn in its provider's native form (see
+/// `Message::native`).
+pub type Streamed = (String, Vec<AccumCall>, Option<Usage>, Option<serde_json::Value>);
+
+/// Sampling-loop detection over the last stretch of streamed text (reasoning
+/// and reply), checked every 512 bytes.
+#[derive(Default)]
+pub(crate) struct LoopGuard {
+    recent: Vec<u8>,
+    unchecked: usize,
+}
+
+impl LoopGuard {
+    /// Add streamed text; Err once the stream has turned into a loop.
+    pub(crate) fn feed(&mut self, t: &str) -> Result<()> {
+        self.recent.extend_from_slice(t.as_bytes());
+        if self.recent.len() > 16_384 {
+            self.recent.drain(..self.recent.len() - 12_288);
+        }
+        self.unchecked += t.len();
+        if self.unchecked >= 512 {
+            self.unchecked = 0;
+            if is_looping(&self.recent) {
+                return Err(OutputLoop.into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `req` with the provider's credentials: Anthropic takes `x-api-key` plus a
+/// version header, everyone else a Bearer token.
+pub(crate) fn authed(req: ureq::Request, cfg: &Config) -> ureq::Request {
+    match cfg.api_kind() {
+        ApiKind::Messages => req.set("x-api-key", cfg.bearer()).set("anthropic-version", "2023-06-01"),
+        _ => req.set("Authorization", &format!("Bearer {}", cfg.bearer())),
+    }
+}
+
+/// POST a JSON body; an error status becomes a typed `HttpStatus` (so the
+/// retry loop can tell a rate limit from a bad request).
+pub(crate) fn post_json(http: &ureq::Agent, cfg: &Config, url: &str, body: &serde_json::Value) -> Result<ureq::Response> {
+    match authed(http.post(url), cfg).set("Content-Type", "application/json").send_string(&body.to_string()) {
+        Ok(r) => Ok(r),
+        Err(ureq::Error::Status(code, r)) => {
+            let retry_after = r.header("retry-after").and_then(|v| v.trim().parse::<u64>().ok());
+            let detail = truncate(&r.into_string().unwrap_or_default(), 800);
+            Err(HttpStatus { code, retry_after, detail }.into())
+        }
+        Err(e) => Err(anyhow!("network error: {e}")),
+    }
+}
+
+/// Feed each SSE `data:` payload of `resp` to `f` until it returns true, the
+/// stream ends, or the turn is cancelled.
+pub(crate) fn for_each_sse(
+    resp: ureq::Response,
+    cancel: &AtomicBool,
+    mut f: impl FnMut(&str) -> Result<bool>,
+) -> Result<()> {
+    for line in BufReader::new(resp.into_reader()).lines() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let line = line.map_err(|e| anyhow!("stream read error: {e}"))?;
+        let Some(data) = line.trim().strip_prefix("data:") else { continue };
+        if f(data.trim())? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// A stable prompt-cache key for this conversation (OpenAI routes requests
+/// sharing a key to the same cache): a hash of the system prompt.
+pub(crate) fn cache_key(messages: &[Message]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in messages.first().map(|m| m.content.as_bytes()).unwrap_or_default() {
+        h = (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("picoder-{h:016x}")
+}
+
+/// chat/completions request fields that carry the `reasoning` setting, per
+/// provider — only fields that provider accepts (OpenAI 400s on unknown
+/// ones). "auto" sends nothing, leaving the model's own default.
+pub(crate) fn reasoning_fields(cfg: &Config) -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    let level = cfg.reasoning.as_str();
+    if level == "auto" {
+        return Vec::new();
+    }
+    let off = level == "off";
+    let effort = if off { "none" } else { level };
+    match cfg.provider.as_str() {
+        // DeepSeek and Zhipu switch thinking on or off; there's no effort dial.
+        "deepseek" | "zai" => vec![("thinking", json!({"type": if off { "disabled" } else { "enabled" }}))],
+        "openai" | "google" | "groq" => vec![("reasoning_effort", json!(effort))],
+        "openrouter" => vec![("reasoning", if off { json!({"enabled": false}) } else { json!({"effort": level}) })],
+        // Its own Messages API carries effort; the compat endpoint isn't mapped.
+        "anthropic" => Vec::new(),
+        // Self-hosted servers (Splash, vLLM, SGLang, llama.cpp): the chat
+        // template's thinking switch, plus effort for those that read it.
+        _ => vec![
+            ("chat_template_kwargs", json!({"enable_thinking": !off})),
+            ("reasoning_effort", json!(effort)),
+        ],
+    }
+}
+
+/// One streaming completion over the configured protocol. Calls
+/// `on_content`/`on_reasoning` as deltas arrive. `tools` None omits the tool
+/// schema (internal calls like context compaction).
 fn chat_stream(
+    http: &ureq::Agent,
+    cfg: &Config,
+    messages: &[Message],
+    tools: Option<&serde_json::Value>,
+    cancel: &AtomicBool,
+    on_content: impl FnMut(&str),
+    on_reasoning: impl FnMut(&str),
+) -> Result<Streamed> {
+    match cfg.api_kind() {
+        ApiKind::Chat => chat_completions(http, cfg, messages, tools, cancel, on_content, on_reasoning),
+        ApiKind::Messages => crate::native::anthropic_stream(http, cfg, messages, tools, cancel, on_content, on_reasoning),
+        ApiKind::Responses => crate::native::responses_stream(http, cfg, messages, tools, cancel, on_content, on_reasoning),
+    }
+}
+
+/// OpenAI chat/completions, streamed.
+fn chat_completions(
     http: &ureq::Agent,
     cfg: &Config,
     messages: &[Message],
@@ -416,7 +625,7 @@ fn chat_stream(
     cancel: &AtomicBool,
     mut on_content: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
-) -> Result<(String, Vec<AccumCall>, Option<Usage>)> {
+) -> Result<Streamed> {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({
         "model": cfg.model,
@@ -431,115 +640,58 @@ fn chat_stream(
         body["tools"] = t.clone();
         body["tool_choice"] = serde_json::json!("auto");
     }
-    // DeepSeek-style thinking switch; other providers may not know the field
-    // (the /config panel notes it), so it is only sent when enabled.
-    if cfg.thinking {
-        body["thinking"] = serde_json::json!({"type": "enabled"});
+    for (k, v) in reasoning_fields(cfg) {
+        body[k] = v;
     }
-    let resp = http
-        .post(&url)
-        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string());
-
-    let resp = match resp {
-        Ok(r) => r,
-        Err(ureq::Error::Status(code, r)) => {
-            let retry_after = r.header("retry-after").and_then(|v| v.trim().parse::<u64>().ok());
-            let detail = truncate(&r.into_string().unwrap_or_default(), 800);
-            return Err(HttpStatus { code, retry_after, detail }.into());
-        }
-        Err(e) => return Err(anyhow!("network error: {e}")),
-    };
+    if cfg.provider == "openai" {
+        body["prompt_cache_key"] = serde_json::json!(cache_key(messages));
+    }
+    let resp = post_json(http, cfg, &url, &body)?;
 
     let mut content = String::new();
     let mut calls: Vec<AccumCall> = Vec::new();
     let mut usage: Option<Usage> = None;
-    // The last stretch of streamed text (reasoning and reply), checked every
-    // 512 bytes for a sampling loop.
-    let mut recent: Vec<u8> = Vec::new();
-    let mut unchecked = 0usize;
-    let mut looping = |t: &str| {
-        recent.extend_from_slice(t.as_bytes());
-        if recent.len() > 16_384 {
-            recent.drain(..recent.len() - 12_288);
-        }
-        unchecked += t.len();
-        if unchecked < 512 {
-            return false;
-        }
-        unchecked = 0;
-        is_looping(&recent)
-    };
-    let reader = BufReader::new(resp.into_reader());
-    for line in reader.lines() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => return Err(anyhow!("stream read error: {e}")),
-        };
-        let line = line.trim();
-        if line.is_empty() || !line.starts_with("data:") {
-            continue;
-        }
-        let data = line[5..].trim();
+    let mut guard = LoopGuard::default();
+    for_each_sse(resp, cancel, |data| {
         if data == "[DONE]" {
-            break;
+            return Ok(true);
         }
-        let chunk: StreamChunk = match serde_json::from_str(data) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) else { return Ok(false) };
         if let Some(u) = chunk.usage {
-            usage = Some(u);
+            usage = Some(u.normalize());
         }
-        let Some(choice) = chunk.choices.into_iter().next() else { continue };
+        let Some(choice) = chunk.choices.into_iter().next() else { return Ok(false) };
         let delta = choice.delta;
-        if let Some(r) = delta.reasoning_content {
-            if !r.is_empty() {
-                on_reasoning(&r);
-                if looping(&r) {
-                    return Err(OutputLoop.into());
+        if let Some(r) = delta.reasoning_content.filter(|r| !r.is_empty()) {
+            on_reasoning(&r);
+            guard.feed(&r)?;
+        }
+        if let Some(c) = delta.content.filter(|c| !c.is_empty()) {
+            on_content(&c);
+            content.push_str(&c);
+            guard.feed(&c)?;
+        }
+        for tc in delta.tool_calls.unwrap_or_default() {
+            if calls.len() <= tc.index {
+                calls.resize(tc.index + 1, AccumCall::default());
+            }
+            let slot = &mut calls[tc.index];
+            if let Some(id) = tc.id.filter(|id| !id.is_empty()) {
+                slot.id = id;
+            }
+            if let Some(f) = tc.function {
+                if let Some(n) = f.name.filter(|n| !n.is_empty()) {
+                    slot.name = n;
+                }
+                if let Some(a) = f.arguments {
+                    slot.args.push_str(&a);
                 }
             }
         }
-        if let Some(c) = delta.content {
-            if !c.is_empty() {
-                on_content(&c);
-                content.push_str(&c);
-                if looping(&c) {
-                    return Err(OutputLoop.into());
-                }
-            }
-        }
-        if let Some(tcs) = delta.tool_calls {
-            for tc in tcs {
-                if calls.len() <= tc.index {
-                    calls.resize(tc.index + 1, AccumCall::default());
-                }
-                let slot = &mut calls[tc.index];
-                if let Some(id) = tc.id {
-                    if !id.is_empty() {
-                        slot.id = id;
-                    }
-                }
-                if let Some(f) = tc.function {
-                    if let Some(n) = f.name {
-                        if !n.is_empty() {
-                            slot.name = n;
-                        }
-                    }
-                    if let Some(a) = f.arguments {
-                        slot.args.push_str(&a);
-                    }
-                }
-            }
-        }
-    }
+        Ok(false)
+    })?;
     calls.retain(|c| !c.name.is_empty());
-    Ok((content, calls, usage))
+    Ok((content, calls, usage, None))
 }
 
 /// chat_stream with retry: a dropped SSE chunk can corrupt streamed tool-call
@@ -555,9 +707,9 @@ pub fn chat_resilient(
     mut on_content: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
     mut on_retry: impl FnMut(&str),
-) -> Result<(String, Vec<AccumCall>, Option<Usage>)> {
+) -> Result<Streamed> {
     let tries = 4;
-    let mut last: Option<(String, Vec<AccumCall>, Option<Usage>)> = None;
+    let mut last: Option<Streamed> = None;
     for attempt in 1..=tries {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -577,12 +729,12 @@ pub fn chat_resilient(
                 }
                 continue;
             }
-            Ok((content, calls, usage)) => {
+            Ok((content, calls, usage, native)) => {
                 let ok = calls.iter().all(|c| c.args_ok());
                 if calls.is_empty() || ok {
-                    return Ok((content, calls, usage));
+                    return Ok((content, calls, usage, native));
                 }
-                last = Some((content, calls, usage));
+                last = Some((content, calls, usage, native));
                 if attempt < tries {
                     on_retry(&format!("malformed tool args — retry {attempt}/{}", tries - 1));
                 }
@@ -607,7 +759,7 @@ pub fn chat_plain(
             return Err(anyhow!("cancelled"));
         }
         match chat_stream(http, cfg, messages, None, cancel, |_| {}, |_| {}) {
-            Ok((content, _, usage)) => {
+            Ok((content, _, usage, _)) => {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(anyhow!("cancelled"));
                 }
@@ -672,17 +824,23 @@ fn pick_balance(v: &serde_json::Value, prefer: &Currency) -> Option<Balance> {
         .map(|(_, bal)| bal)
 }
 
+/// The provider's model list URL. Anthropic pages it (20 by default).
+fn models_url(cfg: &Config) -> String {
+    let base = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    if cfg.api_kind() == ApiKind::Messages {
+        base + "?limit=1000"
+    } else {
+        base
+    }
+}
+
 /// Best-effort context window (tokens) for `model` from the provider's
 /// `/models` metadata. OpenAI-compatible endpoints usually omit it (DeepSeek
 /// returns only id/object/owned_by), but OpenRouter and some others advertise
 /// `context_length`. Returns None when the provider doesn't expose it, so the
 /// caller can fall back to the built-in table.
 pub fn context_window(http: &ureq::Agent, cfg: &Config, model: &str) -> Option<u32> {
-    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
-    let text = http
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(10))
-        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
+    let text = authed(http.get(&models_url(cfg)).timeout(std::time::Duration::from_secs(10)), cfg)
         .call()
         .ok()?
         .into_string()
@@ -695,7 +853,7 @@ pub fn context_window(http: &ureq::Agent, cfg: &Config, model: &str) -> Option<u
         .find(|m| m.get("id").and_then(|x| x.as_str()) == Some(model))?;
     // Field name varies across providers; accept the common spellings, plus
     // OpenRouter's nested `top_provider.context_length`.
-    let n = ["context_length", "context_window", "max_context_length", "max_context_window"]
+    let n = ["context_length", "context_window", "max_context_length", "max_context_window", "max_input_tokens"]
         .iter()
         .find_map(|k| entry.get(*k).and_then(|x| x.as_u64()))
         .or_else(|| entry.pointer("/top_provider/context_length").and_then(|x| x.as_u64()))?;
@@ -704,12 +862,7 @@ pub fn context_window(http: &ureq::Agent, cfg: &Config, model: &str) -> Option<u
 
 /// Fetch the provider's available model ids.
 pub fn list_models(http: &ureq::Agent, cfg: &Config) -> Result<Vec<String>> {
-    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
-    let resp = http
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(30))
-        .set("Authorization", &format!("Bearer {}", cfg.bearer()))
-        .call();
+    let resp = authed(http.get(&models_url(cfg)).timeout(std::time::Duration::from_secs(30)), cfg).call();
     let text = match resp {
         Ok(r) => r.into_string()?,
         Err(ureq::Error::Status(code, r)) => {
@@ -744,6 +897,48 @@ pub fn truncate(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod balance_tests {
     use super::*;
+
+    #[test]
+    fn reasoning_maps_to_fields_each_provider_accepts() {
+        let fields = |provider: &str, level: &str| {
+            let mut c = Config::default();
+            c.provider = provider.into();
+            c.reasoning = level.into();
+            serde_json::to_value(reasoning_fields(&c).into_iter().collect::<std::collections::BTreeMap<_, _>>()).unwrap()
+        };
+        use serde_json::json as j;
+        assert_eq!(fields("openai", "auto"), j!({}), "auto sends nothing anywhere");
+        assert_eq!(fields("deepseek", "high"), j!({"thinking": {"type": "enabled"}}));
+        assert_eq!(fields("zai", "off"), j!({"thinking": {"type": "disabled"}}));
+        assert_eq!(fields("openai", "low"), j!({"reasoning_effort": "low"}));
+        assert_eq!(fields("google", "off"), j!({"reasoning_effort": "none"}));
+        assert_eq!(fields("openrouter", "medium"), j!({"reasoning": {"effort": "medium"}}));
+        assert_eq!(fields("openrouter", "off"), j!({"reasoning": {"enabled": false}}));
+        assert_eq!(fields("anthropic", "high"), j!({}));
+        assert_eq!(
+            fields("splash", "off"),
+            j!({"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}),
+            "self-hosted servers get the template switch"
+        );
+    }
+
+    #[test]
+    fn chat_usage_reads_cache_hits_from_openai_and_deepseek() {
+        let u = |v: serde_json::Value| serde_json::from_value::<ChatUsage>(v).unwrap().normalize();
+        let openai = u(serde_json::json!({"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020, "prompt_tokens_details": {"cached_tokens": 768}}));
+        assert_eq!(openai, Usage { prompt_tokens: 1000, completion_tokens: 20, cached_tokens: 768, cache_write_tokens: 0 });
+        let deepseek = u(serde_json::json!({"prompt_tokens": 500, "total_tokens": 530, "prompt_cache_hit_tokens": 448, "prompt_cache_miss_tokens": 52}));
+        assert_eq!(deepseek, Usage { prompt_tokens: 500, completion_tokens: 30, cached_tokens: 448, cache_write_tokens: 0 });
+    }
+
+    #[test]
+    fn native_turns_never_reach_chat_completions() {
+        let mut m = Message::user("hi");
+        m.native = Some(serde_json::json!({"api": "messages", "parts": []}));
+        let v = &messages_payload(&[m], true)[0];
+        assert!(v.get("native").is_none(), "{v}");
+        assert_eq!(v["content"], "hi");
+    }
 
     #[test]
     fn a_paragraph_repeated_back_to_back_is_a_loop() {
